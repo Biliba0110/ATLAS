@@ -1,14 +1,34 @@
 const API_BASE = "/api";
+const OPERATOR_STORAGE_KEY = "homelab-ipam-operator";
 const DEVICE_TYPES = {
   server: "Сервер",
   container: "Контейнер",
   iot: "IoT",
 };
 
+const ACTION_LABELS = {
+  assigned: "Назначен",
+  imported: "Импорт",
+  ip_changed: "IP изменен",
+  released: "Освобожден",
+};
+
 const state = {
   subnets: [],
   groups: [],
   devices: [],
+  scanResults: [],
+  history: [],
+  meta: {
+    revision: 0,
+    lastScanAt: null,
+    scanInProgress: false,
+    scanIntervalSeconds: 90,
+  },
+};
+
+const preferences = {
+  operator: localStorage.getItem(OPERATOR_STORAGE_KEY) || "",
 };
 
 const elements = {
@@ -20,12 +40,22 @@ const elements = {
   searchInput: document.getElementById("device-search-input"),
   ipCheckForm: document.getElementById("ip-check-form"),
   ipCheckResult: document.getElementById("ip-check-result"),
+  operatorInput: document.getElementById("operator-input"),
+  scanNowButton: document.getElementById("scan-now-button"),
+  liveStatusBadge: document.getElementById("live-status-badge"),
+  scanStatusBadge: document.getElementById("scan-status-badge"),
+  scanStatusText: document.getElementById("scan-status-text"),
+  liveSummaryText: document.getElementById("live-summary-text"),
+  deviceSuggestion: document.getElementById("device-suggestion"),
+  applySuggestionButton: document.getElementById("apply-suggestion-button"),
   subnetsTableBody: document.getElementById("subnets-table-body"),
   groupsTableBody: document.getElementById("groups-table-body"),
   devicesTableBody: document.getElementById("devices-table-body"),
+  historyTableBody: document.getElementById("history-table-body"),
   subnetsCounter: document.getElementById("subnets-counter"),
   groupsCounter: document.getElementById("groups-counter"),
   devicesCounter: document.getElementById("devices-counter"),
+  historyCounter: document.getElementById("history-counter"),
   statSubnets: document.getElementById("stat-subnets"),
   statDevices: document.getElementById("stat-devices"),
   statOccupied: document.getElementById("stat-occupied"),
@@ -41,7 +71,9 @@ const elements = {
 };
 
 let activeToastTimer = null;
-let syncIntervalId = null;
+let pollIntervalId = null;
+let eventSource = null;
+let isManualScanRunning = false;
 
 initialize().catch((error) => {
   console.error(error);
@@ -50,11 +82,13 @@ initialize().catch((error) => {
 
 async function initialize() {
   bindEvents();
+  elements.operatorInput.value = preferences.operator;
   renderAll();
   await refreshState();
-  syncIntervalId = window.setInterval(() => {
+  connectLiveStream();
+  pollIntervalId = window.setInterval(() => {
     refreshState(true);
-  }, 15000);
+  }, 30000);
 }
 
 function bindEvents() {
@@ -63,6 +97,11 @@ function bindEvents() {
   elements.groupForm.addEventListener("submit", handleGroupSubmit);
   elements.searchInput.addEventListener("input", renderDevicesTable);
   elements.ipCheckForm.addEventListener("submit", handleIpCheck);
+  elements.operatorInput.addEventListener("input", handleOperatorInput);
+  elements.scanNowButton.addEventListener("click", handleScanNow);
+  elements.subnetSelect.addEventListener("change", updateSuggestedIp);
+  elements.deviceForm.elements.ip.addEventListener("input", updateSuggestedIp);
+  elements.applySuggestionButton.addEventListener("click", applySuggestedIp);
   elements.exportJsonButton.addEventListener("click", exportJson);
   elements.exportSubnetsCsvButton.addEventListener("click", exportSubnetsCsv);
   elements.exportGroupsCsvButton.addEventListener("click", exportGroupsCsv);
@@ -73,9 +112,7 @@ function bindEvents() {
   elements.subnetsTableBody.addEventListener("click", handleSubnetTableActions);
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
-  window.addEventListener("focus", () => {
-    refreshState(true);
-  });
+  window.addEventListener("focus", () => refreshState(true));
 }
 
 async function refreshState(silent = false) {
@@ -91,10 +128,34 @@ async function refreshState(silent = false) {
   }
 }
 
+function connectLiveStream() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  eventSource = new EventSource(`${API_BASE}/stream`);
+  setLiveStatus("Подключение…", "info");
+
+  eventSource.onopen = () => {
+    setLiveStatus("Live", "ok");
+  };
+
+  eventSource.onmessage = async () => {
+    await refreshState(true);
+  };
+
+  eventSource.onerror = () => {
+    setLiveStatus("Переподключение", "warn");
+  };
+}
+
 function applyState(snapshot) {
   state.subnets = snapshot.subnets;
   state.groups = snapshot.groups;
   state.devices = snapshot.devices;
+  state.scanResults = snapshot.scanResults;
+  state.history = snapshot.history;
+  state.meta = snapshot.meta;
 }
 
 async function handleSubnetSubmit(event) {
@@ -112,14 +173,13 @@ async function handleSubnetSubmit(event) {
       createdAt: new Date().toISOString(),
     });
 
-    const savedSubnet = await apiRequest("/subnets", {
+    await apiRequest("/subnets", {
       method: "POST",
       body: JSON.stringify(subnet),
     });
 
-    state.subnets.unshift(normalizeSubnet(savedSubnet));
+    await refreshState(true);
     event.currentTarget.reset();
-    renderAll();
     showToast(`Подсеть ${subnet.name} добавлена.`);
   } catch (error) {
     showToast(error.message, true);
@@ -145,14 +205,14 @@ async function handleDeviceSubmit(event) {
       state.subnets
     );
 
-    const savedDevice = await apiRequest("/devices", {
+    await apiRequest("/devices", {
       method: "POST",
       body: JSON.stringify(device),
     });
 
-    state.devices.unshift(normalizeDevice(savedDevice, state.subnets));
+    await refreshState(true);
     event.currentTarget.reset();
-    renderAll();
+    updateSuggestedIp();
     showToast(`Устройство ${device.name} добавлено.`);
   } catch (error) {
     showToast(error.message, true);
@@ -183,13 +243,80 @@ async function handleGroupSubmit(event) {
       body: JSON.stringify(group),
     });
 
-    state.groups.unshift(normalizeRangeGroup(savedGroup, state.subnets, state.groups));
+    let scanSummary = null;
+    let scanError = null;
+    try {
+      scanSummary = await apiRequest("/scan", {
+        method: "POST",
+        body: JSON.stringify({ groupId: savedGroup.id }),
+      });
+    } catch (error) {
+      scanError = error;
+      console.error(error);
+    }
+
+    await refreshState(true);
     event.currentTarget.reset();
-    renderAll();
+
+    if (scanSummary) {
+      const refreshedGroup = state.groups.find((entry) => entry.id === savedGroup.id);
+      const reachableSet = getReachableScanIps();
+      const busyCount = refreshedGroup
+        ? countBusyInGroup(refreshedGroup, reachableSet)
+        : scanSummary.reachableIps;
+      const freeCount = refreshedGroup
+        ? Math.max(refreshedGroup.rangeEndInt - refreshedGroup.rangeStartInt + 1 - busyCount, 0)
+        : "—";
+      showToast(
+        `Группа ${group.name} добавлена. Проверено ${scanSummary.scannedIps} IP, занято ${busyCount}, свободно ${freeCount}.`
+      );
+      return;
+    }
+
+    if (scanError) {
+      showToast(`Группа ${group.name} добавлена, но проверка занятости не выполнилась.`, true);
+      return;
+    }
+
     showToast(`Группа ${group.name} добавлена.`);
   } catch (error) {
     showToast(error.message, true);
   }
+}
+
+async function handleScanNow() {
+  if (isManualScanRunning) {
+    return;
+  }
+
+  isManualScanRunning = true;
+  elements.scanNowButton.disabled = true;
+  elements.scanNowButton.textContent = "Сканирование…";
+  setScanStatus("Ping: идет сканирование", "info");
+
+  try {
+    const summary = await apiRequest("/scan", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    await refreshState(true);
+    showToast(
+      `Ping завершен: подсетей ${summary.scannedSubnets}, адресов ${summary.scannedIps}, ответов ${summary.reachableIps}.`
+    );
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    isManualScanRunning = false;
+    elements.scanNowButton.disabled = false;
+    elements.scanNowButton.textContent = "Проверить ping";
+    updateAutomationWidgets();
+  }
+}
+
+function handleOperatorInput(event) {
+  preferences.operator = event.currentTarget.value.trim();
+  localStorage.setItem(OPERATOR_STORAGE_KEY, preferences.operator);
+  updateAutomationWidgets();
 }
 
 function handleIpCheck(event) {
@@ -208,16 +335,34 @@ function handleIpCheck(event) {
   const subnet = findSubnetForIp(ipInt);
   const group = subnet ? findRangeGroupForIp(ipInt, subnet.id) : null;
   const device = state.devices.find((entry) => entry.ip === normalizedIp);
+  const pingState = getPingState(normalizedIp);
 
   if (device) {
-    const parts = [`IP ${normalizedIp} уже занят устройством "${device.name}".`];
+    const parts = [`IP ${normalizedIp} уже закреплен за устройством "${device.name}".`];
     if (subnet) {
       parts.push(`Подсеть: ${subnet.name} (${subnet.cidr}).`);
     }
     if (group) {
       parts.push(`Группа: ${group.name} (${formatGroupRange(group, true)}).`);
     }
+    if (pingState?.isReachable) {
+      parts.push("Узел отвечает на ping.");
+    } else if (pingState) {
+      parts.push("На последний ping адрес не ответил.");
+    }
     renderIpCheckResult(parts.join(" "), "danger");
+    return;
+  }
+
+  if (pingState?.isReachable) {
+    const parts = [`IP ${normalizedIp} не закреплен в IPAM, но отвечает на ping.`];
+    if (subnet) {
+      parts.push(`Подсеть: ${subnet.name} (${subnet.cidr}).`);
+    }
+    if (group) {
+      parts.push(`Группа: ${group.name} (${formatGroupRange(group, true)}).`);
+    }
+    renderIpCheckResult(parts.join(" "), "warn");
     return;
   }
 
@@ -237,17 +382,109 @@ function handleIpCheck(event) {
   if (group) {
     parts.push(`Попадает в группу "${group.name}" (${formatGroupRange(group, true)}).`);
   }
-
   renderIpCheckResult(parts.join(" "), inPool ? "ok" : "warn");
+}
+
+function updateAutomationWidgets() {
+  const lastScanAt = state.meta?.lastScanAt;
+  const reachableCount = getReachableScanIps().size;
+  const operatorLabel = preferences.operator || "не задан";
+
+  if (state.meta?.scanInProgress || isManualScanRunning) {
+    setScanStatus("Ping: идет сканирование", "info");
+    elements.scanStatusText.textContent = "Сервер проверяет доступность адресов по всем пулам.";
+  } else if (lastScanAt) {
+    setScanStatus(`Ping: ${reachableCount} online`, reachableCount > 0 ? "ok" : "warn");
+    elements.scanStatusText.textContent = `Последний скан: ${formatDateTime(lastScanAt)}. Интервал фоновой проверки: ${state.meta.scanIntervalSeconds || 90} сек.`;
+  } else {
+    setScanStatus("Ping: нет данных", "warn");
+    elements.scanStatusText.textContent = "Сканирование еще не запускалось.";
+  }
+
+  elements.liveSummaryText.textContent = `Live-режим активен. Оператор: ${operatorLabel}. Изменения от других клиентов приходят автоматически.`;
+}
+
+function updateSuggestedIp() {
+  const subnetId = elements.subnetSelect.value;
+  if (!subnetId) {
+    elements.deviceSuggestion.className = "result-card result-card--muted form-grid__full";
+    elements.deviceSuggestion.textContent = "Выберите подсеть, чтобы получить подсказку свободного IP.";
+    elements.applySuggestionButton.disabled = true;
+    return;
+  }
+
+  const subnet = state.subnets.find((entry) => entry.id === subnetId);
+  if (!subnet) {
+    elements.deviceSuggestion.className = "result-card result-card--warn form-grid__full";
+    elements.deviceSuggestion.textContent = "Подсеть не найдена в текущем состоянии сервера.";
+    elements.applySuggestionButton.disabled = true;
+    return;
+  }
+
+  const suggestion = suggestFreeIp(subnet);
+  if (!suggestion) {
+    elements.deviceSuggestion.className = "result-card result-card--danger form-grid__full";
+    elements.deviceSuggestion.textContent = `В пуле ${subnet.name} (${subnet.cidr}) свободных IP не найдено.`;
+    elements.applySuggestionButton.disabled = true;
+    return;
+  }
+
+  const existingValue = elements.deviceForm.elements.ip.value.trim();
+  const isAlreadyUsingSuggestion = existingValue && normalizeIpSafe(existingValue) === suggestion.ip;
+  elements.deviceSuggestion.className = "result-card result-card--ok form-grid__full";
+  elements.deviceSuggestion.textContent =
+    `Свободный IP: ${suggestion.ip}. Занято по базе: ${suggestion.assignedCount}, отвечает на ping: ${suggestion.reachableCount}.`;
+  elements.applySuggestionButton.disabled = isAlreadyUsingSuggestion;
+  elements.applySuggestionButton.dataset.suggestedIp = suggestion.ip;
+}
+
+function applySuggestedIp() {
+  const suggestedIp = elements.applySuggestionButton.dataset.suggestedIp;
+  if (!suggestedIp) {
+    return;
+  }
+
+  elements.deviceForm.elements.ip.value = suggestedIp;
+  updateSuggestedIp();
+  showToast(`Подставлен свободный IP ${suggestedIp}.`);
+}
+
+function suggestFreeIp(subnet) {
+  const assignedIps = new Set(
+    state.devices
+      .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
+      .map((device) => device.ip)
+  );
+  const reachableIps = new Set(
+    state.scanResults
+      .filter((result) => result.subnetId === subnet.id && result.isReachable)
+      .map((result) => result.ip)
+  );
+  const busyIps = new Set([...assignedIps, ...reachableIps]);
+
+  for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
+    const ip = intToIp(ipInt);
+    if (!busyIps.has(ip)) {
+      return {
+        ip,
+        assignedCount: assignedIps.size,
+        reachableCount: reachableIps.size,
+      };
+    }
+  }
+
+  return null;
 }
 
 function exportJson() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: "0.3",
+    version: "0.2",
     subnets: state.subnets,
     groups: state.groups,
     devices: state.devices,
+    scanResults: state.scanResults,
+    history: state.history,
   };
 
   downloadFile(
@@ -303,6 +540,7 @@ function exportDevicesCsv() {
   const rows = state.devices.map((device) => {
     const subnet = resolveDeviceSubnet(device);
     const group = resolveDeviceGroup(device, subnet);
+    const pingState = getPingState(device.ip);
     return {
       id: device.id,
       name: device.name,
@@ -314,6 +552,7 @@ function exportDevicesCsv() {
       subnet_cidr: subnet?.cidr || "",
       group_id: group?.id || "",
       group_name: group?.name || "",
+      ping_reachable: pingState ? String(pingState.isReachable) : "",
       note: device.note,
     };
   });
@@ -350,7 +589,7 @@ async function handleImportFile(event) {
       body: JSON.stringify(state),
     });
 
-    renderAll();
+    await refreshState(true);
     showToast(`Файл ${file.name} импортирован.`);
   } catch (error) {
     applyState(snapshotBeforeImport);
@@ -373,6 +612,8 @@ function importJson(text, replace, targetState) {
   targetState.subnets = mergeById(targetState.subnets, normalized.subnets);
   targetState.groups = mergeById(targetState.groups, normalized.groups);
   targetState.devices = mergeById(targetState.devices, normalized.devices);
+  targetState.scanResults = mergeByKey(targetState.scanResults, normalized.scanResults, (item) => item.ip);
+  targetState.history = mergeByKey(targetState.history, normalized.history, (item) => String(item.id));
 }
 
 function importCsv(text, replace, targetState) {
@@ -398,6 +639,8 @@ function importCsv(text, replace, targetState) {
     targetState.subnets = [];
     targetState.groups = [];
     targetState.devices = looksLikeDeviceCsv ? targetState.devices : [];
+    targetState.scanResults = [];
+    targetState.history = [];
   }
 
   if (looksLikeSubnetCsv) {
@@ -468,7 +711,7 @@ function importCsv(text, replace, targetState) {
 }
 
 async function clearAllData() {
-  const confirmed = window.confirm("Удалить все подсети, группы диапазонов и устройства из базы?");
+  const confirmed = window.confirm("Удалить все подсети, группы диапазонов, историю и устройства из базы?");
   if (!confirmed) {
     return;
   }
@@ -477,7 +720,16 @@ async function clearAllData() {
     await apiRequest("/state", {
       method: "DELETE",
     });
-    applyState({ subnets: [], groups: [], devices: [] });
+    applyState(
+      normalizeState({
+        subnets: [],
+        groups: [],
+        devices: [],
+        scanResults: [],
+        history: [],
+        meta: {},
+      })
+    );
     renderAll();
     showToast("База данных очищена.");
   } catch (error) {
@@ -511,12 +763,7 @@ async function handleSubnetTableActions(event) {
     await apiRequest(`/subnets/${encodeURIComponent(subnetId)}`, {
       method: "DELETE",
     });
-    state.subnets = state.subnets.filter((entry) => entry.id !== subnetId);
-    state.groups = state.groups.filter((entry) => entry.subnetId !== subnetId);
-    state.devices = state.devices.map((entry) =>
-      entry.subnetId === subnetId ? { ...entry, subnetId: "" } : entry
-    );
-    renderAll();
+    await refreshState(true);
     showToast(`Подсеть ${subnet.name} удалена.`);
   } catch (error) {
     showToast(error.message, true);
@@ -544,8 +791,7 @@ async function handleGroupTableActions(event) {
     await apiRequest(`/groups/${encodeURIComponent(groupId)}`, {
       method: "DELETE",
     });
-    state.groups = state.groups.filter((entry) => entry.id !== groupId);
-    renderAll();
+    await refreshState(true);
     showToast(`Группа ${group.name} удалена.`);
   } catch (error) {
     showToast(error.message, true);
@@ -573,8 +819,7 @@ async function handleDeviceTableActions(event) {
     await apiRequest(`/devices/${encodeURIComponent(deviceId)}`, {
       method: "DELETE",
     });
-    state.devices = state.devices.filter((entry) => entry.id !== deviceId);
-    renderAll();
+    await refreshState(true);
     showToast(`Устройство ${device.name} удалено.`);
   } catch (error) {
     showToast(error.message, true);
@@ -586,7 +831,10 @@ function renderAll() {
   renderSubnetsTable();
   renderGroupsTable();
   renderDevicesTable();
+  renderHistoryTable();
   renderStats();
+  updateAutomationWidgets();
+  updateSuggestedIp();
 }
 
 function renderSubnetOptions() {
@@ -621,12 +869,15 @@ function renderSubnetsTable() {
     return;
   }
 
+  const reachableScanIps = getReachableScanIps();
   const rows = state.subnets
     .slice()
-    .sort((left, right) => ipToInt(left.network) - ipToInt(right.network))
+    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
     .map((subnet) => {
-      const usedCount = getDevicesInSubnet(subnet).length;
-      const freeCount = Math.max(subnet.poolSize - usedCount, 0);
+      const assignedCount = getDevicesInSubnet(subnet).length;
+      const reachableCount = countReachableInSubnet(subnet, reachableScanIps);
+      const busyCount = countBusyInSubnet(subnet, reachableScanIps);
+      const freeCount = Math.max(subnet.poolSize - busyCount, 0);
       const groups = getGroupsInSubnet(subnet.id);
       const groupSummary = groups.length === 0
         ? "—"
@@ -641,7 +892,8 @@ function renderSubnetsTable() {
           <td class="mono">${escapeHtml(subnet.cidr)}</td>
           <td class="mono">${escapeHtml(subnet.rangeStart)} - ${escapeHtml(subnet.rangeEnd)}</td>
           <td>
-            <span class="pill">${usedCount} занято</span>
+            <span class="pill">${assignedCount} в базе</span>
+            <span class="pill">${reachableCount} ping</span>
             <span class="pill">${freeCount} свободно</span>
           </td>
           <td><div class="secondary-line">${escapeHtml(groupSummary)}</div></td>
@@ -668,6 +920,7 @@ function renderGroupsTable() {
     return;
   }
 
+  const reachableSet = getReachableScanIps();
   const rows = state.groups
     .slice()
     .sort((left, right) => {
@@ -679,16 +932,20 @@ function renderGroupsTable() {
     .map((group) => {
       const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
       const deviceCount = getDevicesInGroup(group).length;
+      const pingCount = countReachableInGroup(group, reachableSet);
+      const busyCount = countBusyInGroup(group, reachableSet);
+      const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
+      const freeCount = Math.max(totalCount - busyCount, 0);
       return `
         <tr>
-          <td>
-            <strong>${escapeHtml(group.name)}</strong>
-          </td>
-          <td>
-            ${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : "—"}
-          </td>
+          <td><strong>${escapeHtml(group.name)}</strong></td>
+          <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : "—"}</td>
           <td class="mono">${escapeHtml(formatGroupRange(group, true))}</td>
-          <td><span class="pill">${deviceCount} устройств</span></td>
+          <td>
+            <span class="pill">${deviceCount} в базе</span>
+            <span class="pill">${pingCount} ping</span>
+            <span class="pill">${freeCount} свободно</span>
+          </td>
           <td>${escapeHtml(group.note || "—")}</td>
           <td>
             <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}">Удалить</button>
@@ -711,7 +968,7 @@ function renderDevicesTable() {
       : "Устройства еще не добавлены.";
     elements.devicesTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="8">${escapeHtml(message)}</td>
+        <td colspan="9">${escapeHtml(message)}</td>
       </tr>
     `;
     elements.devicesCounter.textContent = searchTerm
@@ -726,6 +983,7 @@ function renderDevicesTable() {
     .map((device) => {
       const subnet = resolveDeviceSubnet(device);
       const group = resolveDeviceGroup(device, subnet);
+      const pingBadge = renderPingBadge(device.ip);
       const status = evaluateDeviceStatus(device, subnet);
       return `
         <tr>
@@ -738,6 +996,7 @@ function renderDevicesTable() {
           <td>${escapeHtml(DEVICE_TYPES[device.type] || device.type)}</td>
           <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : "—"}</td>
           <td>${group ? `${escapeHtml(group.name)}<br><span class="mono">${escapeHtml(formatGroupRange(group, true))}</span>` : "—"}</td>
+          <td>${pingBadge}</td>
           <td><span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span></td>
           <td>
             <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}">Удалить</button>
@@ -752,22 +1011,81 @@ function renderDevicesTable() {
     : `${filteredDevices.length} записей`;
 }
 
+function renderHistoryTable() {
+  if (state.history.length === 0) {
+    elements.historyTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="6">История изменений пока пуста.</td>
+      </tr>
+    `;
+    elements.historyCounter.textContent = "0 событий";
+    return;
+  }
+
+  const rows = state.history.map((entry) => {
+    const ipLabel = entry.previousIp
+      ? `${escapeHtml(entry.previousIp)} → ${escapeHtml(entry.ip)}`
+      : escapeHtml(entry.ip);
+    return `
+      <tr>
+        <td class="mono">${escapeHtml(formatDateTime(entry.changedAt))}</td>
+        <td>${escapeHtml(entry.actor || "system")}</td>
+        <td><span class="status-badge status-badge--info">${escapeHtml(ACTION_LABELS[entry.action] || entry.action)}</span></td>
+        <td>${escapeHtml(entry.deviceName)}</td>
+        <td class="mono">${ipLabel}</td>
+        <td>${escapeHtml(entry.note || "—")}</td>
+      </tr>
+    `;
+  });
+
+  elements.historyTableBody.innerHTML = rows.join("");
+  elements.historyCounter.textContent = `${state.history.length} событий`;
+}
+
 function renderStats() {
-  const usedIpCount = new Set(state.devices.map((device) => device.ip)).size;
+  const busyIps = getBusyIpsSet();
   const freeInPools = state.subnets.reduce((total, subnet) => {
-    const usedInSubnet = getDevicesInSubnet(subnet).length;
-    return total + Math.max(subnet.poolSize - usedInSubnet, 0);
+    let busyCount = 0;
+    for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
+      if (busyIps.has(intToIp(ipInt))) {
+        busyCount += 1;
+      }
+    }
+    return total + Math.max(subnet.poolSize - busyCount, 0);
   }, 0);
 
   elements.statSubnets.textContent = String(state.subnets.length);
   elements.statDevices.textContent = String(state.devices.length);
-  elements.statOccupied.textContent = String(usedIpCount);
+  elements.statOccupied.textContent = String(busyIps.size);
   elements.statAvailable.textContent = String(freeInPools);
 }
 
 function renderIpCheckResult(message, tone) {
   elements.ipCheckResult.className = `result-card result-card--${tone}`;
   elements.ipCheckResult.textContent = message;
+}
+
+function setLiveStatus(label, variant) {
+  elements.liveStatusBadge.className = `status-badge status-badge--${variant}`;
+  elements.liveStatusBadge.textContent = label;
+}
+
+function setScanStatus(label, variant) {
+  elements.scanStatusBadge.className = `status-badge status-badge--${variant}`;
+  elements.scanStatusBadge.textContent = label;
+}
+
+function renderPingBadge(ip) {
+  const pingState = getPingState(ip);
+  if (!pingState) {
+    return '<span class="status-badge status-badge--warn">Нет данных</span>';
+  }
+
+  if (pingState.isReachable) {
+    return '<span class="status-badge status-badge--ok">Online</span>';
+  }
+
+  return '<span class="status-badge status-badge--warn">Offline</span>';
 }
 
 function normalizeState(rawState, baseGroups = []) {
@@ -777,7 +1095,20 @@ function normalizeState(rawState, baseGroups = []) {
   const groups = normalizeGroupsList(rawGroups, subnets, baseGroups);
   const rawDevices = Array.isArray(rawState?.devices) ? rawState.devices : [];
   const devices = rawDevices.map((entry) => normalizeDevice(entry, subnets));
-  return { subnets, groups, devices };
+  const scanResults = Array.isArray(rawState?.scanResults)
+    ? rawState.scanResults.map(normalizeScanResult)
+    : [];
+  const history = Array.isArray(rawState?.history)
+    ? rawState.history.map(normalizeHistoryItem)
+    : [];
+  const meta = {
+    revision: Number(rawState?.meta?.revision || 0),
+    lastScanAt: rawState?.meta?.lastScanAt || null,
+    scanInProgress: Boolean(rawState?.meta?.scanInProgress),
+    scanIntervalSeconds: Number(rawState?.meta?.scanIntervalSeconds || 90),
+  };
+
+  return { subnets, groups, devices, scanResults, history, meta };
 }
 
 function normalizeGroupsList(rawGroups, subnets, baseGroups = []) {
@@ -790,10 +1121,37 @@ function normalizeGroupsList(rawGroups, subnets, baseGroups = []) {
   return normalizedGroups;
 }
 
+function normalizeScanResult(entry) {
+  return {
+    ip: normalizeIp(String(entry?.ip || "").trim()),
+    subnetId: String(entry?.subnetId || "").trim(),
+    isReachable: Boolean(entry?.isReachable),
+    checkedAt: entry?.checkedAt || null,
+    source: String(entry?.source || "unknown"),
+  };
+}
+
+function normalizeHistoryItem(entry) {
+  return {
+    id: entry?.id ?? createId(),
+    deviceId: String(entry?.deviceId || "").trim(),
+    deviceName: String(entry?.deviceName || "").trim(),
+    ip: normalizeIp(String(entry?.ip || "").trim()),
+    previousIp: entry?.previousIp ? normalizeIp(String(entry.previousIp).trim()) : "",
+    action: String(entry?.action || "assigned").trim(),
+    actor: String(entry?.actor || "system").trim(),
+    changedAt: entry?.changedAt || new Date().toISOString(),
+    note: String(entry?.note || "").trim(),
+  };
+}
+
 function applyStateToTarget(targetState, snapshot) {
   targetState.subnets = snapshot.subnets;
   targetState.groups = snapshot.groups;
   targetState.devices = snapshot.devices;
+  targetState.scanResults = snapshot.scanResults;
+  targetState.history = snapshot.history;
+  targetState.meta = snapshot.meta;
 }
 
 function cloneState(snapshot) {
@@ -801,6 +1159,9 @@ function cloneState(snapshot) {
     subnets: snapshot.subnets.map((entry) => ({ ...entry })),
     groups: snapshot.groups.map((entry) => ({ ...entry })),
     devices: snapshot.devices.map((entry) => ({ ...entry })),
+    scanResults: snapshot.scanResults.map((entry) => ({ ...entry })),
+    history: snapshot.history.map((entry) => ({ ...entry })),
+    meta: { ...snapshot.meta },
   };
 }
 
@@ -1030,6 +1391,75 @@ function getDevicesInGroup(group) {
   });
 }
 
+function countReachableInGroup(group, reachableSet = getReachableScanIps()) {
+  let count = 0;
+  for (let ipInt = group.rangeStartInt; ipInt <= group.rangeEndInt; ipInt += 1) {
+    if (reachableSet.has(intToIp(ipInt))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function countBusyInGroup(group, reachableSet = getReachableScanIps()) {
+  const busySet = new Set(getDevicesInGroup(group).map((device) => device.ip));
+  for (let ipInt = group.rangeStartInt; ipInt <= group.rangeEndInt; ipInt += 1) {
+    const ip = intToIp(ipInt);
+    if (reachableSet.has(ip)) {
+      busySet.add(ip);
+    }
+  }
+  return busySet.size;
+}
+
+function getReachableScanIps() {
+  return new Set(
+    state.scanResults
+      .filter((entry) => entry.isReachable)
+      .map((entry) => entry.ip)
+  );
+}
+
+function getBusyIpsSet() {
+  return new Set([
+    ...state.devices.map((device) => device.ip),
+    ...getReachableScanIps(),
+  ]);
+}
+
+function countReachableInSubnet(subnet, reachableSet = getReachableScanIps()) {
+  let count = 0;
+  for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
+    if (reachableSet.has(intToIp(ipInt))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function countBusyInSubnet(subnet, reachableSet = getReachableScanIps()) {
+  const busySet = new Set(
+    state.devices
+      .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
+      .map((device) => device.ip)
+  );
+  for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
+    const ip = intToIp(ipInt);
+    if (reachableSet.has(ip)) {
+      busySet.add(ip);
+    }
+  }
+  return busySet.size;
+}
+
+function getPingState(ip) {
+  const normalizedIp = normalizeIpSafe(ip);
+  if (!normalizedIp) {
+    return null;
+  }
+  return state.scanResults.find((entry) => entry.ip === normalizedIp) || null;
+}
+
 function isIpInsidePool(ipInt, subnet) {
   return ipInt >= subnet.rangeStartInt && ipInt <= subnet.rangeEndInt;
 }
@@ -1061,12 +1491,14 @@ function findSubnetForIp(ipInt, subnets = state.subnets) {
 }
 
 function findRangeGroupForIp(ipInt, subnetId = "") {
-  return state.groups.find((group) => {
-    if (subnetId && group.subnetId !== subnetId) {
-      return false;
-    }
-    return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
-  }) || null;
+  return (
+    state.groups.find((group) => {
+      if (subnetId && group.subnetId !== subnetId) {
+        return false;
+      }
+      return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
+    }) || null
+  );
 }
 
 function evaluateDeviceStatus(device, subnet) {
@@ -1093,6 +1525,7 @@ function matchesSearch(device, searchTerm) {
 
   const subnet = resolveDeviceSubnet(device);
   const group = resolveDeviceGroup(device, subnet);
+  const pingState = getPingState(device.ip);
   const haystack = [
     device.name,
     device.ip,
@@ -1104,6 +1537,7 @@ function matchesSearch(device, searchTerm) {
     subnet?.cidr || "",
     group?.name || "",
     group ? formatGroupRange(group, true) : "",
+    pingState?.isReachable ? "online reachable ping" : "offline no-ping",
   ]
     .join(" ")
     .toLowerCase();
@@ -1125,6 +1559,22 @@ function formatGroupRange(group, compact = false) {
   }
 
   return `${group.rangeStart} - ${group.rangeEnd}`;
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "—";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "short",
+    timeStyle: "medium",
+  }).format(date);
 }
 
 function normalizeSearch(value) {
@@ -1149,6 +1599,14 @@ function normalizeIp(value) {
     .split(".")
     .map((segment) => String(Number.parseInt(segment, 10)))
     .join(".");
+}
+
+function normalizeIpSafe(value) {
+  try {
+    return normalizeIp(value);
+  } catch {
+    return "";
+  }
 }
 
 function assertValidIp(value, message) {
@@ -1187,8 +1645,12 @@ function createId() {
 }
 
 function mergeById(existingItems, importedItems) {
-  const merged = new Map(existingItems.map((item) => [item.id, item]));
-  importedItems.forEach((item) => merged.set(item.id, item));
+  return mergeByKey(existingItems, importedItems, (item) => String(item.id));
+}
+
+function mergeByKey(existingItems, importedItems, keyFn) {
+  const merged = new Map(existingItems.map((item) => [keyFn(item), item]));
+  importedItems.forEach((item) => merged.set(keyFn(item), item));
   return [...merged.values()];
 }
 
@@ -1295,12 +1757,19 @@ function timestampForFile() {
 }
 
 async function apiRequest(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (!headers.has("Content-Type") && options.body) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const actor = preferences.operator.trim();
+  if (actor) {
+    headers.set("X-IPAM-Actor", actor);
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
     ...options,
+    headers,
   });
 
   const isJson = response.headers.get("content-type")?.includes("application/json");

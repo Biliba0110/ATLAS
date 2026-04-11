@@ -12,15 +12,32 @@
   <div class="app-shell">
     <header class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">IPAM v0.1 MVP</p>
+        <p class="eyebrow">IPAM v0.2 Automation</p>
         <h1>HomeLab IPAM</h1>
         <p class="hero-text">
           Локальный реестр подсетей и устройств для домашней лаборатории:
-          ручной учет IP, быстрый поиск, проверка занятости и импорт/экспорт данных.
+          ручной учет IP, ping-проверка занятости, история изменений и live-обновления.
+        </p>
+
+        <div class="hero-toolbar">
+          <label class="inline-field">
+            <span>Оператор</span>
+            <input type="text" id="operator-input" placeholder="Например: Bohdan">
+          </label>
+
+          <div class="hero-statuses">
+            <span class="status-badge status-badge--ok" id="live-status-badge">Live</span>
+            <span class="status-badge status-badge--warn" id="scan-status-badge">Ping: нет данных</span>
+          </div>
+        </div>
+
+        <p class="helper-text helper-text--tight" id="scan-status-text">
+          Сканирование еще не запускалось.
         </p>
       </div>
 
       <div class="hero-actions">
+        <button type="button" class="action-button" id="scan-now-button">Проверить ping</button>
         <button type="button" class="action-button" id="export-json-button">Экспорт JSON</button>
         <button type="button" class="action-button" id="export-subnets-csv-button">Подсети CSV</button>
         <button type="button" class="action-button" id="export-groups-csv-button">Диапазоны CSV</button>
@@ -116,6 +133,12 @@
                 <option value="">Автоопределение по IP</option>
               </select>
             </label>
+            <div id="device-suggestion" class="result-card result-card--muted form-grid__full">
+              Выберите подсеть, чтобы получить подсказку свободного IP.
+            </div>
+            <button type="button" class="action-button action-button--ghost form-grid__full" id="apply-suggestion-button">
+              Подставить свободный IP
+            </button>
             <label class="form-grid__full">
               <span>Комментарий</span>
               <textarea name="note" rows="3" placeholder="Например: proxmox node"></textarea>
@@ -174,7 +197,7 @@
 
         <section class="panel">
           <div class="panel-heading">
-            <p class="panel-kicker">Проверка</p>
+            <p class="panel-kicker">Автоматизация</p>
             <h2>Статус IP</h2>
           </div>
 
@@ -189,6 +212,13 @@
           <div id="ip-check-result" class="result-card result-card--muted">
             Введите IP, чтобы узнать, свободен ли он и к какой подсети относится.
           </div>
+        </section>
+
+        <section class="panel panel--compact">
+          <p class="helper-title">Live-обновления</p>
+          <p class="helper-text" id="live-summary-text">
+            Интерфейс автоматически подхватывает новые записи, результаты ping и изменения базы.
+          </p>
         </section>
 
         <section class="panel panel--compact">
@@ -247,7 +277,7 @@
                   <th>Имя</th>
                   <th>Подсеть</th>
                   <th>Диапазон</th>
-                  <th>Устройств</th>
+                  <th>Использование</th>
                   <th>Комментарий</th>
                   <th></th>
                 </tr>
@@ -280,13 +310,44 @@
                   <th>Тип</th>
                   <th>Подсеть</th>
                   <th>Группа</th>
+                  <th>Ping</th>
                   <th>Статус</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody id="devices-table-body">
                 <tr class="empty-row">
-                  <td colspan="8">Устройства еще не добавлены.</td>
+                  <td colspan="9">Устройства еще не добавлены.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker">Аудит</p>
+              <h2>История IP</h2>
+            </div>
+            <span class="table-counter" id="history-counter">0 событий</span>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Когда</th>
+                  <th>Кто</th>
+                  <th>Событие</th>
+                  <th>Устройство</th>
+                  <th>IP</th>
+                  <th>Комментарий</th>
+                </tr>
+              </thead>
+              <tbody id="history-table-body">
+                <tr class="empty-row">
+                  <td colspan="6">История изменений пока пуста.</td>
                 </tr>
               </tbody>
             </table>

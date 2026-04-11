@@ -155,6 +155,34 @@ button {
   line-height: 1.65;
 }
 
+.hero-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 18px;
+  align-items: end;
+}
+
+.hero-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.inline-field {
+  display: grid;
+  gap: 8px;
+  min-width: min(100%, 260px);
+}
+
+.inline-field span {
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(198, 207, 221, 0.72);
+}
+
 .helper-text--tight {
   margin-top: 0;
   font-size: 0.88rem;
@@ -209,6 +237,14 @@ button {
 .action-button--ghost {
   color: var(--muted-strong);
   background: rgba(255, 255, 255, 0.025);
+}
+
+.action-button:disabled,
+.submit-button:disabled,
+.row-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .action-button--danger,
@@ -462,6 +498,12 @@ tbody tr:last-child td {
   background: var(--danger-soft);
   color: #ffb6b6;
   border: 1px solid rgba(255, 107, 107, 0.18);
+}
+
+.status-badge--info {
+  background: rgba(10, 132, 255, 0.14);
+  color: #9ed0ff;
+  border: 1px solid rgba(10, 132, 255, 0.18);
 }
 
 .result-card {
