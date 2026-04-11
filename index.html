@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#05070c">
+  <title>HomeLab IPAM</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">IPAM v0.1 MVP</p>
+        <h1>HomeLab IPAM</h1>
+        <p class="hero-text">
+          Локальный реестр подсетей и устройств для домашней лаборатории:
+          ручной учет IP, быстрый поиск, проверка занятости и импорт/экспорт данных.
+        </p>
+      </div>
+
+      <div class="hero-actions">
+        <button type="button" class="action-button" id="export-json-button">Экспорт JSON</button>
+        <button type="button" class="action-button" id="export-subnets-csv-button">Подсети CSV</button>
+        <button type="button" class="action-button" id="export-groups-csv-button">Диапазоны CSV</button>
+        <button type="button" class="action-button" id="export-devices-csv-button">Устройства CSV</button>
+        <button type="button" class="action-button action-button--ghost" id="import-button">Импорт</button>
+        <button type="button" class="action-button action-button--danger" id="clear-data-button">Очистить</button>
+        <input type="file" id="import-file-input" accept=".json,.csv,application/json,text/csv" hidden>
+      </div>
+    </header>
+
+    <section class="stats-grid" aria-label="Сводка">
+      <article class="stat-card">
+        <span class="stat-label">Подсети</span>
+        <strong class="stat-value" id="stat-subnets">0</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Устройства</span>
+        <strong class="stat-value" id="stat-devices">0</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Занято IP</span>
+        <strong class="stat-value" id="stat-occupied">0</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Свободно в пулах</span>
+        <strong class="stat-value" id="stat-available">0</strong>
+      </article>
+    </section>
+
+    <section class="workspace">
+      <aside class="control-column">
+        <section class="panel">
+          <div class="panel-heading">
+            <p class="panel-kicker">Подсети</p>
+            <h2>Добавить подсеть</h2>
+          </div>
+
+          <form id="subnet-form" class="form-grid">
+            <label>
+              <span>Имя</span>
+              <input type="text" name="name" placeholder="Core LAN" required>
+            </label>
+            <label>
+              <span>CIDR</span>
+              <input type="text" name="cidr" placeholder="192.168.10.0/24" required>
+            </label>
+            <label>
+              <span>Начало пула</span>
+              <input type="text" name="rangeStart" placeholder="192.168.10.20">
+            </label>
+            <label>
+              <span>Конец пула</span>
+              <input type="text" name="rangeEnd" placeholder="192.168.10.220">
+            </label>
+            <label class="form-grid__full">
+              <span>Комментарий</span>
+              <textarea name="note" rows="3" placeholder="Например: основная домашняя сеть"></textarea>
+            </label>
+            <button type="submit" class="submit-button">Сохранить подсеть</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <p class="panel-kicker">Устройства</p>
+            <h2>Добавить устройство</h2>
+          </div>
+
+          <form id="device-form" class="form-grid">
+            <label>
+              <span>Имя</span>
+              <input type="text" name="name" placeholder="nas-01" required>
+            </label>
+            <label>
+              <span>IP</span>
+              <input type="text" name="ip" placeholder="192.168.10.50" required>
+            </label>
+            <label>
+              <span>MAC</span>
+              <input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF">
+            </label>
+            <label>
+              <span>Тип</span>
+              <select name="type" required>
+                <option value="server">Сервер</option>
+                <option value="container">Контейнер</option>
+                <option value="iot">IoT</option>
+              </select>
+            </label>
+            <label class="form-grid__full">
+              <span>Подсеть</span>
+              <select name="subnetId" id="device-subnet-select">
+                <option value="">Автоопределение по IP</option>
+              </select>
+            </label>
+            <label class="form-grid__full">
+              <span>Комментарий</span>
+              <textarea name="note" rows="3" placeholder="Например: proxmox node"></textarea>
+            </label>
+            <button type="submit" class="submit-button">Сохранить устройство</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <p class="panel-kicker">Диапазоны</p>
+            <h2>Добавить группу</h2>
+          </div>
+
+          <form id="group-form" class="form-grid">
+            <label class="form-grid__full">
+              <span>Подсеть</span>
+              <select name="subnetId" id="group-subnet-select" required>
+                <option value="">Выберите подсеть</option>
+              </select>
+            </label>
+            <label>
+              <span>Имя группы</span>
+              <input type="text" name="name" placeholder="hypervisor" required>
+            </label>
+            <label>
+              <span>Комментарий</span>
+              <input type="text" name="note" placeholder="Кластер, сервис или класс устройств">
+            </label>
+            <label>
+              <span>Начало диапазона</span>
+              <input type="text" name="rangeStart" placeholder="2 или 10.10.10.2" required>
+            </label>
+            <label>
+              <span>Конец диапазона</span>
+              <input type="text" name="rangeEnd" placeholder="4 или 10.10.10.4" required>
+            </label>
+            <p class="helper-text helper-text--tight form-grid__full">
+              Для подсетей вида `/24` можно вводить только последний октет, например `2-4`.
+            </p>
+            <button type="submit" class="submit-button">Сохранить группу</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <p class="panel-kicker">Поиск</p>
+            <h2>Фильтр устройств</h2>
+          </div>
+
+          <label class="search-field">
+            <span>IP, MAC, имя или тип</span>
+            <input type="search" id="device-search-input" placeholder="Например: 192.168.10.50 или nas">
+          </label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <p class="panel-kicker">Проверка</p>
+            <h2>Статус IP</h2>
+          </div>
+
+          <form id="ip-check-form" class="stack-form">
+            <label>
+              <span>IP-адрес</span>
+              <input type="text" name="ipCheck" placeholder="192.168.10.120" required>
+            </label>
+            <button type="submit" class="submit-button">Проверить</button>
+          </form>
+
+          <div id="ip-check-result" class="result-card result-card--muted">
+            Введите IP, чтобы узнать, свободен ли он и к какой подсети относится.
+          </div>
+        </section>
+
+        <section class="panel panel--compact">
+          <p class="helper-title">Формат импорта</p>
+          <p class="helper-text">
+            JSON импортирует полный снимок данных. CSV можно импортировать отдельно для подсетей, диапазонов или устройств.
+          </p>
+        </section>
+      </aside>
+
+      <main class="data-column">
+        <section class="panel">
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker">Реестр</p>
+              <h2>Подсети</h2>
+            </div>
+            <span class="table-counter" id="subnets-counter">0 записей</span>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Имя</th>
+                  <th>CIDR</th>
+                  <th>Пул</th>
+                  <th>Использование</th>
+                  <th>Группы</th>
+                  <th>Комментарий</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="subnets-table-body">
+                <tr class="empty-row">
+                  <td colspan="7">Подсети еще не добавлены.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker">Реестр</p>
+              <h2>Группы диапазонов</h2>
+            </div>
+            <span class="table-counter" id="groups-counter">0 записей</span>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Имя</th>
+                  <th>Подсеть</th>
+                  <th>Диапазон</th>
+                  <th>Устройств</th>
+                  <th>Комментарий</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="groups-table-body">
+                <tr class="empty-row">
+                  <td colspan="6">Группы диапазонов еще не добавлены.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker">Реестр</p>
+              <h2>Устройства</h2>
+            </div>
+            <span class="table-counter" id="devices-counter">0 записей</span>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Имя</th>
+                  <th>IP</th>
+                  <th>MAC</th>
+                  <th>Тип</th>
+                  <th>Подсеть</th>
+                  <th>Группа</th>
+                  <th>Статус</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="devices-table-body">
+                <tr class="empty-row">
+                  <td colspan="8">Устройства еще не добавлены.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+</body>
+</html>
