@@ -1,0 +1,80 @@
+[
+  {
+    "id": "hypervisor",
+    "label": "Hypervisor Hosts",
+    "deviceTypes": ["server"],
+    "keywords": ["hypervisor", "proxmox", "esxi", "xcp", "host", "hosts", "compute"]
+  },
+  {
+    "id": "infra-servers",
+    "label": "Infra Servers",
+    "deviceTypes": ["server"],
+    "keywords": ["server", "servers", "infra", "infrastructure", "management", "mgmt"]
+  },
+  {
+    "id": "storage",
+    "label": "Storage",
+    "deviceTypes": ["server"],
+    "keywords": ["nas", "san", "storage", "backup", "archive"]
+  },
+  {
+    "id": "virtual-machines",
+    "label": "Virtual Machines",
+    "deviceTypes": ["container"],
+    "keywords": ["vm", "vms", "virtual", "machines", "guests"]
+  },
+  {
+    "id": "containers",
+    "label": "Containers",
+    "deviceTypes": ["container"],
+    "keywords": ["container", "containers", "docker", "lxc", "podman"]
+  },
+  {
+    "id": "kubernetes",
+    "label": "Kubernetes",
+    "deviceTypes": ["container"],
+    "keywords": ["k8s", "k3s", "kubernetes", "cluster", "pods"]
+  },
+  {
+    "id": "home-automation",
+    "label": "Home Automation",
+    "deviceTypes": ["iot"],
+    "keywords": ["home assistant", "assistant", "automation", "domotic", "smart home"]
+  },
+  {
+    "id": "lighting",
+    "label": "Lighting",
+    "deviceTypes": ["iot"],
+    "keywords": ["wled", "light", "lighting", "led", "strip"]
+  },
+  {
+    "id": "raspberry-pi",
+    "label": "Raspberry Pi",
+    "deviceTypes": ["iot", "server"],
+    "keywords": ["rpi", "raspberry", "raspberry pi", "pi"]
+  },
+  {
+    "id": "networking",
+    "label": "Networking",
+    "deviceTypes": ["iot", "server"],
+    "keywords": ["network", "networking", "router", "switch", "firewall", "ap", "wifi"]
+  },
+  {
+    "id": "iot-generic",
+    "label": "IoT Devices",
+    "deviceTypes": ["iot"],
+    "keywords": ["iot", "sensor", "smart", "device", "devices", "esp", "zigbee", "matter"]
+  },
+  {
+    "id": "surveillance",
+    "label": "Surveillance",
+    "deviceTypes": ["iot", "server"],
+    "keywords": ["camera", "cctv", "nvr", "surveillance", "security"]
+  },
+  {
+    "id": "guest",
+    "label": "Guest",
+    "deviceTypes": ["iot", "container", "server"],
+    "keywords": ["guest", "lab", "test", "staging", "sandbox"]
+  }
+]

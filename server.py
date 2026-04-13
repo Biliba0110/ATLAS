@@ -31,6 +31,7 @@ STATIC_FILES = {
     "index.html",
     "styles.css",
     "app.js",
+    "group-suggestion-templates.json",
 }
 
 SCHEMA = """

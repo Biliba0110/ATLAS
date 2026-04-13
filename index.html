@@ -133,6 +133,15 @@
                 <option value="">Автоопределение по IP</option>
               </select>
             </label>
+            <label class="form-grid__full">
+              <span>Группа диапазона</span>
+              <select name="groupId" id="device-group-select">
+                <option value="">Любой свободный IP в подсети</option>
+              </select>
+            </label>
+            <p class="helper-text helper-text--tight form-grid__full">
+              Группа подбирается автоматически по шаблонам и ключевым словам, но выбор всегда можно изменить вручную.
+            </p>
             <div id="device-suggestion" class="result-card result-card--muted form-grid__full">
               Выберите подсеть, чтобы получить подсказку свободного IP.
             </div>

@@ -1,10 +1,92 @@
 const API_BASE = "/api";
 const OPERATOR_STORAGE_KEY = "homelab-ipam-operator";
+const GROUP_SUGGESTION_TEMPLATES_PATH = "/group-suggestion-templates.json";
 const DEVICE_TYPES = {
   server: "Сервер",
   container: "Контейнер",
   iot: "IoT",
 };
+
+const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
+  {
+    id: "hypervisor",
+    label: "Hypervisor Hosts",
+    deviceTypes: ["server"],
+    keywords: ["hypervisor", "proxmox", "esxi", "xcp", "host", "hosts", "compute"],
+  },
+  {
+    id: "infra-servers",
+    label: "Infra Servers",
+    deviceTypes: ["server"],
+    keywords: ["server", "servers", "infra", "infrastructure", "management", "mgmt"],
+  },
+  {
+    id: "storage",
+    label: "Storage",
+    deviceTypes: ["server"],
+    keywords: ["nas", "san", "storage", "backup", "archive"],
+  },
+  {
+    id: "virtual-machines",
+    label: "Virtual Machines",
+    deviceTypes: ["container"],
+    keywords: ["vm", "vms", "virtual", "machines", "guests"],
+  },
+  {
+    id: "containers",
+    label: "Containers",
+    deviceTypes: ["container"],
+    keywords: ["container", "containers", "docker", "lxc", "podman"],
+  },
+  {
+    id: "kubernetes",
+    label: "Kubernetes",
+    deviceTypes: ["container"],
+    keywords: ["k8s", "k3s", "kubernetes", "cluster", "pods"],
+  },
+  {
+    id: "home-automation",
+    label: "Home Automation",
+    deviceTypes: ["iot"],
+    keywords: ["home assistant", "assistant", "automation", "domotic", "smart home"],
+  },
+  {
+    id: "lighting",
+    label: "Lighting",
+    deviceTypes: ["iot"],
+    keywords: ["wled", "light", "lighting", "led", "strip"],
+  },
+  {
+    id: "raspberry-pi",
+    label: "Raspberry Pi",
+    deviceTypes: ["iot", "server"],
+    keywords: ["rpi", "raspberry", "raspberry pi", "pi"],
+  },
+  {
+    id: "networking",
+    label: "Networking",
+    deviceTypes: ["iot", "server"],
+    keywords: ["network", "networking", "router", "switch", "firewall", "ap", "wifi"],
+  },
+  {
+    id: "iot-generic",
+    label: "IoT Devices",
+    deviceTypes: ["iot"],
+    keywords: ["iot", "sensor", "smart", "device", "devices", "esp", "zigbee", "matter"],
+  },
+  {
+    id: "surveillance",
+    label: "Surveillance",
+    deviceTypes: ["iot", "server"],
+    keywords: ["camera", "cctv", "nvr", "surveillance", "security"],
+  },
+  {
+    id: "guest",
+    label: "Guest",
+    deviceTypes: ["iot", "container", "server"],
+    keywords: ["guest", "lab", "test", "staging", "sandbox"],
+  },
+];
 
 const ACTION_LABELS = {
   assigned: "Назначен",
@@ -36,6 +118,7 @@ const elements = {
   deviceForm: document.getElementById("device-form"),
   groupForm: document.getElementById("group-form"),
   subnetSelect: document.getElementById("device-subnet-select"),
+  deviceGroupSelect: document.getElementById("device-group-select"),
   groupSubnetSelect: document.getElementById("group-subnet-select"),
   searchInput: document.getElementById("device-search-input"),
   ipCheckForm: document.getElementById("ip-check-form"),
@@ -74,6 +157,8 @@ let activeToastTimer = null;
 let pollIntervalId = null;
 let eventSource = null;
 let isManualScanRunning = false;
+let deviceGroupSelectionMode = "auto";
+let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 
 initialize().catch((error) => {
   console.error(error);
@@ -81,6 +166,7 @@ initialize().catch((error) => {
 });
 
 async function initialize() {
+  await loadGroupSuggestionTemplates();
   bindEvents();
   elements.operatorInput.value = preferences.operator;
   renderAll();
@@ -99,7 +185,9 @@ function bindEvents() {
   elements.ipCheckForm.addEventListener("submit", handleIpCheck);
   elements.operatorInput.addEventListener("input", handleOperatorInput);
   elements.scanNowButton.addEventListener("click", handleScanNow);
-  elements.subnetSelect.addEventListener("change", updateSuggestedIp);
+  elements.subnetSelect.addEventListener("change", handleDeviceSubnetChange);
+  elements.deviceGroupSelect.addEventListener("change", handleDeviceGroupChange);
+  elements.deviceForm.elements.type.addEventListener("change", handleDeviceTypeChange);
   elements.deviceForm.elements.ip.addEventListener("input", updateSuggestedIp);
   elements.applySuggestionButton.addEventListener("click", applySuggestedIp);
   elements.exportJsonButton.addEventListener("click", exportJson);
@@ -113,6 +201,60 @@ function bindEvents() {
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
   window.addEventListener("focus", () => refreshState(true));
+}
+
+async function loadGroupSuggestionTemplates() {
+  try {
+    const response = await fetch(GROUP_SUGGESTION_TEMPLATES_PATH, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const normalizedTemplates = normalizeGroupSuggestionTemplates(payload);
+    if (normalizedTemplates.length > 0) {
+      groupSuggestionTemplates = normalizedTemplates;
+      return;
+    }
+  } catch (error) {
+    console.warn("Не удалось загрузить шаблоны групп, используется встроенный набор.", error);
+  }
+
+  groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
+}
+
+function normalizeGroupSuggestionTemplates(rawTemplates) {
+  if (!Array.isArray(rawTemplates)) {
+    return [];
+  }
+
+  return rawTemplates
+    .map((template) => {
+      const id = String(template?.id || "").trim();
+      const label = String(template?.label || "").trim();
+      const deviceTypes = Array.isArray(template?.deviceTypes)
+        ? template.deviceTypes
+            .map((item) => String(item || "").trim().toLowerCase())
+            .filter((item) => DEVICE_TYPES[item])
+        : [];
+      const keywords = Array.isArray(template?.keywords)
+        ? template.keywords
+            .map((item) => normalizeSearchableText(item))
+            .filter(Boolean)
+        : [];
+
+      if (!id || !label || deviceTypes.length === 0 || keywords.length === 0) {
+        return null;
+      }
+
+      return {
+        id,
+        label,
+        deviceTypes,
+        keywords,
+      };
+    })
+    .filter(Boolean);
 }
 
 async function refreshState(silent = false) {
@@ -160,9 +302,10 @@ function applyState(snapshot) {
 
 async function handleSubnetSubmit(event) {
   event.preventDefault();
+  const form = event.currentTarget;
 
   try {
-    const formData = new FormData(event.currentTarget);
+    const formData = new FormData(form);
     const subnet = normalizeSubnet({
       id: createId(),
       name: formData.get("name"),
@@ -179,7 +322,7 @@ async function handleSubnetSubmit(event) {
     });
 
     await refreshState(true);
-    event.currentTarget.reset();
+    form.reset();
     showToast(`Подсеть ${subnet.name} добавлена.`);
   } catch (error) {
     showToast(error.message, true);
@@ -188,9 +331,11 @@ async function handleSubnetSubmit(event) {
 
 async function handleDeviceSubmit(event) {
   event.preventDefault();
+  const form = event.currentTarget;
 
   try {
-    const formData = new FormData(event.currentTarget);
+    const formData = new FormData(form);
+    const selectedGroupId = String(formData.get("groupId") || "").trim();
     const device = normalizeDevice(
       {
         id: createId(),
@@ -199,10 +344,12 @@ async function handleDeviceSubmit(event) {
         mac: formData.get("mac"),
         type: formData.get("type"),
         subnetId: formData.get("subnetId"),
+        groupId: formData.get("groupId"),
         note: formData.get("note"),
         createdAt: new Date().toISOString(),
       },
-      state.subnets
+      state.subnets,
+      state.groups
     );
 
     await apiRequest("/devices", {
@@ -210,8 +357,11 @@ async function handleDeviceSubmit(event) {
       body: JSON.stringify(device),
     });
 
+    await rescanScopeForDevice(device, selectedGroupId);
     await refreshState(true);
-    event.currentTarget.reset();
+    form.reset();
+    deviceGroupSelectionMode = "auto";
+    renderDeviceGroupOptions();
     updateSuggestedIp();
     showToast(`Устройство ${device.name} добавлено.`);
   } catch (error) {
@@ -221,9 +371,10 @@ async function handleDeviceSubmit(event) {
 
 async function handleGroupSubmit(event) {
   event.preventDefault();
+  const form = event.currentTarget;
 
   try {
-    const formData = new FormData(event.currentTarget);
+    const formData = new FormData(form);
     const group = normalizeRangeGroup(
       {
         id: createId(),
@@ -256,7 +407,7 @@ async function handleGroupSubmit(event) {
     }
 
     await refreshState(true);
-    event.currentTarget.reset();
+    form.reset();
 
     if (scanSummary) {
       const refreshedGroup = state.groups.find((entry) => entry.id === savedGroup.id);
@@ -406,10 +557,12 @@ function updateAutomationWidgets() {
 
 function updateSuggestedIp() {
   const subnetId = elements.subnetSelect.value;
+  const groupId = elements.deviceGroupSelect.value;
   if (!subnetId) {
     elements.deviceSuggestion.className = "result-card result-card--muted form-grid__full";
     elements.deviceSuggestion.textContent = "Выберите подсеть, чтобы получить подсказку свободного IP.";
     elements.applySuggestionButton.disabled = true;
+    delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
   }
 
@@ -418,22 +571,39 @@ function updateSuggestedIp() {
     elements.deviceSuggestion.className = "result-card result-card--warn form-grid__full";
     elements.deviceSuggestion.textContent = "Подсеть не найдена в текущем состоянии сервера.";
     elements.applySuggestionButton.disabled = true;
+    delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
   }
 
-  const suggestion = suggestFreeIp(subnet);
+  const group = groupId
+    ? state.groups.find((entry) => entry.id === groupId && entry.subnetId === subnet.id) || null
+    : null;
+  if (groupId && !group) {
+    elements.deviceSuggestion.className = "result-card result-card--warn form-grid__full";
+    elements.deviceSuggestion.textContent = "Выбранная группа больше не найдена в текущем состоянии сервера.";
+    elements.applySuggestionButton.disabled = true;
+    delete elements.applySuggestionButton.dataset.suggestedIp;
+    return;
+  }
+
+  const suggestion = suggestFreeIp(subnet, group);
   if (!suggestion) {
     elements.deviceSuggestion.className = "result-card result-card--danger form-grid__full";
-    elements.deviceSuggestion.textContent = `В пуле ${subnet.name} (${subnet.cidr}) свободных IP не найдено.`;
+    elements.deviceSuggestion.textContent = group
+      ? `В группе ${group.name} (${formatGroupRange(group, true)}) свободных IP не найдено.`
+      : `В пуле ${subnet.name} (${subnet.cidr}) свободных IP не найдено.`;
     elements.applySuggestionButton.disabled = true;
+    delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
   }
 
   const existingValue = elements.deviceForm.elements.ip.value.trim();
   const isAlreadyUsingSuggestion = existingValue && normalizeIpSafe(existingValue) === suggestion.ip;
   elements.deviceSuggestion.className = "result-card result-card--ok form-grid__full";
-  elements.deviceSuggestion.textContent =
-    `Свободный IP: ${suggestion.ip}. Занято по базе: ${suggestion.assignedCount}, отвечает на ping: ${suggestion.reachableCount}.`;
+  const summary = `занято ${suggestion.busyCount} · свободно ${suggestion.freeCount} · база ${suggestion.assignedCount} · ping ${suggestion.reachableCount}`;
+  elements.deviceSuggestion.textContent = group
+    ? `${group.name}: ${suggestion.ip} • ${summary}`
+    : `${suggestion.ip} • ${summary}`;
   elements.applySuggestionButton.disabled = isAlreadyUsingSuggestion;
   elements.applySuggestionButton.dataset.suggestedIp = suggestion.ip;
 }
@@ -449,31 +619,80 @@ function applySuggestedIp() {
   showToast(`Подставлен свободный IP ${suggestedIp}.`);
 }
 
-function suggestFreeIp(subnet) {
+function suggestFreeIp(subnet, group = null) {
   const assignedIps = new Set(
     state.devices
-      .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
+      .filter((device) => {
+        const ipInt = ipToInt(device.ip);
+        if (!isIpInsidePool(ipInt, subnet)) {
+          return false;
+        }
+        if (group) {
+          return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
+        }
+        return true;
+      })
       .map((device) => device.ip)
   );
   const reachableIps = new Set(
     state.scanResults
-      .filter((result) => result.subnetId === subnet.id && result.isReachable)
+      .filter((result) => {
+        if (result.subnetId !== subnet.id || !result.isReachable) {
+          return false;
+        }
+        if (!group) {
+          return true;
+        }
+        const ipInt = ipToInt(result.ip);
+        return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
+      })
       .map((result) => result.ip)
   );
   const busyIps = new Set([...assignedIps, ...reachableIps]);
 
-  for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
+  const startInt = group ? group.rangeStartInt : subnet.rangeStartInt;
+  const endInt = group ? group.rangeEndInt : subnet.rangeEndInt;
+  for (let ipInt = startInt; ipInt <= endInt; ipInt += 1) {
     const ip = intToIp(ipInt);
     if (!busyIps.has(ip)) {
       return {
         ip,
         assignedCount: assignedIps.size,
         reachableCount: reachableIps.size,
+        busyCount: busyIps.size,
+        freeCount: Math.max(endInt - startInt + 1 - busyIps.size, 0),
       };
     }
   }
 
   return null;
+}
+
+async function rescanScopeForDevice(device, selectedGroupId = "") {
+  const subnetId = device.subnetId || findSubnetForIp(ipToInt(device.ip), state.subnets)?.id || "";
+  const group =
+    (selectedGroupId
+      ? state.groups.find((entry) => entry.id === selectedGroupId && entry.subnetId === subnetId) || null
+      : null) || (subnetId ? findRangeGroupForIp(ipToInt(device.ip), subnetId) : null);
+
+  try {
+    if (group) {
+      await apiRequest("/scan", {
+        method: "POST",
+        body: JSON.stringify({ groupId: group.id }),
+      });
+      return;
+    }
+
+    if (subnetId) {
+      await apiRequest("/scan", {
+        method: "POST",
+        body: JSON.stringify({ subnetId }),
+      });
+    }
+  } catch (error) {
+    console.warn("Не удалось обновить scan для подсказки IP после сохранения устройства.", error);
+  }
 }
 
 function exportJson() {
@@ -839,6 +1058,7 @@ function renderAll() {
 
 function renderSubnetOptions() {
   const previousDeviceSubnet = elements.subnetSelect.value;
+  const previousDeviceGroup = elements.deviceGroupSelect.value;
   const previousGroupSubnet = elements.groupSubnetSelect.value;
   const options = ['<option value="">Автоопределение по IP</option>'];
   const requiredOptions = ['<option value="">Выберите подсеть</option>'];
@@ -856,6 +1076,7 @@ function renderSubnetOptions() {
   elements.groupSubnetSelect.innerHTML = requiredOptions.join("");
   elements.subnetSelect.value = previousDeviceSubnet;
   elements.groupSubnetSelect.value = previousGroupSubnet;
+  renderDeviceGroupOptions(previousDeviceGroup);
 }
 
 function renderSubnetsTable() {
@@ -1268,7 +1489,7 @@ function normalizeRangeGroup(rawGroup, subnets, existingGroups = state.groups) {
   };
 }
 
-function normalizeDevice(rawDevice, subnets) {
+function normalizeDevice(rawDevice, subnets, groups = state.groups) {
   const name = String(rawDevice?.name || "").trim();
   const ip = normalizeIp(String(rawDevice?.ip || "").trim());
   const rawMac = String(rawDevice?.mac || "").trim();
@@ -1276,6 +1497,7 @@ function normalizeDevice(rawDevice, subnets) {
   const type = String(rawDevice?.type || "").trim().toLowerCase();
   const note = String(rawDevice?.note || "").trim();
   let subnetId = String(rawDevice?.subnetId || "").trim();
+  const groupId = String(rawDevice?.groupId || "").trim();
 
   if (!name) {
     throw new Error("Имя устройства обязательно.");
@@ -1302,6 +1524,26 @@ function normalizeDevice(rawDevice, subnets) {
 
   if (!subnetId) {
     subnetId = findSubnetForIp(ipToInt(ip), subnets)?.id || "";
+  }
+
+  if (groupId) {
+    const selectedGroup = groups.find((group) => group.id === groupId);
+    if (!selectedGroup) {
+      throw new Error(`Выбранная группа для устройства "${name}" не найдена.`);
+    }
+
+    if (subnetId && selectedGroup.subnetId !== subnetId) {
+      throw new Error(`Группа "${selectedGroup.name}" не относится к выбранной подсети.`);
+    }
+
+    const ipInt = ipToInt(ip);
+    if (ipInt < selectedGroup.rangeStartInt || ipInt > selectedGroup.rangeEndInt) {
+      throw new Error(
+        `IP ${ip} не попадает в диапазон группы "${selectedGroup.name}" (${formatGroupRange(selectedGroup, true)}).`
+      );
+    }
+
+    subnetId = selectedGroup.subnetId;
   }
 
   return {
@@ -1499,6 +1741,110 @@ function findRangeGroupForIp(ipInt, subnetId = "") {
       return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
     }) || null
   );
+}
+
+function handleDeviceSubnetChange() {
+  deviceGroupSelectionMode = "auto";
+  renderDeviceGroupOptions();
+  updateSuggestedIp();
+}
+
+function renderDeviceGroupOptions(preferredGroupId = elements.deviceGroupSelect.value) {
+  const subnetId = elements.subnetSelect.value;
+  const options = ['<option value="">Любой свободный IP в подсети</option>'];
+  const recommendedGroupId = getRecommendedGroupIdForDevice(
+    subnetId,
+    elements.deviceForm.elements.type.value
+  );
+
+  if (subnetId) {
+    getGroupsInSubnet(subnetId).forEach((group) => {
+      options.push(
+        `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)} · ${escapeHtml(formatGroupRange(group, true))}</option>`
+      );
+    });
+  }
+
+  elements.deviceGroupSelect.innerHTML = options.join("");
+  if (
+    preferredGroupId &&
+    state.groups.some((group) => group.id === preferredGroupId && group.subnetId === subnetId)
+  ) {
+    elements.deviceGroupSelect.value = preferredGroupId;
+  } else if (deviceGroupSelectionMode === "auto" && recommendedGroupId) {
+    elements.deviceGroupSelect.value = recommendedGroupId;
+  } else {
+    elements.deviceGroupSelect.value = "";
+  }
+}
+
+function handleDeviceGroupChange() {
+  deviceGroupSelectionMode = "manual";
+  updateSuggestedIp();
+}
+
+function handleDeviceTypeChange() {
+  if (deviceGroupSelectionMode === "auto") {
+    renderDeviceGroupOptions();
+  }
+  updateSuggestedIp();
+}
+
+function getRecommendedGroupIdForDevice(subnetId, deviceType) {
+  if (!subnetId || !deviceType) {
+    return "";
+  }
+
+  const groups = getGroupsInSubnet(subnetId);
+  if (groups.length === 0) {
+    return "";
+  }
+
+  const normalizedDeviceType = String(deviceType).toLowerCase();
+  let bestGroupId = "";
+  let bestScore = 0;
+
+  for (const group of groups) {
+    const score = scoreGroupSuggestion(group, normalizedDeviceType);
+    if (score > bestScore) {
+      bestScore = score;
+      bestGroupId = group.id;
+    }
+  }
+
+  return bestGroupId;
+}
+
+function scoreGroupSuggestion(group, deviceType) {
+  const searchableText = normalizeSearchableText(`${group.name} ${group.note || ""}`);
+  let bestTemplateScore = 0;
+
+  for (const template of groupSuggestionTemplates) {
+    if (!template.deviceTypes.includes(deviceType)) {
+      continue;
+    }
+
+    let templateScore = 0;
+    for (const keyword of template.keywords) {
+      if (searchableText.includes(keyword)) {
+        templateScore += keyword.includes(" ") ? 4 : 2;
+      }
+    }
+
+    if (templateScore > bestTemplateScore) {
+      bestTemplateScore = templateScore;
+    }
+  }
+
+  return bestTemplateScore;
+}
+
+function normalizeSearchableText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9а-яіїєґ\s-]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function evaluateDeviceStatus(device, subnet) {
