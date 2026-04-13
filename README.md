@@ -87,8 +87,9 @@ IPAM_PORT=4180 python3 server.py
 
 - `2-4` — `hypervisor`
 - `5-19` — `VM`
-- `20-29` — `Home Assistant`
-- `30-39` — `WLED`
+
+Или
+- `192.168.1.2-192.168.1.4` — `hypervisor`
 
 Особенности:
 
