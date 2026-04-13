@@ -1,5 +1,5 @@
 const API_BASE = "/api";
-const OPERATOR_STORAGE_KEY = "homelab-ipam-operator";
+const OPERATOR_STORAGE_KEY = "atlas-operator";
 const GROUP_SUGGESTION_TEMPLATES_PATH = "/group-suggestion-templates.json";
 const DEVICE_TYPES = {
   server: "Сервер",
@@ -162,7 +162,7 @@ let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 
 initialize().catch((error) => {
   console.error(error);
-  showToast("Не удалось подключиться к серверу IPAM.", true);
+  showToast("Не удалось подключиться к серверу ATLAS.", true);
 });
 
 async function initialize() {
@@ -506,7 +506,7 @@ function handleIpCheck(event) {
   }
 
   if (pingState?.isReachable) {
-    const parts = [`IP ${normalizedIp} не закреплен в IPAM, но отвечает на ping.`];
+    const parts = [`IP ${normalizedIp} не закреплен в ATLAS, но отвечает на ping.`];
     if (subnet) {
       parts.push(`Подсеть: ${subnet.name} (${subnet.cidr}).`);
     }
@@ -707,7 +707,7 @@ function exportJson() {
   };
 
   downloadFile(
-    `homelab-ipam-${timestampForFile()}.json`,
+    `atlas-${timestampForFile()}.json`,
     JSON.stringify(payload, null, 2),
     "application/json"
   );
@@ -727,7 +727,7 @@ function exportSubnetsCsv() {
   }));
 
   downloadFile(
-    `homelab-ipam-subnets-${timestampForFile()}.csv`,
+    `atlas-subnets-${timestampForFile()}.csv`,
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
@@ -749,7 +749,7 @@ function exportGroupsCsv() {
   });
 
   downloadFile(
-    `homelab-ipam-groups-${timestampForFile()}.csv`,
+    `atlas-groups-${timestampForFile()}.csv`,
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
@@ -777,7 +777,7 @@ function exportDevicesCsv() {
   });
 
   downloadFile(
-    `homelab-ipam-devices-${timestampForFile()}.csv`,
+    `atlas-devices-${timestampForFile()}.csv`,
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
@@ -2110,7 +2110,7 @@ async function apiRequest(path, options = {}) {
 
   const actor = preferences.operator.trim();
   if (actor) {
-    headers.set("X-IPAM-Actor", actor);
+    headers.set("X-ATLAS-Actor", actor);
   }
 
   const response = await fetch(`${API_BASE}${path}`, {

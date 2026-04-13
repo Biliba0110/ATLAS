@@ -19,13 +19,14 @@ from urllib.parse import urlparse
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
-DB_PATH = Path(os.environ.get("IPAM_DB_PATH", DATA_DIR / "ipam.db"))
-HOST = os.environ.get("IPAM_HOST", "0.0.0.0")
-PORT = int(os.environ.get("IPAM_PORT", "4173"))
-SCAN_INTERVAL_SECONDS = int(os.environ.get("IPAM_SCAN_INTERVAL", "90"))
-SCAN_TIMEOUT_MS = int(os.environ.get("IPAM_SCAN_TIMEOUT_MS", "1000"))
-SCAN_CONCURRENCY = max(1, int(os.environ.get("IPAM_SCAN_CONCURRENCY", "32")))
-HISTORY_LIMIT = int(os.environ.get("IPAM_HISTORY_LIMIT", "200"))
+
+DB_PATH = Path(os.environ.get("ATLAS_DB_PATH", DATA_DIR / "atlas.db"))
+HOST = os.environ.get("ATLAS_HOST", "0.0.0.0")
+PORT = int(os.environ.get("ATLAS_PORT", "4173"))
+SCAN_INTERVAL_SECONDS = int(os.environ.get("ATLAS_SCAN_INTERVAL", "90"))
+SCAN_TIMEOUT_MS = int(os.environ.get("ATLAS_SCAN_TIMEOUT_MS", "1000"))
+SCAN_CONCURRENCY = max(1, int(os.environ.get("ATLAS_SCAN_CONCURRENCY", "32")))
+HISTORY_LIMIT = int(os.environ.get("ATLAS_HISTORY_LIMIT", "200"))
 
 STATIC_FILES = {
     "index.html",
@@ -293,7 +294,7 @@ def broadcast_event(event: dict) -> None:
 
 
 def resolve_actor(handler: BaseHTTPRequestHandler, payload: dict | None = None) -> str:
-    actor = handler.headers.get("X-IPAM-Actor", "").strip()
+    actor = handler.headers.get("X-ATLAS-Actor", "").strip()
     if not actor and payload:
         actor = str(payload.get("actor", "")).strip()
     return actor or "system"
@@ -769,7 +770,7 @@ def perform_scan(
 
 class BackgroundScanner(threading.Thread):
     def __init__(self) -> None:
-        super().__init__(daemon=True, name="ipam-background-scanner")
+        super().__init__(daemon=True, name="atlas-background-scanner")
 
     def run(self) -> None:
         while not STOP_EVENT.is_set():
@@ -789,8 +790,8 @@ class BackgroundScanner(threading.Thread):
                     print(f"Background scan failed: {error}")
 
 
-class IPAMRequestHandler(BaseHTTPRequestHandler):
-    server_version = "HomeLabIPAM/0.4"
+class ATLASRequestHandler(BaseHTTPRequestHandler):
+    server_version = "ATLAS/0.4"
 
     def handle(self) -> None:
         try:
@@ -1027,8 +1028,8 @@ def main() -> None:
     ensure_db()
     background_scanner = BackgroundScanner()
     background_scanner.start()
-    server = ThreadingHTTPServer((HOST, PORT), IPAMRequestHandler)
-    print(f"HomeLab IPAM server is running on http://{HOST}:{PORT}")
+    server = ThreadingHTTPServer((HOST, PORT), ATLASRequestHandler)
+    print(f"ATLAS server is running on http://{HOST}:{PORT}")
     print(f"SQLite DB: {DB_PATH}")
     try:
         SCAN_REQUEST_EVENT.set()
