@@ -1,0 +1,21 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="atlas-bg" x1="16" y1="12" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8FC4FF"/>
+      <stop offset="0.48" stop-color="#3F8CFF"/>
+      <stop offset="1" stop-color="#173A79"/>
+    </linearGradient>
+    <linearGradient id="atlas-core" x1="44" y1="26" x2="82" y2="92" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white"/>
+      <stop offset="1" stop-color="#D7E8FF"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="108" height="108" rx="32" fill="url(#atlas-bg)"/>
+  <rect x="10.5" y="10.5" width="107" height="107" rx="31.5" stroke="white" stroke-opacity="0.16"/>
+  <path d="M64 26L93 94H79.8L73.4 78.5H54.5L48.2 94H35L64 26ZM69.1 68.1L64 55.3L58.8 68.1H69.1Z" fill="url(#atlas-core)"/>
+  <circle cx="64" cy="64" r="39" stroke="white" stroke-opacity="0.18" stroke-width="2"/>
+  <path d="M64 19V31" stroke="white" stroke-opacity="0.35" stroke-width="3" stroke-linecap="round"/>
+  <path d="M64 97V109" stroke="white" stroke-opacity="0.35" stroke-width="3" stroke-linecap="round"/>
+  <path d="M109 64H97" stroke="white" stroke-opacity="0.35" stroke-width="3" stroke-linecap="round"/>
+  <path d="M31 64H19" stroke="white" stroke-opacity="0.35" stroke-width="3" stroke-linecap="round"/>
+</svg>

@@ -23,7 +23,9 @@ DATA_DIR = ROOT_DIR / "data"
 DB_PATH = Path(os.environ.get("ATLAS_DB_PATH", DATA_DIR / "atlas.db"))
 HOST = os.environ.get("ATLAS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("ATLAS_PORT", "4173"))
-SCAN_INTERVAL_SECONDS = int(os.environ.get("ATLAS_SCAN_INTERVAL", "90"))
+DEFAULT_SCAN_INTERVAL_SECONDS = int(os.environ.get("ATLAS_SCAN_INTERVAL", "90"))
+MIN_SCAN_INTERVAL_SECONDS = 15
+MAX_SCAN_INTERVAL_SECONDS = 3600
 SCAN_TIMEOUT_MS = int(os.environ.get("ATLAS_SCAN_TIMEOUT_MS", "1000"))
 SCAN_CONCURRENCY = max(1, int(os.environ.get("ATLAS_SCAN_CONCURRENCY", "32")))
 HISTORY_LIMIT = int(os.environ.get("ATLAS_HISTORY_LIMIT", "200"))
@@ -32,7 +34,10 @@ STATIC_FILES = {
     "index.html",
     "styles.css",
     "app.js",
+    "i18n.js",
     "group-suggestion-templates.json",
+    "atlas-logo.svg",
+    "favicon.svg",
 }
 
 SCHEMA = """
@@ -103,6 +108,12 @@ CREATE TABLE IF NOT EXISTS ip_history (
     note TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_subnets_network_int ON subnets(network_int);
 CREATE INDEX IF NOT EXISTS idx_groups_subnet_id ON range_groups(subnet_id);
 CREATE INDEX IF NOT EXISTS idx_devices_subnet_id ON devices(subnet_id);
@@ -118,6 +129,8 @@ SCAN_REQUEST_EVENT = threading.Event()
 STOP_EVENT = threading.Event()
 REVISION_LOCK = threading.Lock()
 CURRENT_REVISION = 0
+SCAN_SIGNAL_LOCK = threading.Lock()
+SCAN_EXECUTION_REQUESTED = False
 
 
 def utc_now_iso() -> str:
@@ -128,6 +141,14 @@ def ensure_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as connection:
         connection.executescript(SCHEMA)
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            ("scan_interval_seconds", str(DEFAULT_SCAN_INTERVAL_SECONDS), utc_now_iso()),
+        )
         connection.commit()
 
 
@@ -239,6 +260,7 @@ def load_snapshot(connection: sqlite3.Connection) -> dict:
     last_scan_row = connection.execute(
         "SELECT MAX(checked_at) AS last_scan_at FROM ip_scan_results"
     ).fetchone()
+    settings = load_settings(connection)
     return {
         "subnets": subnets,
         "groups": groups,
@@ -249,8 +271,9 @@ def load_snapshot(connection: sqlite3.Connection) -> dict:
             "revision": get_current_revision(),
             "lastScanAt": last_scan_row["last_scan_at"] if last_scan_row else None,
             "scanInProgress": SCAN_LOCK.locked(),
-            "scanIntervalSeconds": SCAN_INTERVAL_SECONDS,
+            "scanIntervalSeconds": settings["scanIntervalSeconds"],
         },
+        "settings": settings,
     }
 
 
@@ -273,6 +296,22 @@ def bump_revision(event_type: str, payload: dict | None = None) -> None:
             **(payload or {}),
         }
     )
+
+
+def signal_background_scanner(*, run_scan: bool) -> None:
+    global SCAN_EXECUTION_REQUESTED
+    with SCAN_SIGNAL_LOCK:
+        if run_scan:
+            SCAN_EXECUTION_REQUESTED = True
+    SCAN_REQUEST_EVENT.set()
+
+
+def consume_scan_request_signal() -> bool:
+    global SCAN_EXECUTION_REQUESTED
+    with SCAN_SIGNAL_LOCK:
+        should_run_scan = SCAN_EXECUTION_REQUESTED
+        SCAN_EXECUTION_REQUESTED = False
+    return should_run_scan
 
 
 def broadcast_event(event: dict) -> None:
@@ -298,6 +337,82 @@ def resolve_actor(handler: BaseHTTPRequestHandler, payload: dict | None = None) 
     if not actor and payload:
         actor = str(payload.get("actor", "")).strip()
     return actor or "system"
+
+
+def normalize_scan_interval_seconds(value: object) -> int:
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Интервал фонового ping должен быть целым числом.") from error
+
+    if interval < MIN_SCAN_INTERVAL_SECONDS or interval > MAX_SCAN_INTERVAL_SECONDS:
+        raise ValueError(
+            f"Интервал фонового ping должен быть от {MIN_SCAN_INTERVAL_SECONDS} до {MAX_SCAN_INTERVAL_SECONDS} секунд."
+        )
+
+    return interval
+
+
+def get_setting(connection: sqlite3.Connection, key: str) -> str | None:
+    row = connection.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return None
+    return row["value"]
+
+
+def set_setting(connection: sqlite3.Connection, key: str, value: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        (key, value, utc_now_iso()),
+    )
+
+
+def get_scan_interval_seconds(connection: sqlite3.Connection | None = None) -> int:
+    def resolve_interval(active_connection: sqlite3.Connection) -> int:
+        raw_value = get_setting(active_connection, "scan_interval_seconds")
+        if raw_value is None:
+            return DEFAULT_SCAN_INTERVAL_SECONDS
+
+        try:
+            return normalize_scan_interval_seconds(raw_value)
+        except ValueError:
+            return DEFAULT_SCAN_INTERVAL_SECONDS
+
+    if connection is not None:
+        return resolve_interval(connection)
+
+    with connect_db() as temporary_connection:
+        return resolve_interval(temporary_connection)
+
+
+def load_settings(connection: sqlite3.Connection) -> dict:
+    return {
+        "scanIntervalSeconds": get_scan_interval_seconds(connection),
+        "scanTimeoutMs": SCAN_TIMEOUT_MS,
+        "scanConcurrency": SCAN_CONCURRENCY,
+        "limits": {
+            "scanIntervalMin": MIN_SCAN_INTERVAL_SECONDS,
+            "scanIntervalMax": MAX_SCAN_INTERVAL_SECONDS,
+        },
+    }
+
+
+def update_settings(connection: sqlite3.Connection, payload: dict) -> dict:
+    if "scanIntervalSeconds" not in payload:
+        raise ValueError("Нет поддерживаемых настроек для обновления.")
+
+    interval = normalize_scan_interval_seconds(payload.get("scanIntervalSeconds"))
+    set_setting(connection, "scan_interval_seconds", str(interval))
+    connection.commit()
+    bump_revision("settings-changed", {"entity": "settings", "scanIntervalSeconds": interval})
+    signal_background_scanner(run_scan=False)
+    return load_settings(connection)
 
 
 def record_history(
@@ -363,7 +478,7 @@ def insert_subnet(connection: sqlite3.Connection, subnet: dict) -> dict:
     )
     connection.commit()
     bump_revision("state-changed", {"entity": "subnet"})
-    SCAN_REQUEST_EVENT.set()
+    signal_background_scanner(run_scan=True)
     return subnet
 
 
@@ -423,7 +538,7 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
     )
     connection.commit()
     bump_revision("state-changed", {"entity": "device"})
-    SCAN_REQUEST_EVENT.set()
+    signal_background_scanner(run_scan=True)
     return {
         **device,
         "subnetId": device.get("subnetId", ""),
@@ -459,7 +574,7 @@ def replace_state(connection: sqlite3.Connection, snapshot: dict, actor: str) ->
         record_replace_history(connection, existing_devices, imported_devices, actor)
 
     bump_revision("state-changed", {"entity": "state"})
-    SCAN_REQUEST_EVENT.set()
+    signal_background_scanner(run_scan=True)
 
 
 def record_replace_history(
@@ -774,14 +889,23 @@ class BackgroundScanner(threading.Thread):
 
     def run(self) -> None:
         while not STOP_EVENT.is_set():
-            triggered = SCAN_REQUEST_EVENT.wait(timeout=SCAN_INTERVAL_SECONDS)
+            interval = get_scan_interval_seconds()
+            triggered = SCAN_REQUEST_EVENT.wait(timeout=interval)
             SCAN_REQUEST_EVENT.clear()
 
             if STOP_EVENT.is_set():
                 return
 
+            if triggered:
+                should_run_scan = consume_scan_request_signal()
+                if not should_run_scan:
+                    continue
+            else:
+                should_run_scan = True
+
             try:
-                perform_scan(source="background")
+                if should_run_scan:
+                    perform_scan(source="background")
             except FileNotFoundError:
                 print("Ping command not found; background scanning disabled.")
                 return
@@ -854,6 +978,24 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         except Exception as error:  # noqa: BLE001
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
+    def do_PATCH(self) -> None:
+        parsed = urlparse(self.path)
+
+        try:
+            payload = self.read_json_body()
+            with connect_db() as connection:
+                if parsed.path == "/api/settings":
+                    self.send_json(HTTPStatus.OK, update_settings(connection, payload))
+                    return
+
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
+        except ValueError as error:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+        except sqlite3.IntegrityError as error:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ошибка базы данных: {error}"})
+        except Exception as error:  # noqa: BLE001
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
 
@@ -900,7 +1042,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Запись не найдена."})
                         else:
                             bump_revision("state-changed", {"entity": "subnet"})
-                            SCAN_REQUEST_EVENT.set()
+                            signal_background_scanner(run_scan=True)
                             self.send_json(HTTPStatus.OK, {"status": "deleted"})
                         return
 
@@ -935,7 +1077,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                             )
 
                         bump_revision("state-changed", {"entity": "device"})
-                        SCAN_REQUEST_EVENT.set()
+                        signal_background_scanner(run_scan=True)
                         self.send_json(HTTPStatus.OK, {"status": "deleted"})
                         return
 
@@ -1032,13 +1174,13 @@ def main() -> None:
     print(f"ATLAS server is running on http://{HOST}:{PORT}")
     print(f"SQLite DB: {DB_PATH}")
     try:
-        SCAN_REQUEST_EVENT.set()
+        signal_background_scanner(run_scan=True)
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping server...")
     finally:
         STOP_EVENT.set()
-        SCAN_REQUEST_EVENT.set()
+        signal_background_scanner(run_scan=False)
         server.server_close()
 
 

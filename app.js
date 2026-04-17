@@ -1,10 +1,24 @@
 const API_BASE = "/api";
 const OPERATOR_STORAGE_KEY = "atlas-operator";
 const GROUP_SUGGESTION_TEMPLATES_PATH = "/group-suggestion-templates.json";
+const SETTINGS_STORAGE_KEY = "atlas-settings";
+const CUSTOM_TEMPLATES_STORAGE_KEY = "atlas-custom-group-templates";
+const THEME_ALIASES = {
+  ocean: "aurora",
+};
+const SUPPORTED_THEMES = ["atlas", "ember", "aurora", "fuchsia", "mono", "solaris", "forest", "neon", "arctic"];
 const DEVICE_TYPES = {
-  server: "Сервер",
-  container: "Контейнер",
-  iot: "IoT",
+  server: "device_type_server",
+  container: "device_type_container",
+  iot: "device_type_iot",
+};
+
+const DEFAULT_SETTINGS = {
+  accentTheme: "atlas",
+  autoRescanAfterDeviceSave: true,
+  suggestionMode: "compact",
+  language: "ru",
+  customSignature: "",
 };
 
 const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
@@ -89,10 +103,17 @@ const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
 ];
 
 const ACTION_LABELS = {
-  assigned: "Назначен",
-  imported: "Импорт",
-  ip_changed: "IP изменен",
-  released: "Освобожден",
+  assigned: "action_assigned",
+  imported: "action_imported",
+  ip_changed: "action_ip_changed",
+  released: "action_released",
+};
+
+const TRANSLATIONS = window.ATLAS_TRANSLATIONS || {};
+const DATE_LOCALES = window.ATLAS_DATE_LOCALES || {
+  ru: "ru-RU",
+  uk: "uk-UA",
+  en: "en-US",
 };
 
 const state = {
@@ -107,13 +128,24 @@ const state = {
     scanInProgress: false,
     scanIntervalSeconds: 90,
   },
+  settings: {
+    scanIntervalSeconds: 90,
+    scanTimeoutMs: 1000,
+    scanConcurrency: 32,
+    limits: {
+      scanIntervalMin: 15,
+      scanIntervalMax: 3600,
+    },
+  },
 };
 
 const preferences = {
   operator: localStorage.getItem(OPERATOR_STORAGE_KEY) || "",
+  settings: loadSettings(),
 };
 
 const elements = {
+  heroSignature: document.getElementById("hero-signature"),
   subnetForm: document.getElementById("subnet-form"),
   deviceForm: document.getElementById("device-form"),
   groupForm: document.getElementById("group-form"),
@@ -124,13 +156,39 @@ const elements = {
   ipCheckForm: document.getElementById("ip-check-form"),
   ipCheckResult: document.getElementById("ip-check-result"),
   operatorInput: document.getElementById("operator-input"),
+  openSettingsButton: document.getElementById("open-settings-button"),
+  settingsModal: document.getElementById("settings-modal"),
+  closeSettingsButton: document.querySelector('[data-close-modal="settings-modal"]'),
   scanNowButton: document.getElementById("scan-now-button"),
   liveStatusBadge: document.getElementById("live-status-badge"),
   scanStatusBadge: document.getElementById("scan-status-badge"),
   scanStatusText: document.getElementById("scan-status-text"),
   liveSummaryText: document.getElementById("live-summary-text"),
+  viewTabs: [...document.querySelectorAll("[data-view-tab]")],
+  pageViews: [...document.querySelectorAll("[data-view]")],
+  modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
+  openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
+  closeModalButtons: [...document.querySelectorAll("[data-close-modal]")],
+  dashboardSubnetsList: document.getElementById("dashboard-subnets-list"),
+  dashboardGroupsList: document.getElementById("dashboard-groups-list"),
+  dashboardDevicesList: document.getElementById("dashboard-devices-list"),
+  dashboardHistoryList: document.getElementById("dashboard-history-list"),
   deviceSuggestion: document.getElementById("device-suggestion"),
+  deviceFormStatus: document.getElementById("device-form-status"),
   applySuggestionButton: document.getElementById("apply-suggestion-button"),
+  settingsThemeSelect: document.getElementById("settings-theme-select"),
+  settingsLanguageSelect: document.getElementById("settings-language-select"),
+  settingsSignatureInput: document.getElementById("settings-signature-input"),
+  settingsAutoRescan: document.getElementById("settings-auto-rescan"),
+  settingsSuggestionMode: document.getElementById("settings-suggestion-mode"),
+  settingsScanInterval: document.getElementById("settings-scan-interval"),
+  settingsPingMeta: document.getElementById("settings-ping-meta"),
+  serverSettingsStatus: document.getElementById("server-settings-status"),
+  saveServerSettingsButton: document.getElementById("save-server-settings-button"),
+  templateEditor: document.getElementById("template-editor"),
+  templateSettingsStatus: document.getElementById("template-settings-status"),
+  saveTemplateSettingsButton: document.getElementById("save-template-settings-button"),
+  resetTemplateSettingsButton: document.getElementById("reset-template-settings-button"),
   subnetsTableBody: document.getElementById("subnets-table-body"),
   groupsTableBody: document.getElementById("groups-table-body"),
   devicesTableBody: document.getElementById("devices-table-body"),
@@ -157,18 +215,118 @@ let activeToastTimer = null;
 let pollIntervalId = null;
 let eventSource = null;
 let isManualScanRunning = false;
+let isDeviceSubmitting = false;
 let deviceGroupSelectionMode = "auto";
 let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
+let groupSuggestionTemplateSource = "bundled";
+let activeView = "dashboard";
 
 initialize().catch((error) => {
   console.error(error);
-  showToast("Не удалось подключиться к серверу ATLAS.", true);
+  showToast(t("server_unavailable"), true);
 });
+
+function getLanguage() {
+  return preferences.settings.language || DEFAULT_SETTINGS.language;
+}
+
+function t(key, vars = {}) {
+  const language = getLanguage();
+  const dictionary = TRANSLATIONS[language] || TRANSLATIONS.ru || {};
+  const fallback = TRANSLATIONS.ru || {};
+  const template = dictionary[key] ?? fallback[key] ?? key;
+
+  return template.replace(/\{(\w+)\}/g, (_, token) => String(vars[token] ?? ""));
+}
+
+function getDeviceTypeLabel(type) {
+  const key = DEVICE_TYPES[type];
+  return key ? t(key) : type;
+}
+
+function getActionLabel(action) {
+  const key = ACTION_LABELS[action];
+  return key ? t(key) : action;
+}
+
+function applyLocalizedUi() {
+  const language = getLanguage();
+  document.documentElement.lang = language;
+
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    node.textContent = t(node.dataset.i18n);
+  });
+
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+    node.placeholder = t(node.dataset.i18nPlaceholder);
+  });
+
+  elements.heroSignature.textContent = preferences.settings.customSignature || t("default_signature");
+}
+
+function formatRecordsCount(count) {
+  return t("records_count", { count });
+}
+
+function formatFilteredCount(count, total) {
+  return t("filtered_count", { count, total });
+}
+
+function formatEventsCount(count) {
+  return t("events_count", { count });
+}
+
+function loadSettings() {
+  try {
+    const rawValue = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!rawValue) {
+      return { ...DEFAULT_SETTINGS };
+    }
+
+    const parsed = JSON.parse(rawValue);
+    return normalizeSettings(parsed);
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function normalizeSettings(rawSettings) {
+  const requestedTheme = THEME_ALIASES[rawSettings?.accentTheme] || rawSettings?.accentTheme;
+  const normalizedTheme = SUPPORTED_THEMES.includes(requestedTheme)
+    ? requestedTheme
+    : DEFAULT_SETTINGS.accentTheme;
+  const normalizedSuggestionMode = ["compact", "detailed"].includes(rawSettings?.suggestionMode)
+    ? rawSettings.suggestionMode
+    : DEFAULT_SETTINGS.suggestionMode;
+  const normalizedLanguage = ["ru", "uk", "en"].includes(rawSettings?.language)
+    ? rawSettings.language
+    : DEFAULT_SETTINGS.language;
+
+  return {
+    accentTheme: normalizedTheme,
+    autoRescanAfterDeviceSave:
+      typeof rawSettings?.autoRescanAfterDeviceSave === "boolean"
+        ? rawSettings.autoRescanAfterDeviceSave
+        : DEFAULT_SETTINGS.autoRescanAfterDeviceSave,
+    suggestionMode: normalizedSuggestionMode,
+    language: normalizedLanguage,
+    customSignature: String(rawSettings?.customSignature || "").trim(),
+  };
+}
+
+function persistSettings() {
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(preferences.settings));
+}
 
 async function initialize() {
   await loadGroupSuggestionTemplates();
   bindEvents();
   elements.operatorInput.value = preferences.operator;
+  setActiveView(activeView);
+  syncSettingsForm();
+  applyVisualSettings();
+  applyLocalizedUi();
+  renderTemplateEditor();
   renderAll();
   await refreshState();
   connectLiveStream();
@@ -184,12 +342,42 @@ function bindEvents() {
   elements.searchInput.addEventListener("input", renderDevicesTable);
   elements.ipCheckForm.addEventListener("submit", handleIpCheck);
   elements.operatorInput.addEventListener("input", handleOperatorInput);
+  elements.viewTabs.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveView(button.dataset.viewTab);
+    });
+  });
+  elements.openModalButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      handleOpenModalRequest(button.dataset.openModal);
+    });
+  });
+  elements.closeModalButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      closeModal(button.dataset.closeModal);
+    });
+  });
+  elements.modalBackdrops.forEach((modal) => {
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) {
+        closeModal(modal.id);
+      }
+    });
+  });
   elements.scanNowButton.addEventListener("click", handleScanNow);
   elements.subnetSelect.addEventListener("change", handleDeviceSubnetChange);
   elements.deviceGroupSelect.addEventListener("change", handleDeviceGroupChange);
   elements.deviceForm.elements.type.addEventListener("change", handleDeviceTypeChange);
   elements.deviceForm.elements.ip.addEventListener("input", updateSuggestedIp);
   elements.applySuggestionButton.addEventListener("click", applySuggestedIp);
+  elements.settingsLanguageSelect.addEventListener("change", handleSettingsChange);
+  elements.settingsSignatureInput.addEventListener("input", handleSignatureInput);
+  elements.settingsThemeSelect.addEventListener("change", handleSettingsChange);
+  elements.settingsAutoRescan.addEventListener("change", handleSettingsChange);
+  elements.settingsSuggestionMode.addEventListener("change", handleSettingsChange);
+  elements.saveServerSettingsButton.addEventListener("click", handleServerSettingsSave);
+  elements.saveTemplateSettingsButton.addEventListener("click", handleTemplateSettingsSave);
+  elements.resetTemplateSettingsButton.addEventListener("click", handleTemplateSettingsReset);
   elements.exportJsonButton.addEventListener("click", exportJson);
   elements.exportSubnetsCsvButton.addEventListener("click", exportSubnetsCsv);
   elements.exportGroupsCsvButton.addEventListener("click", exportGroupsCsv);
@@ -201,10 +389,22 @@ function bindEvents() {
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
   window.addEventListener("focus", () => refreshState(true));
+  window.addEventListener("keydown", handleGlobalKeydown);
 }
 
 async function loadGroupSuggestionTemplates() {
   try {
+    const localTemplates = localStorage.getItem(CUSTOM_TEMPLATES_STORAGE_KEY);
+    if (localTemplates) {
+      const parsedTemplates = JSON.parse(localTemplates);
+      const normalizedLocalTemplates = normalizeGroupSuggestionTemplates(parsedTemplates);
+      if (normalizedLocalTemplates.length > 0) {
+        groupSuggestionTemplates = normalizedLocalTemplates;
+        groupSuggestionTemplateSource = "local";
+        return;
+      }
+    }
+
     const response = await fetch(GROUP_SUGGESTION_TEMPLATES_PATH, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -214,13 +414,15 @@ async function loadGroupSuggestionTemplates() {
     const normalizedTemplates = normalizeGroupSuggestionTemplates(payload);
     if (normalizedTemplates.length > 0) {
       groupSuggestionTemplates = normalizedTemplates;
+      groupSuggestionTemplateSource = "bundled";
       return;
     }
   } catch (error) {
-    console.warn("Не удалось загрузить шаблоны групп, используется встроенный набор.", error);
+    console.warn("Failed to load group suggestion templates, using fallback set.", error);
   }
 
   groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
+  groupSuggestionTemplateSource = "default";
 }
 
 function normalizeGroupSuggestionTemplates(rawTemplates) {
@@ -257,6 +459,236 @@ function normalizeGroupSuggestionTemplates(rawTemplates) {
     .filter(Boolean);
 }
 
+function syncSettingsForm() {
+  elements.settingsLanguageSelect.value = preferences.settings.language;
+  elements.settingsSignatureInput.value = preferences.settings.customSignature;
+  elements.settingsThemeSelect.value = preferences.settings.accentTheme;
+  elements.settingsAutoRescan.checked = preferences.settings.autoRescanAfterDeviceSave;
+  elements.settingsSuggestionMode.value = preferences.settings.suggestionMode;
+  const currentScanInterval = state.settings?.scanIntervalSeconds || state.meta?.scanIntervalSeconds || 90;
+  if (document.activeElement !== elements.settingsScanInterval) {
+    elements.settingsScanInterval.value = String(currentScanInterval);
+  }
+
+  const minInterval = state.settings?.limits?.scanIntervalMin || 15;
+  const maxInterval = state.settings?.limits?.scanIntervalMax || 3600;
+  elements.settingsScanInterval.min = String(minInterval);
+  elements.settingsScanInterval.max = String(maxInterval);
+  elements.settingsPingMeta.textContent = t("ping_meta", {
+    interval: currentScanInterval,
+    timeout: state.settings?.scanTimeoutMs || 1000,
+    concurrency: state.settings?.scanConcurrency || 32,
+  });
+}
+
+function applyVisualSettings() {
+  document.body.dataset.accentTheme = preferences.settings.accentTheme;
+}
+
+function renderTemplateEditor() {
+  if (document.activeElement !== elements.templateEditor) {
+    elements.templateEditor.value = JSON.stringify(groupSuggestionTemplates, null, 2);
+  }
+
+  const sourceLabel =
+    groupSuggestionTemplateSource === "local"
+      ? t("templates_source_local")
+      : groupSuggestionTemplateSource === "bundled"
+        ? t("templates_source_bundled")
+        : t("templates_source_default");
+  setTemplateSettingsStatus(sourceLabel, "muted");
+}
+
+function setTemplateSettingsStatus(message, tone = "muted") {
+  elements.templateSettingsStatus.className = `result-card result-card--${tone}`;
+  elements.templateSettingsStatus.textContent = message;
+}
+
+function setDeviceFormStatus(message, tone = "muted", visible = true) {
+  elements.deviceFormStatus.className = `result-card result-card--${tone} form-grid__full`;
+  elements.deviceFormStatus.textContent = message;
+  elements.deviceFormStatus.hidden = !visible;
+}
+
+function clearDeviceFormStatus() {
+  setDeviceFormStatus(t("device_form_idle"), "muted", false);
+}
+
+function setDeviceFormPending(isPending) {
+  const submitButton = elements.deviceForm.querySelector('[type="submit"]');
+  if (submitButton) {
+    submitButton.disabled = isPending;
+    submitButton.textContent = isPending ? t("device_form_saving") : t("save_device");
+  }
+
+  elements.applySuggestionButton.disabled = isPending || !elements.applySuggestionButton.dataset.suggestedIp;
+}
+
+function setServerSettingsStatus(message, tone = "muted") {
+  elements.serverSettingsStatus.className = `result-card result-card--${tone}`;
+  elements.serverSettingsStatus.textContent = message;
+}
+
+function handleSettingsChange() {
+  preferences.settings = normalizeSettings({
+    language: elements.settingsLanguageSelect.value,
+    customSignature: elements.settingsSignatureInput.value,
+    accentTheme: elements.settingsThemeSelect.value,
+    autoRescanAfterDeviceSave: elements.settingsAutoRescan.checked,
+    suggestionMode: elements.settingsSuggestionMode.value,
+  });
+  persistSettings();
+  applyVisualSettings();
+  applyLocalizedUi();
+  renderDeviceGroupOptions();
+  renderAll();
+  updateSuggestedIp();
+}
+
+function handleSignatureInput() {
+  preferences.settings = normalizeSettings({
+    ...preferences.settings,
+    customSignature: elements.settingsSignatureInput.value,
+  });
+  persistSettings();
+  applyLocalizedUi();
+}
+
+async function handleServerSettingsSave() {
+  try {
+    const interval = Number.parseInt(elements.settingsScanInterval.value, 10);
+    const minInterval = state.settings?.limits?.scanIntervalMin || 15;
+    const maxInterval = state.settings?.limits?.scanIntervalMax || 3600;
+
+    if (!Number.isInteger(interval) || interval < minInterval || interval > maxInterval) {
+      throw new Error(t("ping_interval_invalid", { min: minInterval, max: maxInterval }));
+    }
+
+    await apiRequest("/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ scanIntervalSeconds: interval }),
+    });
+    await refreshState(true);
+    syncSettingsForm();
+    setServerSettingsStatus(t("ping_interval_saved", { interval }), "ok");
+    showToast(t("ping_interval_toast", { interval }));
+  } catch (error) {
+    setServerSettingsStatus(error.message || t("server_data_load_failed"), "danger");
+  }
+}
+
+function handleTemplateSettingsSave() {
+  try {
+    const parsedTemplates = JSON.parse(elements.templateEditor.value);
+    const normalizedTemplates = normalizeGroupSuggestionTemplates(parsedTemplates);
+    if (normalizedTemplates.length === 0) {
+      throw new Error(t("templates_invalid"));
+    }
+
+    localStorage.setItem(CUSTOM_TEMPLATES_STORAGE_KEY, JSON.stringify(normalizedTemplates));
+    groupSuggestionTemplates = normalizedTemplates;
+    groupSuggestionTemplateSource = "local";
+    renderDeviceGroupOptions();
+    updateSuggestedIp();
+    renderTemplateEditor();
+    setTemplateSettingsStatus(t("templates_saved"), "ok");
+  } catch (error) {
+    setTemplateSettingsStatus(error.message || t("templates_invalid"), "danger");
+  }
+}
+
+async function handleTemplateSettingsReset() {
+  localStorage.removeItem(CUSTOM_TEMPLATES_STORAGE_KEY);
+  await loadGroupSuggestionTemplates();
+  renderDeviceGroupOptions();
+  updateSuggestedIp();
+  renderTemplateEditor();
+  setTemplateSettingsStatus(t("templates_reset_done"), "warn");
+}
+
+function handleOpenModalRequest(modalId) {
+  if (!modalId) {
+    return;
+  }
+
+  if (modalId === "settings-modal") {
+    openSettingsModal();
+    return;
+  }
+
+  openModal(modalId);
+}
+
+function openModal(modalId) {
+  const modal = document.getElementById(modalId);
+  if (!modal) {
+    return;
+  }
+
+  const currentModal = getOpenModal();
+  if (currentModal && currentModal.id !== modalId) {
+    currentModal.hidden = true;
+  }
+
+  modal.hidden = false;
+  document.body.classList.add("modal-open");
+  if (modalId === "device-modal") {
+    clearDeviceFormStatus();
+    setDeviceFormPending(false);
+  }
+  const closeButton = modal.querySelector("[data-close-modal]");
+  closeButton?.focus();
+}
+
+function closeModal(modalId) {
+  const modal = modalId ? document.getElementById(modalId) : getOpenModal();
+  if (!modal) {
+    return;
+  }
+
+  modal.hidden = true;
+  if (modal.id === "device-modal") {
+    clearDeviceFormStatus();
+    setDeviceFormPending(false);
+  }
+  if (!getOpenModal()) {
+    document.body.classList.remove("modal-open");
+  }
+}
+
+function getOpenModal() {
+  return elements.modalBackdrops.find((modal) => !modal.hidden) || null;
+}
+
+function openSettingsModal() {
+  syncSettingsForm();
+  renderTemplateEditor();
+  setServerSettingsStatus(t("ping_server_running", {
+    interval: state.settings?.scanIntervalSeconds || 90,
+  }), "muted");
+  openModal("settings-modal");
+}
+
+function handleGlobalKeydown(event) {
+  if (event.key === "Escape" && getOpenModal()) {
+    closeModal();
+  }
+}
+
+function setActiveView(viewName) {
+  activeView = viewName || "dashboard";
+
+  elements.viewTabs.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.viewTab === activeView);
+  });
+
+  elements.pageViews.forEach((view) => {
+    const isActive = view.dataset.view === activeView;
+    view.hidden = !isActive;
+    view.classList.toggle("is-active", isActive);
+  });
+}
+
 async function refreshState(silent = false) {
   try {
     const snapshot = await apiRequest("/state");
@@ -265,7 +697,7 @@ async function refreshState(silent = false) {
   } catch (error) {
     console.error(error);
     if (!silent) {
-      showToast(error.message || "Не удалось загрузить данные с сервера.", true);
+      showToast(error.message || t("server_data_load_failed"), true);
     }
   }
 }
@@ -276,10 +708,10 @@ function connectLiveStream() {
   }
 
   eventSource = new EventSource(`${API_BASE}/stream`);
-  setLiveStatus("Подключение…", "info");
+  setLiveStatus(t("live_connecting"), "info");
 
   eventSource.onopen = () => {
-    setLiveStatus("Live", "ok");
+    setLiveStatus(t("live_badge"), "ok");
   };
 
   eventSource.onmessage = async () => {
@@ -287,7 +719,7 @@ function connectLiveStream() {
   };
 
   eventSource.onerror = () => {
-    setLiveStatus("Переподключение", "warn");
+    setLiveStatus(t("live_reconnecting"), "warn");
   };
 }
 
@@ -298,6 +730,7 @@ function applyState(snapshot) {
   state.scanResults = snapshot.scanResults;
   state.history = snapshot.history;
   state.meta = snapshot.meta;
+  state.settings = snapshot.settings;
 }
 
 async function handleSubnetSubmit(event) {
@@ -323,7 +756,8 @@ async function handleSubnetSubmit(event) {
 
     await refreshState(true);
     form.reset();
-    showToast(`Подсеть ${subnet.name} добавлена.`);
+    closeModal("subnet-modal");
+    showToast(t("subnet_added", { name: subnet.name }));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -331,7 +765,13 @@ async function handleSubnetSubmit(event) {
 
 async function handleDeviceSubmit(event) {
   event.preventDefault();
+  if (isDeviceSubmitting) {
+    return;
+  }
   const form = event.currentTarget;
+  isDeviceSubmitting = true;
+  setDeviceFormPending(true);
+  setDeviceFormStatus(t("device_form_saving"), "muted");
 
   try {
     const formData = new FormData(form);
@@ -357,15 +797,26 @@ async function handleDeviceSubmit(event) {
       body: JSON.stringify(device),
     });
 
-    await rescanScopeForDevice(device, selectedGroupId);
-    await refreshState(true);
     form.reset();
     deviceGroupSelectionMode = "auto";
-    renderDeviceGroupOptions();
-    updateSuggestedIp();
-    showToast(`Устройство ${device.name} добавлено.`);
+    closeModal("device-modal");
+
+    try {
+      if (preferences.settings.autoRescanAfterDeviceSave) {
+        await rescanScopeForDevice(device, selectedGroupId);
+      }
+      await refreshState(true);
+    } catch (followUpError) {
+      console.error(followUpError);
+    }
+
+    showToast(t("device_added", { name: device.name }));
   } catch (error) {
+    setDeviceFormStatus(error.message, "danger");
     showToast(error.message, true);
+  } finally {
+    isDeviceSubmitting = false;
+    setDeviceFormPending(false);
   }
 }
 
@@ -408,6 +859,7 @@ async function handleGroupSubmit(event) {
 
     await refreshState(true);
     form.reset();
+    closeModal("group-modal");
 
     if (scanSummary) {
       const refreshedGroup = state.groups.find((entry) => entry.id === savedGroup.id);
@@ -418,18 +870,21 @@ async function handleGroupSubmit(event) {
       const freeCount = refreshedGroup
         ? Math.max(refreshedGroup.rangeEndInt - refreshedGroup.rangeStartInt + 1 - busyCount, 0)
         : "—";
-      showToast(
-        `Группа ${group.name} добавлена. Проверено ${scanSummary.scannedIps} IP, занято ${busyCount}, свободно ${freeCount}.`
-      );
+      showToast(t("group_added_scanned", {
+        name: group.name,
+        scanned: scanSummary.scannedIps,
+        busy: busyCount,
+        free: freeCount,
+      }));
       return;
     }
 
     if (scanError) {
-      showToast(`Группа ${group.name} добавлена, но проверка занятости не выполнилась.`, true);
+      showToast(t("group_added_scan_failed", { name: group.name }), true);
       return;
     }
 
-    showToast(`Группа ${group.name} добавлена.`);
+    showToast(t("group_added", { name: group.name }));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -442,8 +897,8 @@ async function handleScanNow() {
 
   isManualScanRunning = true;
   elements.scanNowButton.disabled = true;
-  elements.scanNowButton.textContent = "Сканирование…";
-  setScanStatus("Ping: идет сканирование", "info");
+  elements.scanNowButton.textContent = t("scan_now_running");
+  setScanStatus(t("scan_status_running"), "info");
 
   try {
     const summary = await apiRequest("/scan", {
@@ -451,15 +906,17 @@ async function handleScanNow() {
       body: JSON.stringify({}),
     });
     await refreshState(true);
-    showToast(
-      `Ping завершен: подсетей ${summary.scannedSubnets}, адресов ${summary.scannedIps}, ответов ${summary.reachableIps}.`
-    );
+    showToast(t("manual_scan_done", {
+      subnets: summary.scannedSubnets,
+      ips: summary.scannedIps,
+      reachable: summary.reachableIps,
+    }));
   } catch (error) {
     showToast(error.message, true);
   } finally {
     isManualScanRunning = false;
     elements.scanNowButton.disabled = false;
-    elements.scanNowButton.textContent = "Проверить ping";
+    elements.scanNowButton.textContent = t("scan_now_button");
     updateAutomationWidgets();
   }
 }
@@ -475,7 +932,7 @@ function handleIpCheck(event) {
   const ip = event.currentTarget.ipCheck.value.trim();
 
   try {
-    assertValidIp(ip, "Укажите корректный IPv4 адрес для проверки.");
+    assertValidIp(ip, t("ip_invalid_check"));
   } catch (error) {
     renderIpCheckResult(error.message, "danger");
     return;
@@ -489,49 +946,46 @@ function handleIpCheck(event) {
   const pingState = getPingState(normalizedIp);
 
   if (device) {
-    const parts = [`IP ${normalizedIp} уже закреплен за устройством "${device.name}".`];
+    const parts = [t("ip_check_assigned", { ip: normalizedIp, name: device.name })];
     if (subnet) {
-      parts.push(`Подсеть: ${subnet.name} (${subnet.cidr}).`);
+      parts.push(t("ip_check_subnet", { name: subnet.name, cidr: subnet.cidr }));
     }
     if (group) {
-      parts.push(`Группа: ${group.name} (${formatGroupRange(group, true)}).`);
+      parts.push(t("ip_check_group", { name: group.name, range: formatGroupRange(group, true) }));
     }
     if (pingState?.isReachable) {
-      parts.push("Узел отвечает на ping.");
+      parts.push(t("ip_ping_reachable"));
     } else if (pingState) {
-      parts.push("На последний ping адрес не ответил.");
+      parts.push(t("ip_ping_unreachable"));
     }
     renderIpCheckResult(parts.join(" "), "danger");
     return;
   }
 
   if (pingState?.isReachable) {
-    const parts = [`IP ${normalizedIp} не закреплен в ATLAS, но отвечает на ping.`];
+    const parts = [t("ip_check_untracked_reachable", { ip: normalizedIp })];
     if (subnet) {
-      parts.push(`Подсеть: ${subnet.name} (${subnet.cidr}).`);
+      parts.push(t("ip_check_subnet", { name: subnet.name, cidr: subnet.cidr }));
     }
     if (group) {
-      parts.push(`Группа: ${group.name} (${formatGroupRange(group, true)}).`);
+      parts.push(t("ip_check_group", { name: group.name, range: formatGroupRange(group, true) }));
     }
     renderIpCheckResult(parts.join(" "), "warn");
     return;
   }
 
   if (!subnet) {
-    renderIpCheckResult(
-      `IP ${normalizedIp} пока свободен, но не попадает ни в одну зарегистрированную подсеть.`,
-      "warn"
-    );
+    renderIpCheckResult(t("ip_check_free_unregistered", { ip: normalizedIp }), "warn");
     return;
   }
 
-  const parts = [`IP ${normalizedIp} свободен и относится к подсети "${subnet.name}" (${subnet.cidr}).`];
+  const parts = [t("ip_check_free_in_subnet", { ip: normalizedIp, name: subnet.name, cidr: subnet.cidr })];
   const inPool = isIpInsidePool(ipInt, subnet);
   if (!inPool) {
-    parts.push("Он находится вне заданного пула подсети.");
+    parts.push(t("ip_check_outside_pool"));
   }
   if (group) {
-    parts.push(`Попадает в группу "${group.name}" (${formatGroupRange(group, true)}).`);
+    parts.push(t("ip_check_in_group", { name: group.name, range: formatGroupRange(group, true) }));
   }
   renderIpCheckResult(parts.join(" "), inPool ? "ok" : "warn");
 }
@@ -539,20 +993,23 @@ function handleIpCheck(event) {
 function updateAutomationWidgets() {
   const lastScanAt = state.meta?.lastScanAt;
   const reachableCount = getReachableScanIps().size;
-  const operatorLabel = preferences.operator || "не задан";
+  const operatorLabel = preferences.operator || t("operator_not_set");
 
   if (state.meta?.scanInProgress || isManualScanRunning) {
-    setScanStatus("Ping: идет сканирование", "info");
-    elements.scanStatusText.textContent = "Сервер проверяет доступность адресов по всем пулам.";
+    setScanStatus(t("scan_status_running"), "info");
+    elements.scanStatusText.textContent = t("scan_scope_all");
   } else if (lastScanAt) {
-    setScanStatus(`Ping: ${reachableCount} online`, reachableCount > 0 ? "ok" : "warn");
-    elements.scanStatusText.textContent = `Последний скан: ${formatDateTime(lastScanAt)}. Интервал фоновой проверки: ${state.meta.scanIntervalSeconds || 90} сек.`;
+    setScanStatus(t("scan_status_online", { count: reachableCount }), reachableCount > 0 ? "ok" : "warn");
+    elements.scanStatusText.textContent = t("scan_last_run", {
+      date: formatDateTime(lastScanAt),
+      seconds: state.meta.scanIntervalSeconds || 90,
+    });
   } else {
-    setScanStatus("Ping: нет данных", "warn");
-    elements.scanStatusText.textContent = "Сканирование еще не запускалось.";
+    setScanStatus(t("scan_status_idle"), "warn");
+    elements.scanStatusText.textContent = t("scan_not_started");
   }
 
-  elements.liveSummaryText.textContent = `Live-режим активен. Оператор: ${operatorLabel}. Изменения от других клиентов приходят автоматически.`;
+  elements.liveSummaryText.textContent = t("live_summary", { operator: operatorLabel });
 }
 
 function updateSuggestedIp() {
@@ -560,7 +1017,7 @@ function updateSuggestedIp() {
   const groupId = elements.deviceGroupSelect.value;
   if (!subnetId) {
     elements.deviceSuggestion.className = "result-card result-card--muted form-grid__full";
-    elements.deviceSuggestion.textContent = "Выберите подсеть, чтобы получить подсказку свободного IP.";
+    elements.deviceSuggestion.textContent = t("device_suggestion_hint");
     elements.applySuggestionButton.disabled = true;
     delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
@@ -569,7 +1026,7 @@ function updateSuggestedIp() {
   const subnet = state.subnets.find((entry) => entry.id === subnetId);
   if (!subnet) {
     elements.deviceSuggestion.className = "result-card result-card--warn form-grid__full";
-    elements.deviceSuggestion.textContent = "Подсеть не найдена в текущем состоянии сервера.";
+    elements.deviceSuggestion.textContent = t("suggestion_subnet_missing");
     elements.applySuggestionButton.disabled = true;
     delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
@@ -580,7 +1037,7 @@ function updateSuggestedIp() {
     : null;
   if (groupId && !group) {
     elements.deviceSuggestion.className = "result-card result-card--warn form-grid__full";
-    elements.deviceSuggestion.textContent = "Выбранная группа больше не найдена в текущем состоянии сервера.";
+    elements.deviceSuggestion.textContent = t("suggestion_group_missing");
     elements.applySuggestionButton.disabled = true;
     delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
@@ -590,8 +1047,8 @@ function updateSuggestedIp() {
   if (!suggestion) {
     elements.deviceSuggestion.className = "result-card result-card--danger form-grid__full";
     elements.deviceSuggestion.textContent = group
-      ? `В группе ${group.name} (${formatGroupRange(group, true)}) свободных IP не найдено.`
-      : `В пуле ${subnet.name} (${subnet.cidr}) свободных IP не найдено.`;
+      ? t("suggestion_no_free_group", { name: group.name, range: formatGroupRange(group, true) })
+      : t("suggestion_no_free_subnet", { name: subnet.name, cidr: subnet.cidr });
     elements.applySuggestionButton.disabled = true;
     delete elements.applySuggestionButton.dataset.suggestedIp;
     return;
@@ -600,11 +1057,8 @@ function updateSuggestedIp() {
   const existingValue = elements.deviceForm.elements.ip.value.trim();
   const isAlreadyUsingSuggestion = existingValue && normalizeIpSafe(existingValue) === suggestion.ip;
   elements.deviceSuggestion.className = "result-card result-card--ok form-grid__full";
-  const summary = `занято ${suggestion.busyCount} · свободно ${suggestion.freeCount} · база ${suggestion.assignedCount} · ping ${suggestion.reachableCount}`;
-  elements.deviceSuggestion.textContent = group
-    ? `${group.name}: ${suggestion.ip} • ${summary}`
-    : `${suggestion.ip} • ${summary}`;
-  elements.applySuggestionButton.disabled = isAlreadyUsingSuggestion;
+  elements.deviceSuggestion.textContent = formatSuggestionMessage(suggestion, subnet, group);
+  elements.applySuggestionButton.disabled = isDeviceSubmitting || isAlreadyUsingSuggestion;
   elements.applySuggestionButton.dataset.suggestedIp = suggestion.ip;
 }
 
@@ -616,7 +1070,50 @@ function applySuggestedIp() {
 
   elements.deviceForm.elements.ip.value = suggestedIp;
   updateSuggestedIp();
-  showToast(`Подставлен свободный IP ${suggestedIp}.`);
+  showToast(t("suggested_ip_applied", { ip: suggestedIp }));
+}
+
+function formatSuggestionMessage(suggestion, subnet, group = null) {
+  if (preferences.settings.suggestionMode === "detailed") {
+    if (group) {
+      return t("suggestion_detailed_group", {
+        name: group.name,
+        ip: suggestion.ip,
+        range: formatGroupRange(group, true),
+        busy: suggestion.busyCount,
+        free: suggestion.freeCount,
+        assigned: suggestion.assignedCount,
+        reachable: suggestion.reachableCount,
+      });
+    }
+
+    return t("suggestion_detailed_subnet", {
+      name: subnet.name,
+      ip: suggestion.ip,
+      range: `${subnet.rangeStart}-${subnet.rangeEnd}`,
+      busy: suggestion.busyCount,
+      free: suggestion.freeCount,
+      assigned: suggestion.assignedCount,
+      reachable: suggestion.reachableCount,
+    });
+  }
+
+  return group
+    ? t("suggestion_compact_group", {
+      name: group.name,
+      ip: suggestion.ip,
+      busy: suggestion.busyCount,
+      free: suggestion.freeCount,
+      assigned: suggestion.assignedCount,
+      reachable: suggestion.reachableCount,
+    })
+    : t("suggestion_compact_subnet", {
+      ip: suggestion.ip,
+      busy: suggestion.busyCount,
+      free: suggestion.freeCount,
+      assigned: suggestion.assignedCount,
+      reachable: suggestion.reachableCount,
+    });
 }
 
 function suggestFreeIp(subnet, group = null) {
@@ -711,19 +1208,20 @@ function exportJson() {
     JSON.stringify(payload, null, 2),
     "application/json"
   );
+  closeModal("export-modal");
 }
 
 function exportSubnetsCsv() {
   const rows = state.subnets.map((subnet) => ({
-    id: subnet.id,
-    name: subnet.name,
-    cidr: subnet.cidr,
-    network: subnet.network,
-    mask_bits: subnet.maskBits,
-    range_start: subnet.rangeStart,
-    range_end: subnet.rangeEnd,
-    usable_hosts: subnet.usableHosts,
-    note: subnet.note,
+    [t("export_header_id")]: subnet.id,
+    [t("export_header_name")]: subnet.name,
+    [t("export_header_cidr")]: subnet.cidr,
+    [t("export_header_network")]: subnet.network,
+    [t("export_header_mask")]: subnet.maskBits,
+    [t("export_header_pool_start")]: subnet.rangeStart,
+    [t("export_header_pool_end")]: subnet.rangeEnd,
+    [t("export_header_usable_hosts")]: subnet.usableHosts,
+    [t("export_header_note")]: subnet.note,
   }));
 
   downloadFile(
@@ -731,20 +1229,21 @@ function exportSubnetsCsv() {
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
+  closeModal("export-modal");
 }
 
 function exportGroupsCsv() {
   const rows = state.groups.map((group) => {
     const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
     return {
-      id: group.id,
-      name: group.name,
-      subnet_id: group.subnetId,
-      subnet_name: subnet?.name || "",
-      subnet_cidr: subnet?.cidr || "",
-      range_start: group.rangeStart,
-      range_end: group.rangeEnd,
-      note: group.note,
+      [t("export_header_id")]: group.id,
+      [t("export_header_name")]: group.name,
+      [t("export_header_subnet_id")]: group.subnetId,
+      [t("export_header_subnet")]: subnet?.name || "",
+      [t("export_header_cidr")]: subnet?.cidr || "",
+      [t("export_header_range_start")]: group.rangeStart,
+      [t("export_header_range_end")]: group.rangeEnd,
+      [t("export_header_note")]: group.note,
     };
   });
 
@@ -753,6 +1252,7 @@ function exportGroupsCsv() {
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
+  closeModal("export-modal");
 }
 
 function exportDevicesCsv() {
@@ -761,18 +1261,18 @@ function exportDevicesCsv() {
     const group = resolveDeviceGroup(device, subnet);
     const pingState = getPingState(device.ip);
     return {
-      id: device.id,
-      name: device.name,
-      ip: device.ip,
-      mac: device.mac,
-      type: device.type,
-      subnet_id: device.subnetId || "",
-      subnet_name: subnet?.name || "",
-      subnet_cidr: subnet?.cidr || "",
-      group_id: group?.id || "",
-      group_name: group?.name || "",
-      ping_reachable: pingState ? String(pingState.isReachable) : "",
-      note: device.note,
+      [t("export_header_id")]: device.id,
+      [t("export_header_name")]: device.name,
+      [t("export_header_ip")]: device.ip,
+      [t("export_header_mac")]: device.mac || "",
+      [t("export_header_type")]: getDeviceTypeLabel(device.type),
+      [t("export_header_subnet_id")]: device.subnetId || "",
+      [t("export_header_subnet")]: subnet?.name || "",
+      [t("export_header_cidr")]: subnet?.cidr || "",
+      [t("export_header_group_id")]: group?.id || "",
+      [t("export_header_group")]: group?.name || "",
+      [t("export_header_ping")]: pingState ? (pingState.isReachable ? "online" : "offline") : "",
+      [t("export_header_note")]: device.note,
     };
   });
 
@@ -781,6 +1281,7 @@ function exportDevicesCsv() {
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
+  closeModal("export-modal");
 }
 
 async function handleImportFile(event) {
@@ -793,14 +1294,14 @@ async function handleImportFile(event) {
 
   try {
     const text = await file.text();
-    const shouldReplace = window.confirm("OK — заменить текущие данные. Cancel — объединить с текущими.");
+    const shouldReplace = window.confirm(t("import_confirm_replace"));
 
     if (file.name.toLowerCase().endsWith(".json")) {
       importJson(text, shouldReplace, state);
     } else if (file.name.toLowerCase().endsWith(".csv")) {
       importCsv(text, shouldReplace, state);
     } else {
-      throw new Error("Поддерживаются только JSON и CSV файлы.");
+      throw new Error(t("import_supported_only"));
     }
 
     await apiRequest("/state", {
@@ -809,7 +1310,7 @@ async function handleImportFile(event) {
     });
 
     await refreshState(true);
-    showToast(`Файл ${file.name} импортирован.`);
+    showToast(t("import_success", { name: file.name }));
   } catch (error) {
     applyState(snapshotBeforeImport);
     renderAll();
@@ -838,20 +1339,19 @@ function importJson(text, replace, targetState) {
 function importCsv(text, replace, targetState) {
   const rows = parseCsv(text);
   if (rows.length === 0) {
-    throw new Error("CSV файл пустой.");
+    throw new Error(t("csv_empty"));
   }
 
   const headers = Object.keys(rows[0]).map((key) => key.toLowerCase());
-  const looksLikeSubnetCsv = headers.includes("cidr");
+  const looksLikeDeviceCsv = headers.includes("ip");
   const looksLikeGroupCsv =
-    !looksLikeSubnetCsv &&
     headers.includes("range_start") &&
     headers.includes("range_end") &&
     (headers.includes("subnet_id") || headers.includes("subnet_name") || headers.includes("subnet_cidr"));
-  const looksLikeDeviceCsv = headers.includes("ip");
+  const looksLikeSubnetCsv = headers.includes("cidr") && !looksLikeDeviceCsv && !looksLikeGroupCsv;
 
   if (!looksLikeSubnetCsv && !looksLikeGroupCsv && !looksLikeDeviceCsv) {
-    throw new Error("CSV должен содержать поля подсетей, диапазонов или устройств.");
+    throw new Error(t("csv_unknown"));
   }
 
   if (replace && looksLikeSubnetCsv) {
@@ -886,7 +1386,7 @@ function importCsv(text, replace, targetState) {
     rows.forEach((row, index) => {
       const subnet = findSubnetByReference(row, targetState.subnets);
       if (!subnet) {
-        throw new Error(`Для строки диапазона ${index + 2} не найдена подсеть.`);
+        throw new Error(t("csv_group_subnet_missing", { row: index + 2 }));
       }
 
       importedGroups.push(
@@ -930,7 +1430,7 @@ function importCsv(text, replace, targetState) {
 }
 
 async function clearAllData() {
-  const confirmed = window.confirm("Удалить все подсети, группы диапазонов, историю и устройства из базы?");
+  const confirmed = window.confirm(t("clear_confirm"));
   if (!confirmed) {
     return;
   }
@@ -950,7 +1450,7 @@ async function clearAllData() {
       })
     );
     renderAll();
-    showToast("База данных очищена.");
+    showToast(t("clear_success"));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -970,9 +1470,11 @@ async function handleSubnetTableActions(event) {
 
   const linkedDevices = state.devices.filter((entry) => entry.subnetId === subnetId).length;
   const linkedGroups = state.groups.filter((entry) => entry.subnetId === subnetId).length;
-  const confirmed = window.confirm(
-    `Удалить подсеть "${subnet.name}"? Устройств с явной привязкой: ${linkedDevices}, групп диапазонов: ${linkedGroups}.`
-  );
+  const confirmed = window.confirm(t("delete_subnet_confirm", {
+    name: subnet.name,
+    devices: linkedDevices,
+    groups: linkedGroups,
+  }));
 
   if (!confirmed) {
     return;
@@ -983,7 +1485,7 @@ async function handleSubnetTableActions(event) {
       method: "DELETE",
     });
     await refreshState(true);
-    showToast(`Подсеть ${subnet.name} удалена.`);
+    showToast(t("subnet_deleted", { name: subnet.name }));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1001,7 +1503,7 @@ async function handleGroupTableActions(event) {
     return;
   }
 
-  const confirmed = window.confirm(`Удалить группу "${group.name}"?`);
+  const confirmed = window.confirm(t("delete_group_confirm", { name: group.name }));
   if (!confirmed) {
     return;
   }
@@ -1011,7 +1513,7 @@ async function handleGroupTableActions(event) {
       method: "DELETE",
     });
     await refreshState(true);
-    showToast(`Группа ${group.name} удалена.`);
+    showToast(t("group_deleted", { name: group.name }));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1029,7 +1531,7 @@ async function handleDeviceTableActions(event) {
     return;
   }
 
-  const confirmed = window.confirm(`Удалить устройство "${device.name}"?`);
+  const confirmed = window.confirm(t("delete_device_confirm", { name: device.name }));
   if (!confirmed) {
     return;
   }
@@ -1039,19 +1541,21 @@ async function handleDeviceTableActions(event) {
       method: "DELETE",
     });
     await refreshState(true);
-    showToast(`Устройство ${device.name} удалено.`);
+    showToast(t("device_deleted", { name: device.name }));
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
 function renderAll() {
+  syncSettingsForm();
   renderSubnetOptions();
   renderSubnetsTable();
   renderGroupsTable();
   renderDevicesTable();
   renderHistoryTable();
   renderStats();
+  renderDashboardPanels();
   updateAutomationWidgets();
   updateSuggestedIp();
 }
@@ -1060,8 +1564,8 @@ function renderSubnetOptions() {
   const previousDeviceSubnet = elements.subnetSelect.value;
   const previousDeviceGroup = elements.deviceGroupSelect.value;
   const previousGroupSubnet = elements.groupSubnetSelect.value;
-  const options = ['<option value="">Автоопределение по IP</option>'];
-  const requiredOptions = ['<option value="">Выберите подсеть</option>'];
+  const options = [`<option value="">${escapeHtml(t("auto_detect_ip"))}</option>`];
+  const requiredOptions = [`<option value="">${escapeHtml(t("select_subnet"))}</option>`];
 
   state.subnets
     .slice()
@@ -1083,10 +1587,10 @@ function renderSubnetsTable() {
   if (state.subnets.length === 0) {
     elements.subnetsTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="7">Подсети еще не добавлены.</td>
+        <td colspan="7">${escapeHtml(t("empty_subnets"))}</td>
       </tr>
     `;
-    elements.subnetsCounter.textContent = "0 записей";
+    elements.subnetsCounter.textContent = formatRecordsCount(0);
     return;
   }
 
@@ -1101,7 +1605,7 @@ function renderSubnetsTable() {
       const freeCount = Math.max(subnet.poolSize - busyCount, 0);
       const groups = getGroupsInSubnet(subnet.id);
       const groupSummary = groups.length === 0
-        ? "—"
+        ? t("no_data")
         : `${groups.length} · ${groups
             .slice(0, 2)
             .map((group) => group.name)
@@ -1113,31 +1617,31 @@ function renderSubnetsTable() {
           <td class="mono">${escapeHtml(subnet.cidr)}</td>
           <td class="mono">${escapeHtml(subnet.rangeStart)} - ${escapeHtml(subnet.rangeEnd)}</td>
           <td>
-            <span class="pill">${assignedCount} в базе</span>
-            <span class="pill">${reachableCount} ping</span>
-            <span class="pill">${freeCount} свободно</span>
+            <span class="pill">${escapeHtml(t("in_database_short", { count: assignedCount }))}</span>
+            <span class="pill">${escapeHtml(t("ping_short", { count: reachableCount }))}</span>
+            <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
           <td><div class="secondary-line">${escapeHtml(groupSummary)}</div></td>
-          <td>${escapeHtml(subnet.note || "—")}</td>
+          <td>${escapeHtml(subnet.note || t("no_data"))}</td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}">Удалить</button>
+            <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}">${escapeHtml(t("delete_row"))}</button>
           </td>
         </tr>
       `;
     });
 
   elements.subnetsTableBody.innerHTML = rows.join("");
-  elements.subnetsCounter.textContent = `${state.subnets.length} записей`;
+  elements.subnetsCounter.textContent = formatRecordsCount(state.subnets.length);
 }
 
 function renderGroupsTable() {
   if (state.groups.length === 0) {
     elements.groupsTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="6">Группы диапазонов еще не добавлены.</td>
+        <td colspan="6">${escapeHtml(t("empty_groups"))}</td>
       </tr>
     `;
-    elements.groupsCounter.textContent = "0 записей";
+    elements.groupsCounter.textContent = formatRecordsCount(0);
     return;
   }
 
@@ -1160,23 +1664,23 @@ function renderGroupsTable() {
       return `
         <tr>
           <td><strong>${escapeHtml(group.name)}</strong></td>
-          <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : "—"}</td>
+          <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : escapeHtml(t("no_data"))}</td>
           <td class="mono">${escapeHtml(formatGroupRange(group, true))}</td>
           <td>
-            <span class="pill">${deviceCount} в базе</span>
-            <span class="pill">${pingCount} ping</span>
-            <span class="pill">${freeCount} свободно</span>
+            <span class="pill">${escapeHtml(t("in_database_short", { count: deviceCount }))}</span>
+            <span class="pill">${escapeHtml(t("ping_short", { count: pingCount }))}</span>
+            <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
-          <td>${escapeHtml(group.note || "—")}</td>
+          <td>${escapeHtml(group.note || t("no_data"))}</td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}">Удалить</button>
+            <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}">${escapeHtml(t("delete_row"))}</button>
           </td>
         </tr>
       `;
     });
 
   elements.groupsTableBody.innerHTML = rows.join("");
-  elements.groupsCounter.textContent = `${state.groups.length} записей`;
+  elements.groupsCounter.textContent = formatRecordsCount(state.groups.length);
 }
 
 function renderDevicesTable() {
@@ -1185,16 +1689,16 @@ function renderDevicesTable() {
 
   if (filteredDevices.length === 0) {
     const message = searchTerm
-      ? "По текущему фильтру ничего не найдено."
-      : "Устройства еще не добавлены.";
+      ? t("no_results")
+      : t("empty_devices");
     elements.devicesTableBody.innerHTML = `
       <tr class="empty-row">
         <td colspan="9">${escapeHtml(message)}</td>
       </tr>
     `;
     elements.devicesCounter.textContent = searchTerm
-      ? `0 из ${state.devices.length}`
-      : "0 записей";
+      ? formatFilteredCount(0, state.devices.length)
+      : formatRecordsCount(0);
     return;
   }
 
@@ -1213,14 +1717,14 @@ function renderDevicesTable() {
             <div class="secondary-line">${escapeHtml(device.note || "")}</div>
           </td>
           <td class="mono">${escapeHtml(device.ip)}</td>
-          <td class="mono">${escapeHtml(device.mac || "—")}</td>
-          <td>${escapeHtml(DEVICE_TYPES[device.type] || device.type)}</td>
-          <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : "—"}</td>
-          <td>${group ? `${escapeHtml(group.name)}<br><span class="mono">${escapeHtml(formatGroupRange(group, true))}</span>` : "—"}</td>
+          <td class="mono">${escapeHtml(device.mac || t("no_data"))}</td>
+          <td>${escapeHtml(getDeviceTypeLabel(device.type))}</td>
+          <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : escapeHtml(t("no_data"))}</td>
+          <td>${group ? `${escapeHtml(group.name)}<br><span class="mono">${escapeHtml(formatGroupRange(group, true))}</span>` : escapeHtml(t("no_data"))}</td>
           <td>${pingBadge}</td>
           <td><span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span></td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}">Удалить</button>
+            <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}">${escapeHtml(t("delete_row"))}</button>
           </td>
         </tr>
       `;
@@ -1228,18 +1732,18 @@ function renderDevicesTable() {
 
   elements.devicesTableBody.innerHTML = rows.join("");
   elements.devicesCounter.textContent = searchTerm
-    ? `${filteredDevices.length} из ${state.devices.length}`
-    : `${filteredDevices.length} записей`;
+    ? formatFilteredCount(filteredDevices.length, state.devices.length)
+    : formatRecordsCount(filteredDevices.length);
 }
 
 function renderHistoryTable() {
   if (state.history.length === 0) {
     elements.historyTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="6">История изменений пока пуста.</td>
+        <td colspan="6">${escapeHtml(t("empty_history"))}</td>
       </tr>
     `;
-    elements.historyCounter.textContent = "0 событий";
+    elements.historyCounter.textContent = formatEventsCount(0);
     return;
   }
 
@@ -1250,17 +1754,17 @@ function renderHistoryTable() {
     return `
       <tr>
         <td class="mono">${escapeHtml(formatDateTime(entry.changedAt))}</td>
-        <td>${escapeHtml(entry.actor || "system")}</td>
-        <td><span class="status-badge status-badge--info">${escapeHtml(ACTION_LABELS[entry.action] || entry.action)}</span></td>
+        <td>${escapeHtml(entry.actor || t("system_actor"))}</td>
+        <td><span class="status-badge status-badge--info">${escapeHtml(getActionLabel(entry.action))}</span></td>
         <td>${escapeHtml(entry.deviceName)}</td>
         <td class="mono">${ipLabel}</td>
-        <td>${escapeHtml(entry.note || "—")}</td>
+        <td>${escapeHtml(entry.note || t("no_data"))}</td>
       </tr>
     `;
   });
 
   elements.historyTableBody.innerHTML = rows.join("");
-  elements.historyCounter.textContent = `${state.history.length} событий`;
+  elements.historyCounter.textContent = formatEventsCount(state.history.length);
 }
 
 function renderStats() {
@@ -1281,6 +1785,127 @@ function renderStats() {
   elements.statAvailable.textContent = String(freeInPools);
 }
 
+function renderDashboardPanels() {
+  renderDashboardSubnets();
+  renderDashboardGroups();
+  renderDashboardDevices();
+  renderDashboardHistory();
+}
+
+function renderDashboardSubnets() {
+  if (state.subnets.length === 0) {
+    elements.dashboardSubnetsList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_subnets"))}</li>`;
+    return;
+  }
+
+  const reachableSet = getReachableScanIps();
+  const items = state.subnets
+    .slice()
+    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
+    .slice(0, 4)
+    .map((subnet) => {
+      const busyCount = countBusyInSubnet(subnet, reachableSet);
+      const freeCount = Math.max(subnet.poolSize - busyCount, 0);
+      return `
+        <li class="mini-item">
+          <div class="mini-title">${escapeHtml(subnet.name)}</div>
+          <div class="mini-meta mono">${escapeHtml(subnet.cidr)} · ${escapeHtml(subnet.rangeStart)}-${escapeHtml(subnet.rangeEnd)}</div>
+          <div class="mini-badges">
+            <span class="pill">${escapeHtml(t("in_database_short", { count: getDevicesInSubnet(subnet).length }))}</span>
+            <span class="pill">${escapeHtml(t("ping_short", { count: countReachableInSubnet(subnet, reachableSet) }))}</span>
+            <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
+          </div>
+        </li>
+      `;
+    });
+
+  elements.dashboardSubnetsList.innerHTML = items.join("");
+}
+
+function renderDashboardGroups() {
+  if (state.groups.length === 0) {
+    elements.dashboardGroupsList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_groups"))}</li>`;
+    return;
+  }
+
+  const reachableSet = getReachableScanIps();
+  const items = state.groups
+    .slice()
+    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
+    .slice(0, 4)
+    .map((group) => {
+      const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
+      const busyCount = countBusyInGroup(group, reachableSet);
+      const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
+      const freeCount = Math.max(totalCount - busyCount, 0);
+      return `
+        <li class="mini-item">
+          <div class="mini-title">${escapeHtml(group.name)}</div>
+          <div class="mini-meta">${escapeHtml(subnet?.name || t("no_data"))} · <span class="mono">${escapeHtml(formatGroupRange(group, true))}</span></div>
+          <div class="mini-badges">
+            <span class="pill">${escapeHtml(t("in_database_short", { count: getDevicesInGroup(group).length }))}</span>
+            <span class="pill">${escapeHtml(t("ping_short", { count: countReachableInGroup(group, reachableSet) }))}</span>
+            <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
+          </div>
+        </li>
+      `;
+    });
+
+  elements.dashboardGroupsList.innerHTML = items.join("");
+}
+
+function renderDashboardDevices() {
+  if (state.devices.length === 0) {
+    elements.dashboardDevicesList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_devices"))}</li>`;
+    return;
+  }
+
+  const items = state.devices
+    .slice()
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+    .slice(0, 5)
+    .map((device) => {
+      const subnet = resolveDeviceSubnet(device);
+      return `
+        <li class="mini-item">
+          <div class="mini-title">${escapeHtml(device.name)}</div>
+          <div class="mini-meta mono">${escapeHtml(device.ip)} · ${escapeHtml(getDeviceTypeLabel(device.type))}</div>
+          <div class="mini-badges">
+            <span class="pill">${escapeHtml(subnet?.name || t("no_binding"))}</span>
+            <span class="pill">${escapeHtml(formatDateTime(device.createdAt))}</span>
+          </div>
+        </li>
+      `;
+    });
+
+  elements.dashboardDevicesList.innerHTML = items.join("");
+}
+
+function renderDashboardHistory() {
+  if (state.history.length === 0) {
+    elements.dashboardHistoryList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_history"))}</li>`;
+    return;
+  }
+
+  const items = state.history
+    .slice(0, 5)
+    .map((entry) => {
+      const ipLabel = entry.previousIp ? `${entry.previousIp} → ${entry.ip}` : entry.ip;
+      return `
+        <li class="mini-item">
+          <div class="mini-title">${escapeHtml(entry.deviceName)}</div>
+          <div class="mini-meta">${escapeHtml(getActionLabel(entry.action))} · <span class="mono">${escapeHtml(ipLabel)}</span></div>
+          <div class="mini-badges">
+            <span class="pill">${escapeHtml(entry.actor || t("system_actor"))}</span>
+            <span class="pill">${escapeHtml(formatDateTime(entry.changedAt))}</span>
+          </div>
+        </li>
+      `;
+    });
+
+  elements.dashboardHistoryList.innerHTML = items.join("");
+}
+
 function renderIpCheckResult(message, tone) {
   elements.ipCheckResult.className = `result-card result-card--${tone}`;
   elements.ipCheckResult.textContent = message;
@@ -1299,14 +1924,14 @@ function setScanStatus(label, variant) {
 function renderPingBadge(ip) {
   const pingState = getPingState(ip);
   if (!pingState) {
-    return '<span class="status-badge status-badge--warn">Нет данных</span>';
+    return `<span class="status-badge status-badge--warn">${escapeHtml(t("ping_no_data"))}</span>`;
   }
 
   if (pingState.isReachable) {
-    return '<span class="status-badge status-badge--ok">Online</span>';
+    return `<span class="status-badge status-badge--ok">${escapeHtml(t("ping_online"))}</span>`;
   }
 
-  return '<span class="status-badge status-badge--warn">Offline</span>';
+  return `<span class="status-badge status-badge--warn">${escapeHtml(t("ping_offline"))}</span>`;
 }
 
 function normalizeState(rawState, baseGroups = []) {
@@ -1328,8 +1953,29 @@ function normalizeState(rawState, baseGroups = []) {
     scanInProgress: Boolean(rawState?.meta?.scanInProgress),
     scanIntervalSeconds: Number(rawState?.meta?.scanIntervalSeconds || 90),
   };
+  const settings = normalizeServerSettings(rawState?.settings, meta);
 
-  return { subnets, groups, devices, scanResults, history, meta };
+  return { subnets, groups, devices, scanResults, history, meta, settings };
+}
+
+function normalizeServerSettings(rawSettings, meta = {}) {
+  const scanIntervalSeconds = Number(
+    rawSettings?.scanIntervalSeconds || meta?.scanIntervalSeconds || 90
+  );
+  const scanTimeoutMs = Number(rawSettings?.scanTimeoutMs || 1000);
+  const scanConcurrency = Number(rawSettings?.scanConcurrency || 32);
+  const scanIntervalMin = Number(rawSettings?.limits?.scanIntervalMin || 15);
+  const scanIntervalMax = Number(rawSettings?.limits?.scanIntervalMax || 3600);
+
+  return {
+    scanIntervalSeconds,
+    scanTimeoutMs,
+    scanConcurrency,
+    limits: {
+      scanIntervalMin,
+      scanIntervalMax,
+    },
+  };
 }
 
 function normalizeGroupsList(rawGroups, subnets, baseGroups = []) {
@@ -1373,6 +2019,7 @@ function applyStateToTarget(targetState, snapshot) {
   targetState.scanResults = snapshot.scanResults;
   targetState.history = snapshot.history;
   targetState.meta = snapshot.meta;
+  targetState.settings = snapshot.settings;
 }
 
 function cloneState(snapshot) {
@@ -1383,6 +2030,10 @@ function cloneState(snapshot) {
     scanResults: snapshot.scanResults.map((entry) => ({ ...entry })),
     history: snapshot.history.map((entry) => ({ ...entry })),
     meta: { ...snapshot.meta },
+    settings: {
+      ...snapshot.settings,
+      limits: { ...snapshot.settings.limits },
+    },
   };
 }
 
@@ -1392,7 +2043,7 @@ function normalizeSubnet(rawSubnet) {
   const note = String(rawSubnet?.note || "").trim();
 
   if (!name) {
-    throw new Error("Имя подсети обязательно.");
+    throw new Error(t("error_subnet_name_required"));
   }
 
   const parsed = parseCidr(cidr);
@@ -1404,11 +2055,11 @@ function normalizeSubnet(rawSubnet) {
   const rangeEndInt = ipToInt(rangeEnd);
 
   if (rangeStartInt > rangeEndInt) {
-    throw new Error(`В подсети ${name} начало диапазона не может быть больше конца.`);
+    throw new Error(t("error_subnet_range_order", { name }));
   }
 
   if (rangeStartInt < parsed.networkInt || rangeEndInt > parsed.broadcastInt) {
-    throw new Error(`Диапазон подсети ${name} должен находиться внутри ${parsed.cidr}.`);
+    throw new Error(t("error_subnet_range_outside", { name, cidr: parsed.cidr }));
   }
 
   return {
@@ -1438,11 +2089,11 @@ function normalizeRangeGroup(rawGroup, subnets, existingGroups = state.groups) {
   const subnet = subnets.find((entry) => entry.id === subnetId);
 
   if (!name) {
-    throw new Error("Имя группы диапазона обязательно.");
+    throw new Error(t("error_group_name_required"));
   }
 
   if (!subnet) {
-    throw new Error(`Для группы "${name}" не выбрана корректная подсеть.`);
+    throw new Error(t("error_group_subnet_invalid", { name }));
   }
 
   const rangeStart = normalizeGroupEndpoint(String(rawGroup?.rangeStart || "").trim(), subnet);
@@ -1451,11 +2102,11 @@ function normalizeRangeGroup(rawGroup, subnets, existingGroups = state.groups) {
   const rangeEndInt = ipToInt(rangeEnd);
 
   if (rangeStartInt > rangeEndInt) {
-    throw new Error(`В группе "${name}" начало диапазона не может быть больше конца.`);
+    throw new Error(t("error_group_range_order", { name }));
   }
 
   if (rangeStartInt < subnet.networkInt || rangeEndInt > subnet.broadcastInt) {
-    throw new Error(`Диапазон группы "${name}" должен находиться внутри подсети ${subnet.cidr}.`);
+    throw new Error(t("error_group_range_outside", { name, cidr: subnet.cidr }));
   }
 
   const currentId = String(rawGroup?.id || createId());
@@ -1473,7 +2124,7 @@ function normalizeRangeGroup(rawGroup, subnets, existingGroups = state.groups) {
   });
 
   if (overlappingGroup) {
-    throw new Error(`Диапазон "${name}" пересекается с группой "${overlappingGroup.name}".`);
+    throw new Error(t("error_group_overlap", { name, other: overlappingGroup.name }));
   }
 
   return {
@@ -1494,23 +2145,23 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups) {
   const ip = normalizeIp(String(rawDevice?.ip || "").trim());
   const rawMac = String(rawDevice?.mac || "").trim();
   const mac = rawMac ? normalizeMac(rawMac) : "";
-  const type = String(rawDevice?.type || "").trim().toLowerCase();
+  const type = normalizeDeviceTypeValue(rawDevice?.type);
   const note = String(rawDevice?.note || "").trim();
   let subnetId = String(rawDevice?.subnetId || "").trim();
   const groupId = String(rawDevice?.groupId || "").trim();
 
   if (!name) {
-    throw new Error("Имя устройства обязательно.");
+    throw new Error(t("error_device_name_required"));
   }
 
-  assertValidIp(ip, `IP для устройства ${name} заполнен некорректно.`);
+  assertValidIp(ip, t("error_device_ip_invalid", { name }));
 
   if (mac && !/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(mac)) {
-    throw new Error(`MAC для устройства ${name} должен быть в формате AA:BB:CC:DD:EE:FF.`);
+    throw new Error(t("error_device_mac_invalid", { name }));
   }
 
   if (!DEVICE_TYPES[type]) {
-    throw new Error(`Тип устройства ${name} не поддерживается.`);
+    throw new Error(t("error_device_type_invalid", { name }));
   }
 
   if (subnetId) {
@@ -1518,7 +2169,7 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups) {
     if (!selectedSubnet) {
       subnetId = "";
     } else if (!isIpInsideNetwork(ipToInt(ip), selectedSubnet)) {
-      throw new Error(`IP ${ip} не попадает в сеть подсети "${selectedSubnet.name}".`);
+      throw new Error(t("error_device_subnet_mismatch", { ip, subnet: selectedSubnet.name }));
     }
   }
 
@@ -1529,18 +2180,20 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups) {
   if (groupId) {
     const selectedGroup = groups.find((group) => group.id === groupId);
     if (!selectedGroup) {
-      throw new Error(`Выбранная группа для устройства "${name}" не найдена.`);
+      throw new Error(t("error_device_group_missing", { name }));
     }
 
     if (subnetId && selectedGroup.subnetId !== subnetId) {
-      throw new Error(`Группа "${selectedGroup.name}" не относится к выбранной подсети.`);
+      throw new Error(t("error_device_group_subnet_mismatch", { group: selectedGroup.name }));
     }
 
     const ipInt = ipToInt(ip);
     if (ipInt < selectedGroup.rangeStartInt || ipInt > selectedGroup.rangeEndInt) {
-      throw new Error(
-        `IP ${ip} не попадает в диапазон группы "${selectedGroup.name}" (${formatGroupRange(selectedGroup, true)}).`
-      );
+      throw new Error(t("error_device_group_ip_mismatch", {
+        ip,
+        group: selectedGroup.name,
+        range: formatGroupRange(selectedGroup, true),
+      }));
     }
 
     subnetId = selectedGroup.subnetId;
@@ -1561,7 +2214,7 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups) {
 function parseCidr(cidr) {
   const parts = String(cidr || "").trim().split("/");
   if (parts.length !== 2) {
-    throw new Error("CIDR должен быть в формате 192.168.10.0/24.");
+    throw new Error(t("error_cidr_format"));
   }
 
   const [rawIp, rawMask] = parts;
@@ -1569,7 +2222,7 @@ function parseCidr(cidr) {
   const maskBits = Number.parseInt(rawMask, 10);
 
   if (!Number.isInteger(maskBits) || maskBits < 0 || maskBits > 32) {
-    throw new Error("Маска должна быть числом от 0 до 32.");
+    throw new Error(t("error_mask_range"));
   }
 
   const ipInt = ipToInt(normalizedIp);
@@ -1596,17 +2249,17 @@ function parseCidr(cidr) {
 
 function normalizeGroupEndpoint(value, subnet) {
   if (!value) {
-    throw new Error(`Для группы "${subnet.name}" нужно указать диапазон.`);
+    throw new Error(t("error_group_range_missing", { name: subnet.name }));
   }
 
   if (/^\d+$/.test(value)) {
     if (subnet.maskBits !== 24) {
-      throw new Error("Короткий формат диапазона доступен только для подсетей /24.");
+      throw new Error(t("error_group_short_range_cidr"));
     }
 
     const octet = Number.parseInt(value, 10);
     if (octet < 0 || octet > 255) {
-      throw new Error("Последний октет должен быть числом от 0 до 255.");
+      throw new Error(t("error_group_octet_range"));
     }
 
     const [a, b, c] = subnet.network.split(".");
@@ -1751,7 +2404,7 @@ function handleDeviceSubnetChange() {
 
 function renderDeviceGroupOptions(preferredGroupId = elements.deviceGroupSelect.value) {
   const subnetId = elements.subnetSelect.value;
-  const options = ['<option value="">Любой свободный IP в подсети</option>'];
+  const options = [`<option value="">${escapeHtml(t("any_free_ip"))}</option>`];
   const recommendedGroupId = getRecommendedGroupIdForDevice(
     subnetId,
     elements.deviceForm.elements.type.value
@@ -1850,18 +2503,18 @@ function normalizeSearchableText(value) {
 function evaluateDeviceStatus(device, subnet) {
   const sameIpCount = state.devices.filter((entry) => entry.ip === device.ip).length;
   if (sameIpCount > 1) {
-    return { label: "Конфликт IP", variant: "danger" };
+    return { label: t("status_conflict"), variant: "danger" };
   }
 
   if (!subnet) {
-    return { label: "Без подсети", variant: "warn" };
+    return { label: t("status_no_subnet"), variant: "warn" };
   }
 
   if (!isIpInsidePool(ipToInt(device.ip), subnet)) {
-    return { label: "Вне пула", variant: "warn" };
+    return { label: t("status_outside_pool"), variant: "warn" };
   }
 
-  return { label: "ОК", variant: "ok" };
+  return { label: t("status_ok"), variant: "ok" };
 }
 
 function matchesSearch(device, searchTerm) {
@@ -1877,7 +2530,7 @@ function matchesSearch(device, searchTerm) {
     device.ip,
     device.mac,
     device.type,
-    DEVICE_TYPES[device.type],
+    getDeviceTypeLabel(device.type),
     device.note,
     subnet?.name || "",
     subnet?.cidr || "",
@@ -1909,7 +2562,7 @@ function formatGroupRange(group, compact = false) {
 
 function formatDateTime(value) {
   if (!value) {
-    return "—";
+    return t("no_data");
   }
 
   const date = new Date(value);
@@ -1917,7 +2570,7 @@ function formatDateTime(value) {
     return String(value);
   }
 
-  return new Intl.DateTimeFormat("ru-RU", {
+  return new Intl.DateTimeFormat(DATE_LOCALES[getLanguage()] || DATE_LOCALES.ru, {
     dateStyle: "short",
     timeStyle: "medium",
   }).format(date);
@@ -1940,7 +2593,7 @@ function normalizeMac(value) {
 }
 
 function normalizeIp(value) {
-  assertValidIp(value, "Укажите корректный IPv4 адрес.");
+  assertValidIp(value, t("ip_invalid_check"));
   return value
     .split(".")
     .map((segment) => String(Number.parseInt(segment, 10)))
@@ -2004,7 +2657,7 @@ function findSubnetByReference(row, subnets) {
   return subnets.find((subnet) => {
     return (
       subnet.id === (row.subnet_id || row.subnetId) ||
-      subnet.cidr === (row.subnet_cidr || row.subnetCidr) ||
+      subnet.cidr === (row.subnet_cidr || row.subnetCidr || row.cidr) ||
       subnet.name === (row.subnet_name || row.subnetName)
     );
   });
@@ -2012,13 +2665,16 @@ function findSubnetByReference(row, subnets) {
 
 function parseCsv(text) {
   const rows = [];
+  const sanitizedText = text.startsWith("\uFEFF") ? text.slice(1) : text;
+  const firstLine = sanitizedText.split(/\r?\n/, 1)[0] || "";
+  const delimiter = firstLine.split(";").length > firstLine.split(",").length ? ";" : ",";
   let currentValue = "";
   let currentRow = [];
   let inQuotes = false;
 
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    const nextChar = text[index + 1];
+  for (let index = 0; index < sanitizedText.length; index += 1) {
+    const char = sanitizedText[index];
+    const nextChar = sanitizedText[index + 1];
 
     if (char === '"') {
       if (inQuotes && nextChar === '"') {
@@ -2027,7 +2683,7 @@ function parseCsv(text) {
       } else {
         inQuotes = !inQuotes;
       }
-    } else if (char === "," && !inQuotes) {
+    } else if (char === delimiter && !inQuotes) {
       currentRow.push(currentValue);
       currentValue = "";
     } else if ((char === "\n" || char === "\r") && !inQuotes) {
@@ -2058,29 +2714,113 @@ function parseCsv(text) {
   return rows.slice(1).map((row) => {
     const record = {};
     headers.forEach((header, index) => {
-      record[header] = row[index] ?? "";
+      record[normalizeCsvHeader(header)] = row[index] ?? "";
     });
     return record;
   });
 }
 
-function toCsv(rows) {
-  if (rows.length === 0) {
+function normalizeCsvHeader(header) {
+  const normalized = String(header || "")
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .toLowerCase();
+
+  const aliases = {
+    id: "id",
+    name: "name",
+    "имя": "name",
+    "ім'я": "name",
+    cidr: "cidr",
+    network: "network",
+    "сеть": "network",
+    "мережа": "network",
+    mask: "mask",
+    "маска": "mask",
+    note: "note",
+    comment: "note",
+    "комментарий": "note",
+    "коментар": "note",
+    ip: "ip",
+    mac: "mac",
+    type: "type",
+    "тип": "type",
+    "начало пула": "range_start",
+    "початок пулу": "range_start",
+    "pool start": "range_start",
+    "конец пула": "range_end",
+    "кінець пулу": "range_end",
+    "pool end": "range_end",
+    "начало диапазона": "range_start",
+    "початок діапазону": "range_start",
+    "range start": "range_start",
+    "конец диапазона": "range_end",
+    "кінець діапазону": "range_end",
+    "range end": "range_end",
+    "id подсети": "subnet_id",
+    "id підмережі": "subnet_id",
+    "subnet id": "subnet_id",
+    "подсеть": "subnet_name",
+    "підмережа": "subnet_name",
+    subnet: "subnet_name",
+    "id группы": "group_id",
+    "id групи": "group_id",
+    "group id": "group_id",
+    "группа": "group_name",
+    "група": "group_name",
+    group: "group_name",
+    ping: "ping",
+  };
+
+  return aliases[normalized] || normalized.replace(/\s+/g, "_");
+}
+
+function normalizeDeviceTypeValue(value) {
+  const normalized = normalizeSearchableText(value);
+  if (!normalized) {
     return "";
   }
 
-  const headers = Object.keys(rows[0]);
-  const lines = [headers.join(",")];
-  rows.forEach((row) => {
-    const line = headers.map((header) => escapeCsvCell(row[header] ?? "")).join(",");
-    lines.push(line);
-  });
-  return lines.join("\n");
+  const aliases = {
+    server: "server",
+    сервер: "server",
+    "сервери": "server",
+    "серверы": "server",
+    container: "container",
+    containers: "container",
+    контейнер: "container",
+    "контейнери": "container",
+    iot: "iot",
+  };
+
+  return aliases[normalized] || normalized;
 }
 
-function escapeCsvCell(value) {
+function toCsv(rows, options = {}) {
+  if (rows.length === 0) {
+    return "\uFEFF";
+  }
+
+  const delimiter = options.delimiter || ";";
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.map((header) => escapeCsvCell(header, delimiter)).join(delimiter)];
+  rows.forEach((row) => {
+    const line = headers
+      .map((header) => escapeCsvCell(row[header] ?? "", delimiter))
+      .join(delimiter);
+    lines.push(line);
+  });
+  return `\uFEFF${lines.join("\r\n")}`;
+}
+
+function escapeCsvCell(value, delimiter = ";") {
   const stringValue = String(value);
-  if (/[",\n]/.test(stringValue)) {
+  if (
+    stringValue.includes(delimiter) ||
+    stringValue.includes('"') ||
+    stringValue.includes("\n") ||
+    stringValue.includes("\r")
+  ) {
     return `"${stringValue.replaceAll('"', '""')}"`;
   }
   return stringValue;
@@ -2122,7 +2862,7 @@ async function apiRequest(path, options = {}) {
   const payload = isJson ? await response.json() : null;
 
   if (!response.ok) {
-    throw new Error(payload?.error || `Ошибка запроса: ${response.status}`);
+    throw new Error(payload?.error || t("error_request_failed", { status: response.status }));
   }
 
   return payload;
