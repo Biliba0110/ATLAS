@@ -79,100 +79,49 @@
     </nav>
 
     <section class="page-view page-view--dashboard is-active" data-view="dashboard">
-      <div class="dashboard-grid">
-        <div class="dashboard-feature-grid">
-          <section class="panel panel--pulse panel--dashboard-card panel--dashboard-feature">
-            <div class="panel-heading">
-              <p class="panel-kicker" data-i18n="dashboard_state_kicker">Состояние</p>
-              <h2 data-i18n="dashboard_state_title">Пульс сети</h2>
-            </div>
-            <div class="dashboard-signal-strip">
-              <span class="pill" data-i18n="dashboard_signal_live">Live Sync</span>
-              <span class="pill" data-i18n="dashboard_signal_ping">Ping Aware</span>
-              <span class="pill" data-i18n="dashboard_signal_shared">Shared State</span>
-            </div>
-            <p class="helper-text dashboard-lead" id="live-summary-text" data-i18n="live_summary_default">
-              Интерфейс автоматически подхватывает новые записи, результаты ping и изменения базы.
-            </p>
-            <div class="dashboard-actions">
-              <button type="button" class="action-button action-button--ghost" data-view-tab="registry" data-i18n="open_registry">Открыть реестр</button>
-              <button type="button" class="action-button action-button--ghost" data-view-tab="history" data-i18n="open_history">Открыть аудит</button>
-            </div>
-          </section>
+      <div class="dashboard-grid dashboard-grid--minimal">
+        <section class="panel panel--dashboard-card panel--dashboard-primary">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="automation_kicker">Автоматизация</p>
+            <h2 data-i18n="ip_status_title">Статус IP</h2>
+          </div>
 
-          <section class="panel panel--lookup panel--dashboard-card panel--dashboard-feature">
-            <div class="panel-heading">
-              <p class="panel-kicker" data-i18n="automation_kicker">Автоматизация</p>
-              <h2 data-i18n="ip_status_title">Статус IP</h2>
-            </div>
+          <p class="helper-text dashboard-lead" id="live-summary-text" data-i18n="dashboard_primary_note">
+            Быстрый вход в работу: проверь свободный IP, конфликт или принадлежность адреса к подсети и диапазону.
+          </p>
 
-            <form id="ip-check-form" class="stack-form dashboard-check-form">
-              <label>
-                <span data-i18n="ip_address_label">IP-адрес</span>
-                <input type="text" name="ipCheck" data-i18n-placeholder="ip_check_placeholder" placeholder="192.168.10.120" required>
-              </label>
-              <button type="submit" class="submit-button" data-i18n="check_button">Проверить</button>
-            </form>
+          <form id="ip-check-form" class="stack-form dashboard-check-form">
+            <label>
+              <span data-i18n="ip_address_label">IP-адрес</span>
+              <input type="text" name="ipCheck" data-i18n-placeholder="ip_check_placeholder" placeholder="192.168.10.120" required>
+            </label>
+            <button type="submit" class="submit-button" data-i18n="check_button">Проверить</button>
+          </form>
 
-            <div id="ip-check-result" class="result-card result-card--muted dashboard-check-result" data-i18n="ip_check_hint">
-              Введите IP, чтобы узнать, свободен ли он, отвечает ли на ping и к чему относится.
-            </div>
-          </section>
-        </div>
+          <div id="ip-check-result" class="result-card result-card--muted dashboard-check-result" data-i18n="ip_check_hint">
+            Введите IP, чтобы узнать, свободен ли он, отвечает ли на ping и к чему относится.
+          </div>
+        </section>
 
-        <div class="dashboard-panel-grid">
-          <section class="panel panel--preview panel--dashboard-card panel--dashboard-list">
-            <div class="panel-heading panel-heading--split">
-              <div>
-                <p class="panel-kicker" data-i18n="snapshot_kicker">Срез</p>
-                <h2 data-i18n="subnets_title">Подсети</h2>
-              </div>
-              <button type="button" class="link-button" data-view-tab="registry" data-i18n="registry_button">Реестр</button>
-            </div>
-            <ul class="mini-list" id="dashboard-subnets-list">
-              <li class="mini-list__empty" data-i18n="empty_subnets">Подсети еще не добавлены.</li>
-            </ul>
-          </section>
+        <section class="panel panel--dashboard-card panel--dashboard-attention">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="dashboard_attention_kicker">Внимание</p>
+            <h2 data-i18n="dashboard_attention_title">Что требует внимания</h2>
+          </div>
+          <ul class="mini-list mini-list--tight" id="dashboard-attention-list">
+            <li class="mini-list__empty" data-i18n="dashboard_attention_empty">Сейчас нет предупреждений и проблемных зон.</li>
+          </ul>
+        </section>
 
-          <section class="panel panel--preview panel--dashboard-card panel--dashboard-list">
-            <div class="panel-heading panel-heading--split">
-              <div>
-                <p class="panel-kicker" data-i18n="snapshot_kicker">Срез</p>
-                <h2 data-i18n="groups_title">Группы диапазонов</h2>
-              </div>
-              <button type="button" class="link-button" data-open-modal="add-modal" data-i18n="add_button">Добавить</button>
-            </div>
-            <ul class="mini-list" id="dashboard-groups-list">
-              <li class="mini-list__empty" data-i18n="empty_groups">Группы диапазонов еще не добавлены.</li>
-            </ul>
-          </section>
-
-          <section class="panel panel--preview panel--dashboard-card panel--dashboard-list">
-            <div class="panel-heading panel-heading--split">
-              <div>
-                <p class="panel-kicker" data-i18n="snapshot_kicker">Срез</p>
-                <h2 data-i18n="latest_devices_title">Последние устройства</h2>
-              </div>
-              <button type="button" class="link-button" data-open-modal="add-modal" data-i18n="add_button">Добавить</button>
-            </div>
-            <ul class="mini-list" id="dashboard-devices-list">
-              <li class="mini-list__empty" data-i18n="empty_devices">Устройства еще не добавлены.</li>
-            </ul>
-          </section>
-
-          <section class="panel panel--preview panel--dashboard-card panel--dashboard-list">
-            <div class="panel-heading panel-heading--split">
-              <div>
-                <p class="panel-kicker" data-i18n="audit_kicker">Аудит</p>
-                <h2 data-i18n="recent_changes_title">Последние изменения</h2>
-              </div>
-              <button type="button" class="link-button" data-view-tab="history" data-i18n="history_button">История</button>
-            </div>
-            <ul class="mini-list" id="dashboard-history-list">
-              <li class="mini-list__empty" data-i18n="empty_history">История изменений пока пуста.</li>
-            </ul>
-          </section>
-        </div>
+        <section class="panel panel--dashboard-card panel--dashboard-activity">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="audit_kicker">Аудит</p>
+            <h2 data-i18n="recent_changes_title">Последние изменения</h2>
+          </div>
+          <ul class="mini-list" id="dashboard-history-list">
+            <li class="mini-list__empty" data-i18n="empty_history">История изменений пока пуста.</li>
+          </ul>
+        </section>
       </div>
     </section>
 
@@ -576,13 +525,16 @@
               <select id="settings-theme-select">
                 <option value="atlas" data-i18n="theme_atlas">Atlas Blue</option>
                 <option value="ember" data-i18n="theme_ember">Ember Signal</option>
-                <option value="aurora" data-i18n="theme_aurora">Aurora Grid</option>
+                <option value="aurora" data-i18n="theme_aurora">Silver Bloom</option>
                 <option value="fuchsia" data-i18n="theme_fuchsia">Fuchsia Flux</option>
                 <option value="mono" data-i18n="theme_mono">Mono Terminal</option>
                 <option value="solaris" data-i18n="theme_solaris">Solaris Gold</option>
-                <option value="forest" data-i18n="theme_forest">Forest Pulse</option>
+                <option value="forest" data-i18n="theme_forest">Pixel Orbit</option>
                 <option value="neon" data-i18n="theme_neon">Neon Circuit</option>
                 <option value="arctic" data-i18n="theme_arctic">Arctic Glass</option>
+                <option value="lotus" data-i18n="theme_lotus">Midnight Lotus</option>
+                <option value="ruby" data-i18n="theme_ruby">Velvet Ruby</option>
+                <option value="tide" data-i18n="theme_tide">Abyss Tide</option>
               </select>
               <span class="setting-note" data-i18n="theme_note">Меняет палитру, акценты и атмосферу интерфейса.</span>
             </label>

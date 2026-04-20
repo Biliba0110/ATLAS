@@ -6,7 +6,7 @@ const CUSTOM_TEMPLATES_STORAGE_KEY = "atlas-custom-group-templates";
 const THEME_ALIASES = {
   ocean: "aurora",
 };
-const SUPPORTED_THEMES = ["atlas", "ember", "aurora", "fuchsia", "mono", "solaris", "forest", "neon", "arctic"];
+const SUPPORTED_THEMES = ["atlas", "ember", "aurora", "fuchsia", "mono", "solaris", "forest", "neon", "arctic", "lotus", "ruby", "tide"];
 const DEVICE_TYPES = {
   server: "device_type_server",
   container: "device_type_container",
@@ -169,9 +169,7 @@ const elements = {
   modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
   openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
   closeModalButtons: [...document.querySelectorAll("[data-close-modal]")],
-  dashboardSubnetsList: document.getElementById("dashboard-subnets-list"),
-  dashboardGroupsList: document.getElementById("dashboard-groups-list"),
-  dashboardDevicesList: document.getElementById("dashboard-devices-list"),
+  dashboardAttentionList: document.getElementById("dashboard-attention-list"),
   dashboardHistoryList: document.getElementById("dashboard-history-list"),
   deviceSuggestion: document.getElementById("device-suggestion"),
   deviceFormStatus: document.getElementById("device-form-status"),
@@ -864,16 +862,20 @@ async function handleGroupSubmit(event) {
     if (scanSummary) {
       const refreshedGroup = state.groups.find((entry) => entry.id === savedGroup.id);
       const reachableSet = getReachableScanIps();
-      const busyCount = refreshedGroup
-        ? countBusyInGroup(refreshedGroup, reachableSet)
+      const assignedCount = refreshedGroup
+        ? countAssignedInGroup(refreshedGroup)
+        : 0;
+      const pingOnlyCount = refreshedGroup
+        ? countPingOnlyInGroup(refreshedGroup, reachableSet)
         : scanSummary.reachableIps;
       const freeCount = refreshedGroup
-        ? Math.max(refreshedGroup.rangeEndInt - refreshedGroup.rangeStartInt + 1 - busyCount, 0)
+        ? countFreeInGroup(refreshedGroup)
         : "—";
       showToast(t("group_added_scanned", {
         name: group.name,
         scanned: scanSummary.scannedIps,
-        busy: busyCount,
+        assigned: assignedCount,
+        pingOnly: pingOnlyCount,
         free: freeCount,
       }));
       return;
@@ -1080,10 +1082,10 @@ function formatSuggestionMessage(suggestion, subnet, group = null) {
         name: group.name,
         ip: suggestion.ip,
         range: formatGroupRange(group, true),
-        busy: suggestion.busyCount,
         free: suggestion.freeCount,
+        safeFree: suggestion.safeFreeCount,
         assigned: suggestion.assignedCount,
-        reachable: suggestion.reachableCount,
+        pingOnly: suggestion.pingOnlyCount,
       });
     }
 
@@ -1091,10 +1093,10 @@ function formatSuggestionMessage(suggestion, subnet, group = null) {
       name: subnet.name,
       ip: suggestion.ip,
       range: `${subnet.rangeStart}-${subnet.rangeEnd}`,
-      busy: suggestion.busyCount,
       free: suggestion.freeCount,
+      safeFree: suggestion.safeFreeCount,
       assigned: suggestion.assignedCount,
-      reachable: suggestion.reachableCount,
+      pingOnly: suggestion.pingOnlyCount,
     });
   }
 
@@ -1102,17 +1104,17 @@ function formatSuggestionMessage(suggestion, subnet, group = null) {
     ? t("suggestion_compact_group", {
       name: group.name,
       ip: suggestion.ip,
-      busy: suggestion.busyCount,
       free: suggestion.freeCount,
+      safeFree: suggestion.safeFreeCount,
       assigned: suggestion.assignedCount,
-      reachable: suggestion.reachableCount,
+      pingOnly: suggestion.pingOnlyCount,
     })
     : t("suggestion_compact_subnet", {
       ip: suggestion.ip,
-      busy: suggestion.busyCount,
       free: suggestion.freeCount,
+      safeFree: suggestion.safeFreeCount,
       assigned: suggestion.assignedCount,
-      reachable: suggestion.reachableCount,
+      pingOnly: suggestion.pingOnlyCount,
     });
 }
 
@@ -1145,21 +1147,40 @@ function suggestFreeIp(subnet, group = null) {
       })
       .map((result) => result.ip)
   );
-  const busyIps = new Set([...assignedIps, ...reachableIps]);
+  const pingOnlyIps = new Set([...reachableIps].filter((ip) => !assignedIps.has(ip)));
 
   const startInt = group ? group.rangeStartInt : subnet.rangeStartInt;
   const endInt = group ? group.rangeEndInt : subnet.rangeEndInt;
+  let firstAssignedFreeIp = null;
   for (let ipInt = startInt; ipInt <= endInt; ipInt += 1) {
     const ip = intToIp(ipInt);
-    if (!busyIps.has(ip)) {
+    if (assignedIps.has(ip)) {
+      continue;
+    }
+    if (!firstAssignedFreeIp) {
+      firstAssignedFreeIp = ip;
+    }
+    if (!reachableIps.has(ip)) {
       return {
         ip,
         assignedCount: assignedIps.size,
         reachableCount: reachableIps.size,
-        busyCount: busyIps.size,
-        freeCount: Math.max(endInt - startInt + 1 - busyIps.size, 0),
+        pingOnlyCount: pingOnlyIps.size,
+        freeCount: Math.max(endInt - startInt + 1 - assignedIps.size, 0),
+        safeFreeCount: Math.max(endInt - startInt + 1 - assignedIps.size - pingOnlyIps.size, 0),
       };
     }
+  }
+
+  if (firstAssignedFreeIp) {
+    return {
+      ip: firstAssignedFreeIp,
+      assignedCount: assignedIps.size,
+      reachableCount: reachableIps.size,
+      pingOnlyCount: pingOnlyIps.size,
+      freeCount: Math.max(endInt - startInt + 1 - assignedIps.size, 0),
+      safeFreeCount: 0,
+    };
   }
 
   return null;
@@ -1599,10 +1620,9 @@ function renderSubnetsTable() {
     .slice()
     .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
     .map((subnet) => {
-      const assignedCount = getDevicesInSubnet(subnet).length;
-      const reachableCount = countReachableInSubnet(subnet, reachableScanIps);
-      const busyCount = countBusyInSubnet(subnet, reachableScanIps);
-      const freeCount = Math.max(subnet.poolSize - busyCount, 0);
+      const assignedCount = countAssignedInSubnet(subnet);
+      const pingOnlyCount = countPingOnlyInSubnet(subnet, reachableScanIps);
+      const freeCount = countFreeInSubnet(subnet);
       const groups = getGroupsInSubnet(subnet.id);
       const groupSummary = groups.length === 0
         ? t("no_data")
@@ -1618,7 +1638,7 @@ function renderSubnetsTable() {
           <td class="mono">${escapeHtml(subnet.rangeStart)} - ${escapeHtml(subnet.rangeEnd)}</td>
           <td>
             <span class="pill">${escapeHtml(t("in_database_short", { count: assignedCount }))}</span>
-            <span class="pill">${escapeHtml(t("ping_short", { count: reachableCount }))}</span>
+            <span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>
             <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
           <td><div class="secondary-line">${escapeHtml(groupSummary)}</div></td>
@@ -1656,11 +1676,9 @@ function renderGroupsTable() {
     })
     .map((group) => {
       const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
-      const deviceCount = getDevicesInGroup(group).length;
-      const pingCount = countReachableInGroup(group, reachableSet);
-      const busyCount = countBusyInGroup(group, reachableSet);
-      const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
-      const freeCount = Math.max(totalCount - busyCount, 0);
+      const deviceCount = countAssignedInGroup(group);
+      const pingOnlyCount = countPingOnlyInGroup(group, reachableSet);
+      const freeCount = countFreeInGroup(group);
       return `
         <tr>
           <td><strong>${escapeHtml(group.name)}</strong></td>
@@ -1668,7 +1686,7 @@ function renderGroupsTable() {
           <td class="mono">${escapeHtml(formatGroupRange(group, true))}</td>
           <td>
             <span class="pill">${escapeHtml(t("in_database_short", { count: deviceCount }))}</span>
-            <span class="pill">${escapeHtml(t("ping_short", { count: pingCount }))}</span>
+            <span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>
             <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
           <td>${escapeHtml(group.note || t("no_data"))}</td>
@@ -1768,117 +1786,81 @@ function renderHistoryTable() {
 }
 
 function renderStats() {
-  const busyIps = getBusyIpsSet();
+  const assignedIps = getAssignedIpsSet();
   const freeInPools = state.subnets.reduce((total, subnet) => {
-    let busyCount = 0;
-    for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
-      if (busyIps.has(intToIp(ipInt))) {
-        busyCount += 1;
-      }
-    }
-    return total + Math.max(subnet.poolSize - busyCount, 0);
+    return total + countFreeInSubnet(subnet);
   }, 0);
 
   elements.statSubnets.textContent = String(state.subnets.length);
   elements.statDevices.textContent = String(state.devices.length);
-  elements.statOccupied.textContent = String(busyIps.size);
+  elements.statOccupied.textContent = String(assignedIps.size);
   elements.statAvailable.textContent = String(freeInPools);
 }
 
 function renderDashboardPanels() {
-  renderDashboardSubnets();
-  renderDashboardGroups();
-  renderDashboardDevices();
+  renderDashboardAttention();
   renderDashboardHistory();
 }
 
-function renderDashboardSubnets() {
-  if (state.subnets.length === 0) {
-    elements.dashboardSubnetsList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_subnets"))}</li>`;
+function renderDashboardAttention() {
+  const reachableIps = getReachableScanIps();
+  const ipConflicts = state.devices.filter((device, index, source) => {
+    return source.findIndex((entry) => entry.ip === device.ip) !== index;
+  }).length;
+  const outsidePool = state.devices.filter((device) => {
+    const subnet = resolveDeviceSubnet(device);
+    return subnet ? !isIpInsidePool(ipToInt(device.ip), subnet) : false;
+  }).length;
+  const withoutSubnet = state.devices.filter((device) => !resolveDeviceSubnet(device)).length;
+  const untrackedReachable = [...reachableIps].filter((ip) => !state.devices.some((device) => device.ip === ip)).length;
+  const fullGroups = state.groups.filter((group) => {
+    const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
+    return totalCount > 0 && countAssignedInGroup(group) >= totalCount;
+  }).length;
+
+  const items = [
+    {
+      value: ipConflicts,
+      title: t("dashboard_attention_conflicts_title"),
+      note: t("dashboard_attention_conflicts_note"),
+      tone: ipConflicts > 0 ? "danger" : "ok",
+    },
+    {
+      value: untrackedReachable,
+      title: t("dashboard_attention_untracked_title"),
+      note: t("dashboard_attention_untracked_note"),
+      tone: untrackedReachable > 0 ? "warn" : "ok",
+    },
+    {
+      value: outsidePool + withoutSubnet,
+      title: t("dashboard_attention_placement_title"),
+      note: t("dashboard_attention_placement_note"),
+      tone: outsidePool + withoutSubnet > 0 ? "warn" : "ok",
+    },
+    {
+      value: fullGroups,
+      title: t("dashboard_attention_capacity_title"),
+      note: t("dashboard_attention_capacity_note"),
+      tone: fullGroups > 0 ? "warn" : "ok",
+    },
+  ];
+
+  const hasAttention = items.some((item) => item.value > 0);
+  if (!hasAttention) {
+    elements.dashboardAttentionList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("dashboard_attention_empty"))}</li>`;
     return;
   }
 
-  const reachableSet = getReachableScanIps();
-  const items = state.subnets
-    .slice()
-    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
-    .slice(0, 4)
-    .map((subnet) => {
-      const busyCount = countBusyInSubnet(subnet, reachableSet);
-      const freeCount = Math.max(subnet.poolSize - busyCount, 0);
-      return `
-        <li class="mini-item">
-          <div class="mini-title">${escapeHtml(subnet.name)}</div>
-          <div class="mini-meta mono">${escapeHtml(subnet.cidr)} · ${escapeHtml(subnet.rangeStart)}-${escapeHtml(subnet.rangeEnd)}</div>
-          <div class="mini-badges">
-            <span class="pill">${escapeHtml(t("in_database_short", { count: getDevicesInSubnet(subnet).length }))}</span>
-            <span class="pill">${escapeHtml(t("ping_short", { count: countReachableInSubnet(subnet, reachableSet) }))}</span>
-            <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
-          </div>
-        </li>
-      `;
-    });
-
-  elements.dashboardSubnetsList.innerHTML = items.join("");
-}
-
-function renderDashboardGroups() {
-  if (state.groups.length === 0) {
-    elements.dashboardGroupsList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_groups"))}</li>`;
-    return;
-  }
-
-  const reachableSet = getReachableScanIps();
-  const items = state.groups
-    .slice()
-    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
-    .slice(0, 4)
-    .map((group) => {
-      const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
-      const busyCount = countBusyInGroup(group, reachableSet);
-      const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
-      const freeCount = Math.max(totalCount - busyCount, 0);
-      return `
-        <li class="mini-item">
-          <div class="mini-title">${escapeHtml(group.name)}</div>
-          <div class="mini-meta">${escapeHtml(subnet?.name || t("no_data"))} · <span class="mono">${escapeHtml(formatGroupRange(group, true))}</span></div>
-          <div class="mini-badges">
-            <span class="pill">${escapeHtml(t("in_database_short", { count: getDevicesInGroup(group).length }))}</span>
-            <span class="pill">${escapeHtml(t("ping_short", { count: countReachableInGroup(group, reachableSet) }))}</span>
-            <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
-          </div>
-        </li>
-      `;
-    });
-
-  elements.dashboardGroupsList.innerHTML = items.join("");
-}
-
-function renderDashboardDevices() {
-  if (state.devices.length === 0) {
-    elements.dashboardDevicesList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_devices"))}</li>`;
-    return;
-  }
-
-  const items = state.devices
-    .slice()
-    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
-    .slice(0, 5)
-    .map((device) => {
-      const subnet = resolveDeviceSubnet(device);
-      return `
-        <li class="mini-item">
-          <div class="mini-title">${escapeHtml(device.name)}</div>
-          <div class="mini-meta mono">${escapeHtml(device.ip)} · ${escapeHtml(getDeviceTypeLabel(device.type))}</div>
-          <div class="mini-badges">
-            <span class="pill">${escapeHtml(subnet?.name || t("no_binding"))}</span>
-            <span class="pill">${escapeHtml(formatDateTime(device.createdAt))}</span>
-          </div>
-        </li>
-      `;
-    });
-
-  elements.dashboardDevicesList.innerHTML = items.join("");
+  elements.dashboardAttentionList.innerHTML = items
+    .filter((item) => item.value > 0)
+    .map((item) => `
+      <li class="mini-item mini-item--attention mini-item--${escapeHtml(item.tone)}">
+        <div class="mini-title">${escapeHtml(item.title)}</div>
+        <div class="mini-value">${escapeHtml(String(item.value))}</div>
+        <div class="mini-meta">${escapeHtml(item.note)}</div>
+      </li>
+    `)
+    .join("");
 }
 
 function renderDashboardHistory() {
@@ -2296,6 +2278,18 @@ function countReachableInGroup(group, reachableSet = getReachableScanIps()) {
   return count;
 }
 
+function countPingOnlyInGroup(group, reachableSet = getReachableScanIps()) {
+  const assignedSet = new Set(getDevicesInGroup(group).map((device) => device.ip));
+  let count = 0;
+  for (let ipInt = group.rangeStartInt; ipInt <= group.rangeEndInt; ipInt += 1) {
+    const ip = intToIp(ipInt);
+    if (reachableSet.has(ip) && !assignedSet.has(ip)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function countBusyInGroup(group, reachableSet = getReachableScanIps()) {
   const busySet = new Set(getDevicesInGroup(group).map((device) => device.ip));
   for (let ipInt = group.rangeStartInt; ipInt <= group.rangeEndInt; ipInt += 1) {
@@ -2315,17 +2309,54 @@ function getReachableScanIps() {
   );
 }
 
+function getAssignedIpsSet() {
+  return new Set(state.devices.map((device) => device.ip));
+}
+
 function getBusyIpsSet() {
   return new Set([
-    ...state.devices.map((device) => device.ip),
+    ...getAssignedIpsSet(),
     ...getReachableScanIps(),
   ]);
+}
+
+function countAssignedInGroup(group) {
+  return getDevicesInGroup(group).length;
+}
+
+function countFreeInGroup(group) {
+  const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
+  return Math.max(totalCount - countAssignedInGroup(group), 0);
 }
 
 function countReachableInSubnet(subnet, reachableSet = getReachableScanIps()) {
   let count = 0;
   for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
     if (reachableSet.has(intToIp(ipInt))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function countAssignedInSubnet(subnet) {
+  return getDevicesInSubnet(subnet).length;
+}
+
+function countFreeInSubnet(subnet) {
+  return Math.max(subnet.poolSize - countAssignedInSubnet(subnet), 0);
+}
+
+function countPingOnlyInSubnet(subnet, reachableSet = getReachableScanIps()) {
+  const assignedSet = new Set(
+    state.devices
+      .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
+      .map((device) => device.ip)
+  );
+  let count = 0;
+  for (let ipInt = subnet.rangeStartInt; ipInt <= subnet.rangeEndInt; ipInt += 1) {
+    const ip = intToIp(ipInt);
+    if (reachableSet.has(ip) && !assignedSet.has(ip)) {
       count += 1;
     }
   }
