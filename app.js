@@ -1,5 +1,6 @@
 const API_BASE = "/api";
 const GROUP_SUGGESTION_TEMPLATES_PATH = "/group-suggestion-templates.json";
+const INTERFACE_SETTINGS_CACHE_KEY = "atlas-interface-settings-cache";
 const THEME_ALIASES = {
   ocean: "aurora",
 };
@@ -101,6 +102,7 @@ const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
 
 const ACTION_LABELS = {
   assigned: "action_assigned",
+  updated: "action_updated",
   imported: "action_imported",
   ip_changed: "action_ip_changed",
   released: "action_released",
@@ -172,15 +174,22 @@ const elements = {
   deviceGroupSelect: document.getElementById("device-group-select"),
   groupSubnetSelect: document.getElementById("group-subnet-select"),
   searchInput: document.getElementById("device-search-input"),
+  deviceFilterSelect: document.getElementById("device-filter-select"),
+  deviceGroupFilterSelect: document.getElementById("device-group-filter-select"),
   ipCheckForm: document.getElementById("ip-check-form"),
   ipCheckResult: document.getElementById("ip-check-result"),
   currentUserBadge: document.getElementById("current-user-badge"),
-  currentRoleBadge: document.getElementById("current-role-badge"),
+  userMenuButton: document.getElementById("user-menu-button"),
+  userMenuDropdown: document.getElementById("user-menu-dropdown"),
+  userMenuNote: document.getElementById("user-menu-note"),
+  userMenuPasswordButton: document.getElementById("user-menu-password-button"),
   currentUserDisplay: document.getElementById("current-user-display"),
-  currentUserNote: document.getElementById("current-user-note"),
+  currentUserNameInput: document.getElementById("current-user-name-input"),
+  currentUserRoleNote: document.getElementById("current-user-role-note"),
   logoutButton: document.getElementById("logout-button"),
   openAddButton: document.querySelector('[data-open-modal="add-modal"]'),
   openSettingsButton: document.getElementById("open-settings-button"),
+  settingsShortcutButtons: [...document.querySelectorAll("[data-settings-shortcut]")],
   settingsModal: document.getElementById("settings-modal"),
   closeSettingsButton: document.querySelector('[data-close-modal="settings-modal"]'),
   settingsNavButtons: [...document.querySelectorAll("[data-settings-tab]")],
@@ -189,12 +198,9 @@ const elements = {
   passwordModal: document.getElementById("password-modal"),
   passwordModalClose: document.getElementById("password-modal-close"),
   passwordStatus: document.getElementById("password-status"),
-  scanNowButton: document.getElementById("scan-now-button"),
-  scanStatusBadge: document.getElementById("scan-status-badge"),
-  scanStatusText: document.getElementById("scan-status-text"),
-  liveSummaryText: document.getElementById("live-summary-text"),
   viewTabs: [...document.querySelectorAll("[data-view-tab]")],
   pageViews: [...document.querySelectorAll("[data-view]")],
+  statCards: [...document.querySelectorAll("[data-stat-target]")],
   modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
   openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
   closeModalButtons: [...document.querySelectorAll("[data-close-modal]")],
@@ -212,6 +218,10 @@ const elements = {
   settingsScanInterval: document.getElementById("settings-scan-interval"),
   settingsPingMeta: document.getElementById("settings-ping-meta"),
   settingsSubnetScanList: document.getElementById("settings-subnet-scan-list"),
+  saveProfileSettingsButton: document.getElementById("save-profile-settings-button"),
+  profileSettingsStatus: document.getElementById("profile-settings-status"),
+  saveInterfaceSettingsButton: document.getElementById("save-interface-settings-button"),
+  interfaceSettingsStatus: document.getElementById("interface-settings-status"),
   serverSettingsStatus: document.getElementById("server-settings-status"),
   saveServerSettingsButton: document.getElementById("save-server-settings-button"),
   templateRulesList: document.getElementById("template-rules-list"),
@@ -232,6 +242,9 @@ const elements = {
   groupsTableBody: document.getElementById("groups-table-body"),
   devicesTableBody: document.getElementById("devices-table-body"),
   historyTableBody: document.getElementById("history-table-body"),
+  historySearchInput: document.getElementById("history-search-input"),
+  historyEventFilter: document.getElementById("history-event-filter"),
+  historyScopeFilter: document.getElementById("history-scope-filter"),
   subnetsCounter: document.getElementById("subnets-counter"),
   groupsCounter: document.getElementById("groups-counter"),
   devicesCounter: document.getElementById("devices-counter"),
@@ -248,6 +261,12 @@ const elements = {
   importFileInput: document.getElementById("import-file-input"),
   clearDataButton: document.getElementById("clear-data-button"),
   toast: document.getElementById("toast"),
+  subnetModalTitle: document.getElementById("subnet-modal-title"),
+  subnetSubmitButton: document.getElementById("subnet-submit-button"),
+  deviceModalTitle: document.getElementById("device-modal-title"),
+  deviceSubmitButton: document.getElementById("device-submit-button"),
+  groupModalTitle: document.getElementById("group-modal-title"),
+  groupSubmitButton: document.getElementById("group-submit-button"),
 };
 
 let activeToastTimer = null;
@@ -262,8 +281,11 @@ let activeView = "dashboard";
 let activeSettingsSection = "profile";
 let showAllDevicesInRegistry = false;
 const expandedGroupIds = new Set();
-let preferencesSaveTimer = null;
 let isAuthReady = false;
+let interfaceSettingsBaseline = null;
+let editingSubnetId = "";
+let editingGroupId = "";
+let editingDeviceId = "";
 
 initialize().catch((error) => {
   console.error(error);
@@ -293,6 +315,21 @@ function getActionLabel(action) {
   return key ? t(key) : action;
 }
 
+function syncCrudModalCaptions() {
+  if (elements.subnetModalTitle && elements.subnetSubmitButton) {
+    elements.subnetModalTitle.textContent = editingSubnetId ? t("edit_subnet") : t("add_subnet");
+    elements.subnetSubmitButton.textContent = editingSubnetId ? t("update_subnet") : t("save_subnet");
+  }
+  if (elements.deviceModalTitle && elements.deviceSubmitButton) {
+    elements.deviceModalTitle.textContent = editingDeviceId ? t("edit_device") : t("add_device");
+    elements.deviceSubmitButton.textContent = editingDeviceId ? t("update_device") : t("save_device");
+  }
+  if (elements.groupModalTitle && elements.groupSubmitButton) {
+    elements.groupModalTitle.textContent = editingGroupId ? t("edit_group") : t("add_group");
+    elements.groupSubmitButton.textContent = editingGroupId ? t("update_group") : t("save_group");
+  }
+}
+
 function applyLocalizedUi() {
   const language = getLanguage();
   document.documentElement.lang = language;
@@ -307,6 +344,7 @@ function applyLocalizedUi() {
 
   elements.heroSignature.textContent = preferences.settings.customSignature || t("default_signature");
   syncPasswordToggleButtons();
+  syncCrudModalCaptions();
 }
 
 function formatRecordsCount(count) {
@@ -346,12 +384,44 @@ function normalizeSettings(rawSettings) {
 }
 
 function normalizeUserPreferences(rawPreferences = {}) {
+  const rawSettings =
+    rawPreferences?.settings && typeof rawPreferences.settings === "object"
+      ? rawPreferences.settings
+      : rawPreferences;
+  const rawCustomGroupTemplates = Array.isArray(rawPreferences?.customGroupTemplates)
+    ? rawPreferences.customGroupTemplates
+    : Array.isArray(rawSettings?.customGroupTemplates)
+      ? rawSettings.customGroupTemplates
+      : [];
+
   return {
-    settings: normalizeSettings(rawPreferences),
-    customGroupTemplates: Array.isArray(rawPreferences?.customGroupTemplates)
-      ? rawPreferences.customGroupTemplates
-      : [],
+    settings: normalizeSettings(rawSettings),
+    customGroupTemplates: rawCustomGroupTemplates,
   };
+}
+
+function loadCachedInterfaceSettings() {
+  try {
+    const rawValue = window.localStorage.getItem(INTERFACE_SETTINGS_CACHE_KEY);
+    if (!rawValue) {
+      return { ...DEFAULT_SETTINGS };
+    }
+
+    return normalizeSettings(JSON.parse(rawValue));
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function persistCachedInterfaceSettings(settings) {
+  try {
+    window.localStorage.setItem(
+      INTERFACE_SETTINGS_CACHE_KEY,
+      JSON.stringify(normalizeSettings(settings))
+    );
+  } catch {
+    // Ignore local cache write failures.
+  }
 }
 
 function normalizeBoolean(value, fallback = true) {
@@ -362,6 +432,7 @@ function normalizeBoolean(value, fallback = true) {
 }
 
 async function initialize() {
+  preferences.settings = loadCachedInterfaceSettings();
   bindEvents();
   setActiveView(activeView);
   applyVisualSettings();
@@ -379,15 +450,23 @@ function bindEvents() {
   elements.userForm.addEventListener("submit", handleUserSubmit);
   elements.passwordForm.addEventListener("submit", handlePasswordSubmit);
   elements.searchInput.addEventListener("input", renderDevicesTable);
+  elements.deviceFilterSelect?.addEventListener("change", renderDevicesTable);
+  elements.deviceGroupFilterSelect?.addEventListener("change", renderDevicesTable);
   elements.ipCheckForm.addEventListener("submit", handleIpCheck);
   elements.logoutButton.addEventListener("click", handleLogout);
   elements.openPasswordModalButton.addEventListener("click", () => openPasswordModal(false));
   elements.passwordToggleButtons.forEach((button) => {
     button.addEventListener("click", handlePasswordToggle);
   });
+  elements.userMenuButton?.addEventListener("click", handleUserMenuToggle);
   elements.viewTabs.forEach((button) => {
     button.addEventListener("click", () => {
       setActiveView(button.dataset.viewTab);
+    });
+  });
+  elements.statCards.forEach((button) => {
+    button.addEventListener("click", () => {
+      handleStatNavigation(button.dataset.statTarget);
     });
   });
   elements.openModalButtons.forEach((button) => {
@@ -407,17 +486,28 @@ function bindEvents() {
       }
     });
   });
-  elements.scanNowButton.addEventListener("click", handleScanNow);
   elements.subnetSelect.addEventListener("change", handleDeviceSubnetChange);
   elements.deviceGroupSelect.addEventListener("change", handleDeviceGroupChange);
   elements.deviceForm.elements.type.addEventListener("change", handleDeviceTypeChange);
   elements.deviceForm.elements.ip.addEventListener("input", updateSuggestedIp);
   elements.applySuggestionButton.addEventListener("click", applySuggestedIp);
-  elements.settingsLanguageSelect.addEventListener("change", handleSettingsChange);
-  elements.settingsSignatureInput.addEventListener("input", handleSignatureInput);
-  elements.settingsThemeSelect.addEventListener("change", handleSettingsChange);
-  elements.settingsAutoRescan.addEventListener("change", handleSettingsChange);
-  elements.settingsSuggestionMode.addEventListener("change", handleSettingsChange);
+  elements.saveProfileSettingsButton.addEventListener("click", handleProfileSettingsSave);
+  elements.saveInterfaceSettingsButton.addEventListener("click", handleInterfaceSettingsSave);
+  elements.settingsLanguageSelect.addEventListener("change", handleInterfaceSettingsPreview);
+  elements.settingsThemeSelect.addEventListener("change", handleInterfaceSettingsPreview);
+  elements.settingsSuggestionMode.addEventListener("change", handleInterfaceSettingsPreview);
+  elements.settingsAutoRescan.addEventListener("change", handleInterfaceSettingsPreview);
+  elements.settingsSignatureInput.addEventListener("input", handleInterfaceSettingsPreview);
+  elements.userMenuPasswordButton?.addEventListener("click", () => {
+    closeUserMenu();
+    openPasswordModal(false);
+  });
+  elements.settingsShortcutButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      closeUserMenu();
+      openSettingsModal(button.dataset.settingsShortcut || "profile");
+    });
+  });
   elements.settingsNavButtons.forEach((button) => {
     button.addEventListener("click", () => {
       setActiveSettingsSection(button.dataset.settingsTab);
@@ -442,6 +532,10 @@ function bindEvents() {
   elements.subnetsTableBody.addEventListener("change", handleSubnetScanToggle);
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
+  elements.historySearchInput?.addEventListener("input", renderHistoryTable);
+  elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
+  elements.historyScopeFilter?.addEventListener("change", renderHistoryTable);
+  document.addEventListener("click", handleDocumentClick);
   window.addEventListener("focus", () => refreshState(true));
   window.addEventListener("keydown", handleGlobalKeydown);
 }
@@ -544,13 +638,15 @@ function syncSettingsForm() {
   elements.settingsSuggestionMode.value = preferences.settings.suggestionMode;
   const currentUser = state.auth?.user;
   elements.currentUserBadge.textContent = currentUser?.displayName || "ATLAS";
-  elements.currentRoleBadge.textContent = currentUser?.role ? t(`role_summary_${currentUser.role}`) : t("role_summary_guest");
-  elements.currentUserDisplay.value = currentUser
-    ? `${currentUser.displayName} (${currentUser.username})`
-    : "";
-  elements.currentUserNote.textContent = currentUser?.mustChangePassword
+  elements.currentUserDisplay.value = currentUser?.username || "";
+  elements.currentUserNameInput.value = currentUser?.displayName || "";
+  const userRoleLabel = currentUser?.role ? t(`role_summary_${currentUser.role}`) : t("role_summary_guest");
+  elements.userMenuNote.textContent = currentUser?.mustChangePassword
     ? t("must_change_password_note")
-    : t("current_role_note", { role: currentUser?.role || "guest" });
+    : t("user_menu_note", { role: userRoleLabel });
+  elements.currentUserRoleNote.textContent = currentUser?.mustChangePassword
+    ? t("must_change_password_note")
+    : t("current_role_note", { role: userRoleLabel });
   const currentScanInterval = state.settings?.scanIntervalSeconds || state.meta?.scanIntervalSeconds || 90;
   if (document.activeElement !== elements.settingsScanInterval) {
     elements.settingsScanInterval.value = String(currentScanInterval);
@@ -567,6 +663,10 @@ function syncSettingsForm() {
   });
   elements.settingsDefaultSubnetScan.checked = Boolean(state.settings?.defaultSubnetScanEnabled);
   renderSubnetScanSettings();
+}
+
+function isSettingsModalOpen() {
+  return Boolean(elements.settingsModal && !elements.settingsModal.hidden);
 }
 
 function applyVisualSettings() {
@@ -814,39 +914,97 @@ function setUserStatus(message, tone = "muted") {
   elements.userStatus.textContent = message;
 }
 
-function handleSettingsChange() {
-  preferences.settings = normalizeSettings({
+function collectInterfaceSettingsDraft() {
+  return normalizeSettings({
     language: elements.settingsLanguageSelect.value,
     customSignature: elements.settingsSignatureInput.value,
     accentTheme: elements.settingsThemeSelect.value,
     autoRescanAfterDeviceSave: elements.settingsAutoRescan.checked,
     suggestionMode: elements.settingsSuggestionMode.value,
   });
+}
+
+function applyInterfaceDraft(nextSettings, { persist = false } = {}) {
+  preferences.settings = nextSettings;
   applyVisualSettings();
   applyLocalizedUi();
   renderDeviceGroupOptions();
-  renderAll();
-  if (!elements.settingsModal.hidden) {
-    renderTemplateEditor();
-  }
   updateSuggestedIp();
-  savePreferences({
-    ...preferences.settings,
-  }).catch((error) => {
-    console.error(error);
-    showToast(error.message || t("preferences_save_failed"), true);
-  });
+
+  if (persist) {
+    interfaceSettingsBaseline = { ...nextSettings };
+    persistCachedInterfaceSettings(nextSettings);
+  }
 }
 
-function handleSignatureInput() {
-  preferences.settings = normalizeSettings({
-    ...preferences.settings,
-    customSignature: elements.settingsSignatureInput.value,
-  });
+function restoreInterfaceBaseline() {
+  if (!interfaceSettingsBaseline) {
+    return;
+  }
+
+  preferences.settings = normalizeSettings(interfaceSettingsBaseline);
+  applyVisualSettings();
   applyLocalizedUi();
-  schedulePreferencesSave({
-    customSignature: preferences.settings.customSignature,
-  });
+  renderDeviceGroupOptions();
+  updateSuggestedIp();
+}
+
+function setProfileSettingsStatus(message, tone = "muted") {
+  elements.profileSettingsStatus.className = `result-card result-card--${tone}`;
+  elements.profileSettingsStatus.textContent = message;
+}
+
+function setInterfaceSettingsStatus(message, tone = "muted") {
+  elements.interfaceSettingsStatus.className = `result-card result-card--${tone}`;
+  elements.interfaceSettingsStatus.textContent = message;
+}
+
+function handleInterfaceSettingsPreview() {
+  if (!isSettingsModalOpen()) {
+    return;
+  }
+
+  const nextSettings = collectInterfaceSettingsDraft();
+  applyInterfaceDraft(nextSettings);
+}
+
+async function handleProfileSettingsSave() {
+  try {
+    setProfileSettingsStatus(t("profile_settings_saving"), "muted");
+    const session = await apiRequest("/auth/profile", {
+      method: "PATCH",
+      body: JSON.stringify({
+        username: elements.currentUserDisplay.value,
+        displayName: elements.currentUserNameInput.value,
+      }),
+    });
+    applyAuthSession(session);
+    await refreshState(true);
+    syncSettingsForm();
+    setProfileSettingsStatus(t("profile_settings_saved"), "ok");
+    showToast(t("profile_settings_saved"));
+  } catch (error) {
+    setProfileSettingsStatus(error.message || t("profile_settings_failed"), "danger");
+  }
+}
+
+async function handleInterfaceSettingsSave() {
+  const nextSettings = collectInterfaceSettingsDraft();
+
+  try {
+    setInterfaceSettingsStatus(t("interface_settings_applying"), "muted");
+    applyInterfaceDraft(nextSettings, { persist: true });
+    await savePreferences({
+      ...nextSettings,
+    });
+    renderAll();
+    setInterfaceSettingsStatus(t("interface_settings_saved"), "ok");
+    showToast(t("interface_settings_saved"));
+  } catch (error) {
+    restoreInterfaceBaseline();
+    syncSettingsForm();
+    setInterfaceSettingsStatus(error.message || t("preferences_save_failed"), "danger");
+  }
 }
 
 async function handleServerSettingsSave() {
@@ -929,6 +1087,61 @@ async function handleTemplateSettingsReset() {
   setTemplateSettingsStatus(t("templates_reset_done"), "warn");
 }
 
+function prepareSubnetModal(subnet = null) {
+  editingSubnetId = subnet?.id || "";
+  elements.subnetForm.reset();
+  elements.subnetModalTitle.textContent = subnet ? t("edit_subnet") : t("add_subnet");
+  elements.subnetSubmitButton.textContent = subnet ? t("update_subnet") : t("save_subnet");
+  if (subnet) {
+    elements.subnetForm.elements.name.value = subnet.name;
+    elements.subnetForm.elements.cidr.value = subnet.cidr;
+    elements.subnetForm.elements.rangeStart.value = subnet.rangeStart;
+    elements.subnetForm.elements.rangeEnd.value = subnet.rangeEnd;
+    elements.subnetForm.elements.note.value = subnet.note || "";
+    elements.subnetForm.elements.accessGroupId.value = subnet.accessGroupId || "";
+  }
+}
+
+function prepareGroupModal(group = null) {
+  editingGroupId = group?.id || "";
+  elements.groupForm.reset();
+  elements.groupModalTitle.textContent = group ? t("edit_group") : t("add_group");
+  elements.groupSubmitButton.textContent = group ? t("update_group") : t("save_group");
+  if (group) {
+    elements.groupForm.elements.subnetId.value = group.subnetId;
+    elements.groupForm.elements.name.value = group.name;
+    elements.groupForm.elements.note.value = group.note || "";
+    elements.groupForm.elements.rangeStart.value = group.rangeStart;
+    elements.groupForm.elements.rangeEnd.value = group.rangeEnd;
+  }
+}
+
+function prepareDeviceModal(device = null) {
+  editingDeviceId = device?.id || "";
+  elements.deviceForm.reset();
+  clearDeviceFormStatus();
+  setDeviceFormPending(false);
+  elements.deviceModalTitle.textContent = device ? t("edit_device") : t("add_device");
+  elements.deviceSubmitButton.textContent = device ? t("update_device") : t("save_device");
+  if (device) {
+    const subnet = resolveDeviceSubnet(device);
+    const group = resolveDeviceGroup(device, subnet);
+    elements.deviceForm.elements.name.value = device.name;
+    elements.deviceForm.elements.ip.value = device.ip;
+    elements.deviceForm.elements.mac.value = device.mac || "";
+    elements.deviceForm.elements.type.value = device.type;
+    elements.subnetSelect.value = subnet?.id || device.subnetId || "";
+    renderDeviceGroupOptions(group?.id || "");
+    elements.deviceGroupSelect.value = group?.id || "";
+    elements.deviceForm.elements.note.value = device.note || "";
+    deviceGroupSelectionMode = group ? "manual" : "auto";
+  } else {
+    deviceGroupSelectionMode = "auto";
+    renderDeviceGroupOptions("");
+  }
+  updateSuggestedIp();
+}
+
 function handleOpenModalRequest(modalId) {
   if (!modalId) {
     return;
@@ -941,6 +1154,14 @@ function handleOpenModalRequest(modalId) {
   if (modalId === "settings-modal") {
     openSettingsModal();
     return;
+  }
+
+  if (modalId === "subnet-modal") {
+    prepareSubnetModal();
+  } else if (modalId === "group-modal") {
+    prepareGroupModal();
+  } else if (modalId === "device-modal") {
+    prepareDeviceModal();
   }
 
   openModal(modalId);
@@ -963,6 +1184,9 @@ function openModal(modalId) {
     clearDeviceFormStatus();
     setDeviceFormPending(false);
   }
+  if (modalId === "settings-modal") {
+    closeUserMenu();
+  }
   const closeButton = modal.querySelector("[data-close-modal]");
   closeButton?.focus();
 }
@@ -980,6 +1204,18 @@ function closeModal(modalId) {
   if (modal.id === "device-modal") {
     clearDeviceFormStatus();
     setDeviceFormPending(false);
+    editingDeviceId = "";
+  }
+  if (modal.id === "subnet-modal") {
+    editingSubnetId = "";
+  }
+  if (modal.id === "group-modal") {
+    editingGroupId = "";
+  }
+  if (modal.id === "settings-modal") {
+    restoreInterfaceBaseline();
+    syncSettingsForm();
+    interfaceSettingsBaseline = null;
   }
   if (!getOpenModal()) {
     document.body.classList.remove("modal-open");
@@ -990,14 +1226,47 @@ function getOpenModal() {
   return elements.modalBackdrops.find((modal) => !modal.hidden) || null;
 }
 
-function openSettingsModal() {
+function handleUserMenuToggle(event) {
+  event.stopPropagation();
+  const isExpanded = elements.userMenuButton.getAttribute("aria-expanded") === "true";
+  if (isExpanded) {
+    closeUserMenu();
+    return;
+  }
+
+  elements.userMenuDropdown.hidden = false;
+  elements.userMenuButton.setAttribute("aria-expanded", "true");
+}
+
+function closeUserMenu() {
+  if (!elements.userMenuDropdown || !elements.userMenuButton) {
+    return;
+  }
+  elements.userMenuDropdown.hidden = true;
+  elements.userMenuButton.setAttribute("aria-expanded", "false");
+}
+
+function handleDocumentClick(event) {
+  if (!elements.userMenuDropdown || elements.userMenuDropdown.hidden) {
+    return;
+  }
+
+  if (!event.target.closest("#hero-account-menu")) {
+    closeUserMenu();
+  }
+}
+
+function openSettingsModal(sectionName = activeSettingsSection) {
+  interfaceSettingsBaseline = { ...preferences.settings };
   syncSettingsForm();
   renderTemplateEditor();
   setServerSettingsStatus(t("ping_server_running", {
     interval: state.settings?.scanIntervalSeconds || 90,
   }), "muted");
+  setProfileSettingsStatus(t("profile_settings_hint"), "muted");
+  setInterfaceSettingsStatus(t("interface_settings_hint"), "muted");
   renderAdminPanels();
-  setActiveSettingsSection(activeSettingsSection);
+  setActiveSettingsSection(sectionName);
   openModal("settings-modal");
 }
 
@@ -1036,6 +1305,7 @@ function applyAuthSession(session) {
 function applyPreferences(nextPreferences) {
   preferences.settings = nextPreferences.settings;
   preferences.customGroupTemplates = nextPreferences.customGroupTemplates;
+  persistCachedInterfaceSettings(preferences.settings);
   const normalizedCustomTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
   if (normalizedCustomTemplates.length > 0) {
     groupSuggestionTemplates = normalizedCustomTemplates;
@@ -1050,6 +1320,7 @@ function applyPreferences(nextPreferences) {
 
 function openAuthScreen(session = null) {
   applyAuthSession(session);
+  closeUserMenu();
   elements.authScreen.hidden = false;
   document.body.classList.add("auth-open");
   elements.authStatus.className = "result-card result-card--muted";
@@ -1160,17 +1431,6 @@ async function savePreferences(partial = null) {
   });
   applyPreferences(normalizeUserPreferences(savedPreferences));
   renderTemplateEditor();
-  syncSettingsForm();
-}
-
-function schedulePreferencesSave(partial = null) {
-  window.clearTimeout(preferencesSaveTimer);
-  preferencesSaveTimer = window.setTimeout(() => {
-    savePreferences(partial).catch((error) => {
-      console.error(error);
-      showToast(error.message || t("preferences_save_failed"), true);
-    });
-  }, 260);
 }
 
 function renderPermissionAwareUi() {
@@ -1186,8 +1446,9 @@ function renderPermissionAwareUi() {
   elements.subnetForm.querySelector('[type="submit"]').disabled = !canWrite;
   elements.deviceForm.querySelector('[type="submit"]').disabled = !canWrite || isDeviceSubmitting;
   elements.groupForm.querySelector('[type="submit"]').disabled = !canWrite;
-  elements.scanNowButton.disabled = !canWrite || isManualScanRunning;
   elements.importButton.disabled = !isAdmin;
+  elements.saveProfileSettingsButton.disabled = !state.auth?.authenticated;
+  elements.saveInterfaceSettingsButton.disabled = !state.auth?.authenticated;
   elements.saveServerSettingsButton.disabled = !Boolean(capabilities.canManageServerSettings);
   elements.settingsDefaultSubnetScan.disabled = !Boolean(capabilities.canManageServerSettings);
   elements.settingsScanInterval.disabled = !Boolean(capabilities.canManageServerSettings);
@@ -1237,6 +1498,9 @@ function setActiveSettingsSection(sectionName) {
 }
 
 function handleGlobalKeydown(event) {
+  if (event.key === "Escape" && elements.userMenuDropdown && !elements.userMenuDropdown.hidden) {
+    closeUserMenu();
+  }
   if (event.key === "Escape" && getOpenModal()) {
     closeModal();
   }
@@ -1244,6 +1508,7 @@ function handleGlobalKeydown(event) {
 
 function setActiveView(viewName) {
   activeView = viewName || "dashboard";
+  closeUserMenu();
 
   elements.viewTabs.forEach((button) => {
     button.classList.toggle("is-active", button.dataset.viewTab === activeView);
@@ -1259,7 +1524,20 @@ function setActiveView(viewName) {
 async function refreshState(silent = false) {
   try {
     const snapshot = await apiRequest("/state");
-    applyState(normalizeState(snapshot));
+    const normalizedSnapshot = normalizeState(snapshot);
+    const shouldSkipFullRender =
+      isAuthReady &&
+      normalizedSnapshot.meta.revision === state.meta.revision &&
+      normalizedSnapshot.auth?.authenticated === state.auth?.authenticated &&
+      normalizedSnapshot.auth?.user?.id === state.auth?.user?.id;
+
+    if (shouldSkipFullRender) {
+      state.auth = normalizedSnapshot.auth || state.auth;
+      state.settings = normalizedSnapshot.settings;
+      return true;
+    }
+
+    applyState(normalizedSnapshot);
     renderAll();
     isAuthReady = true;
     if (state.auth?.user?.mustChangePassword) {
@@ -1325,26 +1603,30 @@ async function handleSubnetSubmit(event) {
 
   try {
     const formData = new FormData(form);
+    const currentSubnet = editingSubnetId
+      ? state.subnets.find((entry) => entry.id === editingSubnetId) || null
+      : null;
     const subnet = normalizeSubnet({
-      id: createId(),
+      id: currentSubnet?.id || createId(),
       name: formData.get("name"),
       cidr: formData.get("cidr"),
       rangeStart: formData.get("rangeStart"),
       rangeEnd: formData.get("rangeEnd"),
       accessGroupId: formData.get("accessGroupId"),
       note: formData.get("note"),
-      createdAt: new Date().toISOString(),
+      createdAt: currentSubnet?.createdAt || new Date().toISOString(),
     });
 
-    await apiRequest("/subnets", {
-      method: "POST",
+    const isEditing = Boolean(editingSubnetId);
+    await apiRequest(isEditing ? `/subnets/${encodeURIComponent(editingSubnetId)}` : "/subnets", {
+      method: isEditing ? "PATCH" : "POST",
       body: JSON.stringify(subnet),
     });
 
     await refreshState(true);
     form.reset();
     closeModal("subnet-modal");
-    showToast(t("subnet_added", { name: subnet.name }));
+    showToast(t(isEditing ? "subnet_updated" : "subnet_added", { name: subnet.name }));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1363,9 +1645,12 @@ async function handleDeviceSubmit(event) {
   try {
     const formData = new FormData(form);
     const selectedGroupId = String(formData.get("groupId") || "").trim();
+    const currentDevice = editingDeviceId
+      ? state.devices.find((entry) => entry.id === editingDeviceId) || null
+      : null;
     const device = normalizeDevice(
       {
-        id: createId(),
+        id: currentDevice?.id || createId(),
         name: formData.get("name"),
         ip: formData.get("ip"),
         mac: formData.get("mac"),
@@ -1373,14 +1658,15 @@ async function handleDeviceSubmit(event) {
         subnetId: formData.get("subnetId"),
         groupId: formData.get("groupId"),
         note: formData.get("note"),
-        createdAt: new Date().toISOString(),
+        createdAt: currentDevice?.createdAt || new Date().toISOString(),
       },
       state.subnets,
       state.groups
     );
 
-    await apiRequest("/devices", {
-      method: "POST",
+    const isEditing = Boolean(editingDeviceId);
+    await apiRequest(isEditing ? `/devices/${encodeURIComponent(editingDeviceId)}` : "/devices", {
+      method: isEditing ? "PATCH" : "POST",
       body: JSON.stringify(device),
     });
 
@@ -1397,7 +1683,7 @@ async function handleDeviceSubmit(event) {
       console.error(followUpError);
     }
 
-    showToast(t("device_added", { name: device.name }));
+    showToast(t(isEditing ? "device_updated" : "device_added", { name: device.name }));
   } catch (error) {
     setDeviceFormStatus(error.message, "danger");
     showToast(error.message, true);
@@ -1407,41 +1693,68 @@ async function handleDeviceSubmit(event) {
   }
 }
 
+function handleStatNavigation(target) {
+  switch (target) {
+    case "subnets":
+      setActiveView("registry");
+      document.getElementById("registry-panel-subnets")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    case "devices":
+    case "occupied":
+      setActiveView("registry");
+      document.getElementById("registry-panel-devices")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    case "available":
+      setActiveView("registry");
+      document.getElementById("registry-panel-groups")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    default:
+      return;
+  }
+}
+
 async function handleGroupSubmit(event) {
   event.preventDefault();
   const form = event.currentTarget;
 
   try {
     const formData = new FormData(form);
+    const currentGroup = editingGroupId
+      ? state.groups.find((entry) => entry.id === editingGroupId) || null
+      : null;
     const group = normalizeRangeGroup(
       {
-        id: createId(),
+        id: currentGroup?.id || createId(),
         subnetId: formData.get("subnetId"),
         name: formData.get("name"),
         rangeStart: formData.get("rangeStart"),
         rangeEnd: formData.get("rangeEnd"),
         note: formData.get("note"),
-        createdAt: new Date().toISOString(),
+        createdAt: currentGroup?.createdAt || new Date().toISOString(),
       },
       state.subnets,
       state.groups
     );
 
-    const savedGroup = await apiRequest("/groups", {
-      method: "POST",
+    const isEditing = Boolean(editingGroupId);
+    const savedGroup = await apiRequest(isEditing ? `/groups/${encodeURIComponent(editingGroupId)}` : "/groups", {
+      method: isEditing ? "PATCH" : "POST",
       body: JSON.stringify(group),
     });
 
     let scanSummary = null;
     let scanError = null;
-    try {
-      scanSummary = await apiRequest("/scan", {
-        method: "POST",
-        body: JSON.stringify({ groupId: savedGroup.id }),
-      });
-    } catch (error) {
-      scanError = error;
-      console.error(error);
+    const groupSubnet = state.subnets.find((entry) => entry.id === group.subnetId);
+    if (isSubnetPingVisible(groupSubnet)) {
+      try {
+        scanSummary = await apiRequest("/scan", {
+          method: "POST",
+          body: JSON.stringify({ groupId: savedGroup.id }),
+        });
+      } catch (error) {
+        scanError = error;
+        console.error(error);
+      }
     }
 
     await refreshState(true);
@@ -1460,7 +1773,7 @@ async function handleGroupSubmit(event) {
       const freeCount = refreshedGroup
         ? countFreeInGroup(refreshedGroup)
         : "—";
-      showToast(t("group_added_scanned", {
+      showToast(t(isEditing ? "group_updated_scanned" : "group_added_scanned", {
         name: group.name,
         scanned: scanSummary.scannedIps,
         assigned: assignedCount,
@@ -1471,44 +1784,13 @@ async function handleGroupSubmit(event) {
     }
 
     if (scanError) {
-      showToast(t("group_added_scan_failed", { name: group.name }), true);
+      showToast(t(isEditing ? "group_updated_scan_failed" : "group_added_scan_failed", { name: group.name }), true);
       return;
     }
 
-    showToast(t("group_added", { name: group.name }));
+    showToast(t(isEditing ? "group_updated" : "group_added", { name: group.name }));
   } catch (error) {
     showToast(error.message, true);
-  }
-}
-
-async function handleScanNow() {
-  if (isManualScanRunning) {
-    return;
-  }
-
-  isManualScanRunning = true;
-  elements.scanNowButton.disabled = true;
-  elements.scanNowButton.textContent = t("scan_now_running");
-  setScanStatus(t("scan_status_running"), "info");
-
-  try {
-    const summary = await apiRequest("/scan", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    await refreshState(true);
-    showToast(t("manual_scan_done", {
-      subnets: summary.scannedSubnets,
-      ips: summary.scannedIps,
-      reachable: summary.reachableIps,
-    }));
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    isManualScanRunning = false;
-    elements.scanNowButton.disabled = false;
-    elements.scanNowButton.textContent = t("scan_now_button");
-    updateAutomationWidgets();
   }
 }
 
@@ -1576,7 +1858,7 @@ function handleIpCheck(event) {
   const subnet = findSubnetForIp(ipInt);
   const group = subnet ? findRangeGroupForIp(ipInt, subnet.id) : null;
   const device = state.devices.find((entry) => entry.ip === normalizedIp);
-  const pingState = getPingState(normalizedIp);
+  const pingState = getVisiblePingState(normalizedIp, subnet);
 
   if (device) {
     const parts = [t("ip_check_assigned", { ip: normalizedIp, name: device.name })];
@@ -1624,25 +1906,7 @@ function handleIpCheck(event) {
 }
 
 function updateAutomationWidgets() {
-  const lastScanAt = state.meta?.lastScanAt;
-  const reachableCount = getReachableScanIps().size;
-  const userLabel = state.auth?.user?.displayName || state.auth?.user?.username || "ATLAS";
-
-  if (state.meta?.scanInProgress || isManualScanRunning) {
-    setScanStatus(t("scan_status_running"), "info");
-    elements.scanStatusText.textContent = t("scan_scope_all");
-  } else if (lastScanAt) {
-    setScanStatus(t("scan_status_online", { count: reachableCount }), reachableCount > 0 ? "ok" : "warn");
-    elements.scanStatusText.textContent = t("scan_last_run_compact", {
-      date: formatHeroDateTime(lastScanAt),
-      seconds: state.meta.scanIntervalSeconds || 90,
-    });
-  } else {
-    setScanStatus(t("scan_status_idle"), "warn");
-    elements.scanStatusText.textContent = t("scan_not_started");
-  }
-
-  elements.liveSummaryText.textContent = t("live_summary", { user: userLabel });
+  // Global ping widgets were intentionally removed from the main shell.
 }
 
 function syncPasswordToggleButtons(scope = document) {
@@ -1731,6 +1995,39 @@ function applySuggestedIp() {
 }
 
 function formatSuggestionMessage(suggestion, subnet, group = null) {
+  if (!isSubnetPingVisible(subnet)) {
+    if (preferences.settings.suggestionMode === "detailed") {
+      return group
+        ? t("suggestion_detailed_group_no_ping", {
+          name: group.name,
+          ip: suggestion.ip,
+          range: formatGroupRange(group, true),
+          free: suggestion.freeCount,
+          assigned: suggestion.assignedCount,
+        })
+        : t("suggestion_detailed_subnet_no_ping", {
+          name: subnet.name,
+          ip: suggestion.ip,
+          range: `${subnet.rangeStart}-${subnet.rangeEnd}`,
+          free: suggestion.freeCount,
+          assigned: suggestion.assignedCount,
+        });
+    }
+
+    return group
+      ? t("suggestion_compact_group_no_ping", {
+        name: group.name,
+        ip: suggestion.ip,
+        free: suggestion.freeCount,
+        assigned: suggestion.assignedCount,
+      })
+      : t("suggestion_compact_subnet_no_ping", {
+        ip: suggestion.ip,
+        free: suggestion.freeCount,
+        assigned: suggestion.assignedCount,
+      });
+  }
+
   if (preferences.settings.suggestionMode === "detailed") {
     if (group) {
       return t("suggestion_detailed_group", {
@@ -1774,6 +2071,7 @@ function formatSuggestionMessage(suggestion, subnet, group = null) {
 }
 
 function suggestFreeIp(subnet, group = null) {
+  const pingVisible = isSubnetPingVisible(subnet);
   const assignedIps = new Set(
     state.devices
       .filter((device) => {
@@ -1789,17 +2087,18 @@ function suggestFreeIp(subnet, group = null) {
       .map((device) => device.ip)
   );
   const reachableIps = new Set(
-    state.scanResults
-      .filter((result) => {
-        if (result.subnetId !== subnet.id || !result.isReachable) {
-          return false;
-        }
-        if (!group) {
-          return true;
-        }
-        const ipInt = ipToInt(result.ip);
-        return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
-      })
+    (pingVisible
+      ? state.scanResults.filter((result) => {
+          if (result.subnetId !== subnet.id || !result.isReachable) {
+            return false;
+          }
+          if (!group) {
+            return true;
+          }
+          const ipInt = ipToInt(result.ip);
+          return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
+        })
+      : [])
       .map((result) => result.ip)
   );
   const pingOnlyIps = new Set([...reachableIps].filter((ip) => !assignedIps.has(ip)));
@@ -2128,6 +2427,50 @@ async function clearAllData() {
 }
 
 async function handleSubnetTableActions(event) {
+  const editButton = event.target.closest("[data-edit-subnet]");
+  if (editButton) {
+    const subnet = state.subnets.find((entry) => entry.id === editButton.dataset.editSubnet);
+    if (!subnet) {
+      return;
+    }
+    prepareSubnetModal(subnet);
+    openModal("subnet-modal");
+    return;
+  }
+
+  const scanButton = event.target.closest("[data-scan-subnet]");
+  if (scanButton) {
+    const subnetId = scanButton.dataset.scanSubnet;
+    const subnet = state.subnets.find((entry) => entry.id === subnetId);
+    if (!subnet || isManualScanRunning) {
+      return;
+    }
+
+    isManualScanRunning = true;
+    scanButton.disabled = true;
+    scanButton.textContent = t("scan_now_running");
+
+    try {
+      const summary = await apiRequest("/scan", {
+        method: "POST",
+        body: JSON.stringify({ subnetId }),
+      });
+      await refreshState(true);
+      showToast(t("manual_scan_subnet_done", {
+        name: subnet.name,
+        ips: summary.scannedIps,
+        reachable: summary.reachableIps,
+      }));
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      isManualScanRunning = false;
+      scanButton.disabled = false;
+      scanButton.textContent = t("scan_subnet_button");
+    }
+    return;
+  }
+
   const button = event.target.closest("[data-delete-subnet]");
   if (!button) {
     return;
@@ -2209,6 +2552,17 @@ async function handleGroupTableActions(event) {
     return;
   }
 
+  const editButton = event.target.closest("[data-edit-group]");
+  if (editButton) {
+    const group = state.groups.find((entry) => entry.id === editButton.dataset.editGroup);
+    if (!group) {
+      return;
+    }
+    prepareGroupModal(group);
+    openModal("group-modal");
+    return;
+  }
+
   const button = event.target.closest("[data-delete-group]");
   if (!button) {
     return;
@@ -2244,6 +2598,40 @@ async function handleDeviceTableActions(event) {
     return;
   }
 
+  const copyButton = event.target.closest("[data-copy-ip]");
+  if (copyButton) {
+    const ip = copyButton.dataset.copyIp;
+    if (!navigator.clipboard?.writeText) {
+      showToast(t("copy_ip_failed"), true);
+      return;
+    }
+    navigator.clipboard.writeText(ip)
+      .then(() => showToast(t("copy_ip_done", { ip })))
+      .catch(() => showToast(t("copy_ip_failed"), true));
+    return;
+  }
+
+  const jumpGroupButton = event.target.closest("[data-jump-group]");
+  if (jumpGroupButton) {
+    const groupId = jumpGroupButton.dataset.jumpGroup;
+    expandedGroupIds.add(groupId);
+    setActiveView("registry");
+    renderGroupsTable();
+    document.getElementById("registry-panel-groups")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  const editButton = event.target.closest("[data-edit-device]");
+  if (editButton) {
+    const device = state.devices.find((entry) => entry.id === editButton.dataset.editDevice);
+    if (!device) {
+      return;
+    }
+    prepareDeviceModal(device);
+    openModal("device-modal");
+    return;
+  }
+
   const button = event.target.closest("[data-delete-device]");
   if (!button) {
     return;
@@ -2272,8 +2660,11 @@ async function handleDeviceTableActions(event) {
 }
 
 function renderAll() {
-  syncSettingsForm();
+  if (!isSettingsModalOpen()) {
+    syncSettingsForm();
+  }
   renderSubnetOptions();
+  renderDeviceGroupFilterOptions();
   renderSubnetsTable();
   renderGroupsTable();
   renderDevicesTable();
@@ -2286,6 +2677,31 @@ function renderAll() {
   updateAutomationWidgets();
   updateSuggestedIp();
   renderPermissionAwareUi();
+  if (isSettingsModalOpen()) {
+    applyInterfaceDraft(collectInterfaceSettingsDraft());
+  }
+}
+
+function renderDeviceGroupFilterOptions() {
+  if (!elements.deviceGroupFilterSelect) {
+    return;
+  }
+
+  const previousValue = elements.deviceGroupFilterSelect.value;
+  const options = [`<option value="">${escapeHtml(t("device_group_filter_all"))}</option>`];
+  state.groups
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name, getLanguage()))
+    .forEach((group) => {
+      options.push(`<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)} · ${escapeHtml(formatGroupRange(group, true))}</option>`);
+    });
+
+  elements.deviceGroupFilterSelect.innerHTML = options.join("");
+  if (previousValue && state.groups.some((group) => group.id === previousValue)) {
+    elements.deviceGroupFilterSelect.value = previousValue;
+  } else {
+    elements.deviceGroupFilterSelect.value = "";
+  }
 }
 
 function renderSubnetOptions() {
@@ -2339,6 +2755,7 @@ function renderSubnetsTable() {
     .slice()
     .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
     .map((subnet) => {
+      const pingVisible = isSubnetPingVisible(subnet);
       const assignedCount = countAssignedInSubnet(subnet);
       const pingOnlyCount = countPingOnlyInSubnet(subnet, reachableScanIps);
       const freeCount = countFreeInSubnet(subnet);
@@ -2360,7 +2777,7 @@ function renderSubnetsTable() {
           <td class="mono">${escapeHtml(subnet.rangeStart)} - ${escapeHtml(subnet.rangeEnd)}</td>
           <td>
             <span class="pill">${escapeHtml(t("in_database_short", { count: assignedCount }))}</span>
-            <span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>
+            ${pingVisible ? `<span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>` : ""}
             <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
           <td><div class="secondary-line">${escapeHtml(groupSummary)}</div></td>
@@ -2379,7 +2796,11 @@ function renderSubnetsTable() {
             </label>
           </td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            <div class="table-actions">
+              <button type="button" class="row-button" data-edit-subnet="${escapeHtml(subnet.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button" data-scan-subnet="${escapeHtml(subnet.id)}" ${canManageAutomation ? "" : "disabled"}>${escapeHtml(t("scan_subnet_button"))}</button>
+              <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            </div>
           </td>
         </tr>
       `;
@@ -2412,6 +2833,7 @@ function renderGroupsTable() {
     })
     .map((group) => {
       const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
+      const pingVisible = isSubnetPingVisible(subnet);
       const deviceCount = countAssignedInGroup(group);
       const pingOnlyCount = countPingOnlyInGroup(group, reachableSet);
       const freeCount = countFreeInGroup(group);
@@ -2429,7 +2851,7 @@ function renderGroupsTable() {
       const groupDevicesMarkup = groupDevices.length > 0
         ? groupDevices.map((device) => {
           const status = evaluateDeviceStatus(device, subnet);
-          const pingBadge = renderPingBadge(device.ip);
+          const pingBadge = renderPingBadge(device.ip, subnet);
           return `
             <li class="group-device-item">
               <div>
@@ -2437,7 +2859,7 @@ function renderGroupsTable() {
                 <div class="secondary-line">${escapeHtml(getDeviceTypeLabel(device.type))}</div>
               </div>
               <span class="mono">${escapeHtml(device.ip)}</span>
-              <div>${pingBadge}</div>
+              <div>${pingVisible ? pingBadge : ""}</div>
               <span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span>
             </li>
           `;
@@ -2455,12 +2877,15 @@ function renderGroupsTable() {
           <td class="mono">${escapeHtml(formatGroupRange(group, true))}</td>
           <td>
             <span class="pill">${escapeHtml(t("in_database_short", { count: deviceCount }))}</span>
-            <span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>
+            ${pingVisible ? `<span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>` : ""}
             <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
           <td>${escapeHtml(group.note || t("no_data"))}</td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            <div class="table-actions">
+              <button type="button" class="row-button" data-edit-group="${escapeHtml(group.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            </div>
           </td>
         </tr>
         ${isExpanded ? `
@@ -2565,7 +2990,9 @@ function renderUserAccessGroupOptions() {
 function renderDevicesTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   const searchTerm = normalizeSearch(elements.searchInput.value);
-  const filteredDevices = state.devices.filter((device) => matchesSearch(device, searchTerm));
+  const quickFilter = elements.deviceFilterSelect?.value || "all";
+  const groupFilter = elements.deviceGroupFilterSelect?.value || "";
+  const filteredDevices = state.devices.filter((device) => matchesSearch(device, searchTerm, quickFilter, groupFilter));
 
   if (filteredDevices.length === 0) {
     const message = searchTerm
@@ -2593,8 +3020,12 @@ function renderDevicesTable() {
     .map((device) => {
       const subnet = resolveDeviceSubnet(device);
       const group = resolveDeviceGroup(device, subnet);
-      const pingBadge = renderPingBadge(device.ip);
+      const pingVisible = isSubnetPingVisible(subnet);
+      const pingBadge = renderPingBadge(device.ip, subnet);
       const status = evaluateDeviceStatus(device, subnet);
+      const groupCell = group
+        ? `<button type="button" class="link-button table-row-link" data-jump-group="${escapeHtml(group.id)}">${escapeHtml(group.name)}</button><br><span class="mono">${escapeHtml(formatGroupRange(group, true))}</span>`
+        : escapeHtml(t("no_data"));
       return `
         <tr>
           <td>
@@ -2605,11 +3036,15 @@ function renderDevicesTable() {
           <td class="mono">${escapeHtml(device.mac || t("no_data"))}</td>
           <td>${escapeHtml(getDeviceTypeLabel(device.type))}</td>
           <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : escapeHtml(t("no_data"))}</td>
-          <td>${group ? `${escapeHtml(group.name)}<br><span class="mono">${escapeHtml(formatGroupRange(group, true))}</span>` : escapeHtml(t("no_data"))}</td>
-          <td>${pingBadge}</td>
+          <td>${groupCell}</td>
+          <td>${pingVisible ? pingBadge : ""}</td>
           <td><span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span></td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            <div class="table-actions">
+              <button type="button" class="row-button" data-copy-ip="${escapeHtml(device.ip)}">${escapeHtml(t("copy_ip_button"))}</button>
+              <button type="button" class="row-button" data-edit-device="${escapeHtml(device.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            </div>
           </td>
         </tr>
       `;
@@ -2636,17 +3071,61 @@ function renderDevicesTable() {
 }
 
 function renderHistoryTable() {
-  if (state.history.length === 0) {
+  const searchTerm = normalizeSearch(elements.historySearchInput?.value || "");
+  const eventType = elements.historyEventFilter?.value || "all";
+  const scopeFilter = elements.historyScopeFilter?.value || "all";
+  const filteredHistory = state.history.filter((entry) => {
+    const matchesEvent = eventType === "all" || entry.action === eventType;
+    if (!matchesEvent) {
+      return false;
+    }
+    if (!searchTerm) {
+      return true;
+    }
+
+    const haystackSource = (() => {
+      if (scopeFilter === "device") {
+        return entry.deviceName;
+      }
+      if (scopeFilter === "ip") {
+        return `${entry.ip} ${entry.previousIp}`;
+      }
+      if (scopeFilter === "actor") {
+        return entry.actor;
+      }
+      if (scopeFilter === "note") {
+        return entry.note;
+      }
+      return [
+        entry.deviceName,
+        entry.actor,
+        entry.ip,
+        entry.previousIp,
+        entry.note,
+        getActionLabel(entry.action),
+      ].join(" ");
+    })();
+    const haystack = normalizeSearch(haystackSource);
+
+    return haystack.includes(searchTerm);
+  });
+
+  if (filteredHistory.length === 0) {
+    const message = searchTerm || eventType !== "all"
+      ? t("no_results")
+      : t("empty_history");
     elements.historyTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="6">${escapeHtml(t("empty_history"))}</td>
+        <td colspan="6">${escapeHtml(message)}</td>
       </tr>
     `;
-    elements.historyCounter.textContent = formatEventsCount(0);
+    elements.historyCounter.textContent = searchTerm || eventType !== "all"
+      ? formatFilteredCount(0, state.history.length)
+      : formatEventsCount(0);
     return;
   }
 
-  const rows = state.history.map((entry) => {
+  const rows = filteredHistory.map((entry) => {
     const ipLabel = entry.previousIp
       ? `${escapeHtml(entry.previousIp)} → ${escapeHtml(entry.ip)}`
       : escapeHtml(entry.ip);
@@ -2663,7 +3142,9 @@ function renderHistoryTable() {
   });
 
   elements.historyTableBody.innerHTML = rows.join("");
-  elements.historyCounter.textContent = formatEventsCount(state.history.length);
+  elements.historyCounter.textContent = searchTerm || eventType !== "all" || scopeFilter !== "all"
+    ? formatFilteredCount(filteredHistory.length, state.history.length)
+    : formatEventsCount(filteredHistory.length);
 }
 
 function renderStats() {
@@ -2683,72 +3164,102 @@ function renderDashboardPanels() {
   renderDashboardHistory();
 }
 
+function renderDashboardAttentionDetails(lines, emptyLabel) {
+  if (!lines.length) {
+    return `<div class="mini-item__details-empty">${escapeHtml(emptyLabel)}</div>`;
+  }
+
+  return `
+    <ul class="mini-item__details-list">
+      ${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}
+    </ul>
+  `;
+}
+
 function renderDashboardAttention() {
-  const reachableIps = getReachableScanIps();
-  const ipConflicts = state.devices.filter((device, index, source) => {
-    return source.findIndex((entry) => entry.ip === device.ip) !== index;
-  }).length;
-  const outsidePool = state.devices.filter((device) => {
+  const conflictMap = new Map();
+  state.devices.forEach((device) => {
+    const bucket = conflictMap.get(device.ip) || [];
+    bucket.push(device.name);
+    conflictMap.set(device.ip, bucket);
+  });
+  const conflictEntries = [...conflictMap.entries()].filter(([, names]) => names.length > 1);
+
+  const placementIssues = state.devices.flatMap((device) => {
     const subnet = resolveDeviceSubnet(device);
-    return subnet ? !isIpInsidePool(ipToInt(device.ip), subnet) : false;
-  }).length;
-  const withoutSubnet = state.devices.filter((device) => !resolveDeviceSubnet(device)).length;
-  const untrackedReachable = [...reachableIps].filter((ip) => !state.devices.some((device) => device.ip === ip)).length;
-  const fullGroups = state.groups.filter((group) => {
-    const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
-    return totalCount > 0 && countAssignedInGroup(group) >= totalCount;
-  }).length;
-  const lowCapacityGroups = state.groups.filter((group) => {
-    const freeCount = countFreeInGroup(group);
-    return freeCount > 0 && freeCount <= 2;
-  }).length;
-  const automationExcluded = state.subnets.filter((subnet) => !subnet.scanEnabled).length;
+    if (!subnet) {
+      return [`${device.name} · ${device.ip} · ${t("status_no_subnet")}`];
+    }
+    if (!isIpInsidePool(ipToInt(device.ip), subnet)) {
+      return [`${device.name} · ${device.ip} · ${t("status_outside_pool")}`];
+    }
+    return [];
+  });
+
+  const fullGroups = state.groups
+    .filter((group) => countFreeInGroup(group) === 0)
+    .map((group) => `${group.name} · ${formatGroupRange(group, true)}`);
+
+  const lowCapacityGroups = state.groups
+    .map((group) => ({ group, freeCount: countFreeInGroup(group) }))
+    .filter(({ freeCount }) => freeCount > 0 && freeCount <= 2)
+    .map(({ group, freeCount }) => `${group.name} · ${formatGroupRange(group, true)} · ${t("free_short", { count: freeCount })}`);
+
+  const automationExcluded = state.subnets
+    .filter((subnet) => !subnet.scanEnabled)
+    .map((subnet) => `${subnet.name} · ${subnet.cidr}`);
 
   const items = [
     {
-      value: ipConflicts,
+      value: conflictEntries.length,
       title: t("dashboard_attention_conflicts_title"),
       note: t("dashboard_attention_conflicts_note"),
-      tone: ipConflicts > 0 ? "danger" : "ok",
+      tone: conflictEntries.length > 0 ? "danger" : "ok",
+      details: conflictEntries.map(([ip, names]) => `${ip} · ${names.join(", ")}`),
     },
     {
-      value: untrackedReachable,
-      title: t("dashboard_attention_untracked_title"),
-      note: t("dashboard_attention_untracked_note"),
-      tone: untrackedReachable > 0 ? "warn" : "ok",
-    },
-    {
-      value: outsidePool + withoutSubnet,
+      value: placementIssues.length,
       title: t("dashboard_attention_placement_title"),
       note: t("dashboard_attention_placement_note"),
-      tone: outsidePool + withoutSubnet > 0 ? "warn" : "ok",
+      tone: placementIssues.length > 0 ? "warn" : "ok",
+      details: placementIssues,
     },
     {
-      value: fullGroups,
+      value: fullGroups.length,
       title: t("dashboard_attention_capacity_title"),
       note: t("dashboard_attention_capacity_note"),
-      tone: fullGroups > 0 ? "warn" : "ok",
+      tone: fullGroups.length > 0 ? "warn" : "ok",
+      details: fullGroups,
     },
     {
-      value: lowCapacityGroups,
+      value: lowCapacityGroups.length,
       title: t("dashboard_attention_low_capacity_title"),
       note: t("dashboard_attention_low_capacity_note"),
-      tone: lowCapacityGroups > 0 ? "warn" : "ok",
+      tone: lowCapacityGroups.length > 0 ? "warn" : "ok",
+      details: lowCapacityGroups,
     },
     {
-      value: automationExcluded,
+      value: automationExcluded.length,
       title: t("dashboard_attention_automation_title"),
       note: t("dashboard_attention_automation_note"),
-      tone: automationExcluded > 0 ? "info" : "ok",
+      tone: automationExcluded.length > 0 ? "info" : "ok",
+      details: automationExcluded,
     },
   ];
 
   elements.dashboardAttentionList.innerHTML = items
     .map((item) => `
-      <li class="mini-item mini-item--attention mini-item--${escapeHtml(item.tone)}">
-        <div class="mini-title">${escapeHtml(item.title)}</div>
-        <div class="mini-value">${escapeHtml(String(item.value))}</div>
-        <div class="mini-meta">${escapeHtml(item.note)}</div>
+      <li>
+        <details class="mini-item mini-item--attention mini-item--${escapeHtml(item.tone)}" ${item.value > 0 ? "" : ""}>
+          <summary class="mini-item__summary">
+            <div class="mini-title">${escapeHtml(item.title)}</div>
+            <div class="mini-value">${escapeHtml(String(item.value))}</div>
+            <div class="mini-meta">${escapeHtml(item.note)}</div>
+          </summary>
+          <div class="mini-item__details">
+            ${renderDashboardAttentionDetails(item.details, t("dashboard_attention_details_empty"))}
+          </div>
+        </details>
       </li>
     `)
     .join("");
@@ -2784,12 +3295,12 @@ function renderIpCheckResult(message, tone) {
   elements.ipCheckResult.textContent = message;
 }
 
-function setScanStatus(label, variant) {
-  elements.scanStatusBadge.className = `status-badge status-badge--${variant}`;
-  elements.scanStatusBadge.textContent = label;
-}
+function renderPingBadge(ip, subnet = null) {
+  const resolvedSubnet = subnet || findSubnetForIp(ipToInt(normalizeIpSafe(ip)));
+  if (!isSubnetPingVisible(resolvedSubnet)) {
+    return "";
+  }
 
-function renderPingBadge(ip) {
   const pingState = getPingState(ip);
   if (!pingState) {
     return `<span class="status-badge status-badge--warn">${escapeHtml(t("ping_no_data"))}</span>`;
@@ -3210,6 +3721,19 @@ function getDevicesInSubnet(subnet) {
   return state.devices.filter((device) => isIpInsideNetwork(ipToInt(device.ip), subnet));
 }
 
+function isSubnetPingVisible(subnet) {
+  return Boolean(subnet?.scanEnabled);
+}
+
+function getVisiblePingState(ip, subnet = null) {
+  const resolvedSubnet = subnet || findSubnetForIp(ipToInt(normalizeIpSafe(ip)));
+  if (!isSubnetPingVisible(resolvedSubnet)) {
+    return null;
+  }
+
+  return getPingState(ip);
+}
+
 function getGroupsInSubnet(subnetId) {
   return state.groups
     .filter((group) => group.subnetId === subnetId)
@@ -3234,6 +3758,10 @@ function countReachableInGroup(group, reachableSet = getReachableScanIps()) {
 }
 
 function countPingOnlyInGroup(group, reachableSet = getReachableScanIps()) {
+  const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
+  if (!isSubnetPingVisible(subnet)) {
+    return 0;
+  }
   const assignedSet = new Set(getDevicesInGroup(group).map((device) => device.ip));
   let count = 0;
   for (let ipInt = group.rangeStartInt; ipInt <= group.rangeEndInt; ipInt += 1) {
@@ -3303,6 +3831,9 @@ function countFreeInSubnet(subnet) {
 }
 
 function countPingOnlyInSubnet(subnet, reachableSet = getReachableScanIps()) {
+  if (!isSubnetPingVisible(subnet)) {
+    return 0;
+  }
   const assignedSet = new Set(
     state.devices
       .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
@@ -3503,14 +4034,29 @@ function evaluateDeviceStatus(device, subnet) {
   return { label: t("status_ok"), variant: "ok" };
 }
 
-function matchesSearch(device, searchTerm) {
+function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = "") {
+  const subnet = resolveDeviceSubnet(device);
+  const group = resolveDeviceGroup(device, subnet);
+  const pingState = getVisiblePingState(device.ip, subnet);
+  const sameIpCount = state.devices.filter((entry) => entry.ip === device.ip).length;
+
+  if (quickFilter === "conflicts" && sameIpCount <= 1) {
+    return false;
+  }
+  if (quickFilter === "no-subnet" && subnet) {
+    return false;
+  }
+  if (quickFilter === "outside-pool" && (!subnet || isIpInsidePool(ipToInt(device.ip), subnet))) {
+    return false;
+  }
+  if (groupFilter && group?.id !== groupFilter) {
+    return false;
+  }
+
   if (!searchTerm) {
     return true;
   }
 
-  const subnet = resolveDeviceSubnet(device);
-  const group = resolveDeviceGroup(device, subnet);
-  const pingState = getPingState(device.ip);
   const haystack = [
     device.name,
     device.ip,
@@ -3522,7 +4068,7 @@ function matchesSearch(device, searchTerm) {
     subnet?.cidr || "",
     group?.name || "",
     group ? formatGroupRange(group, true) : "",
-    pingState?.isReachable ? "online reachable ping" : "offline no-ping",
+    pingState ? (pingState.isReachable ? "online reachable ping" : "offline no-ping") : "",
   ]
     .join(" ")
     .toLowerCase();

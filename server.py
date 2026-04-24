@@ -323,6 +323,152 @@ def normalize_subnet_payload(payload: dict) -> dict:
     }
 
 
+def normalize_mac_address(value: object) -> str:
+    raw_value = str(value or "").strip().replace("-", ":").upper()
+    if not raw_value:
+        return ""
+    parts = [part for part in raw_value.split(":") if part]
+    if len(parts) != 6 or any(len(part) != 2 for part in parts):
+        raise ValueError("Указан некорректный MAC-адрес.")
+    try:
+        normalized_parts = [f"{int(part, 16):02X}" for part in parts]
+    except ValueError as error:
+        raise ValueError("Указан некорректный MAC-адрес.") from error
+    return ":".join(normalized_parts)
+
+
+def normalize_device_type(value: object) -> str:
+    device_type = str(value or "").strip().lower()
+    if device_type not in {"server", "container", "iot"}:
+        raise ValueError("Поддерживаются типы server, container и iot.")
+    return device_type
+
+
+def normalize_group_payload(
+    connection: sqlite3.Connection,
+    payload: dict,
+    *,
+    existing_id: str | None = None,
+    created_at: str | None = None,
+) -> dict:
+    group_id = str(payload.get("id") or existing_id or create_id()).strip() or create_id()
+    subnet_id = str(payload.get("subnetId") or "").strip()
+    subnet = get_subnet_by_id(connection, subnet_id)
+    if subnet is None:
+        raise ValueError("Подсеть для группы не найдена.")
+
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("Имя группы обязательно.")
+
+    note = str(payload.get("note") or "").strip()
+    range_start = normalize_ip_address(payload.get("rangeStart"))
+    range_end = normalize_ip_address(payload.get("rangeEnd"))
+    range_start_int = ip_to_int_value(range_start)
+    range_end_int = ip_to_int_value(range_end)
+
+    if range_start_int > range_end_int:
+        raise ValueError("Начало диапазона должно быть меньше или равно концу.")
+
+    if range_start_int < subnet["networkInt"] or range_end_int > subnet["broadcastInt"]:
+        raise ValueError(f"Диапазон группы должен находиться внутри {subnet['cidr']}.")
+
+    overlapping_group = connection.execute(
+        """
+        SELECT id, name
+        FROM range_groups
+        WHERE subnet_id = ?
+          AND id != ?
+          AND range_start_int <= ?
+          AND range_end_int >= ?
+        LIMIT 1
+        """,
+        (subnet_id, group_id, range_end_int, range_start_int),
+    ).fetchone()
+    if overlapping_group is not None:
+        raise ValueError(f"Диапазон пересекается с группой {overlapping_group['name']}.")
+
+    return {
+        "id": group_id,
+        "subnetId": subnet_id,
+        "name": name,
+        "rangeStart": range_start,
+        "rangeEnd": range_end,
+        "rangeStartInt": range_start_int,
+        "rangeEndInt": range_end_int,
+        "note": note,
+        "createdAt": created_at or str(payload.get("createdAt") or utc_now_iso()),
+    }
+
+
+def normalize_device_payload(
+    connection: sqlite3.Connection,
+    payload: dict,
+    *,
+    existing_id: str | None = None,
+    created_at: str | None = None,
+) -> dict:
+    device_id = str(payload.get("id") or existing_id or create_id()).strip() or create_id()
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("Имя устройства обязательно.")
+
+    ip = normalize_ip_address(payload.get("ip"))
+    mac = normalize_mac_address(payload.get("mac"))
+    device_type = normalize_device_type(payload.get("type"))
+    note = str(payload.get("note") or "").strip()
+    subnet_id = str(payload.get("subnetId") or "").strip()
+    group_id = str(payload.get("groupId") or "").strip()
+    ip_int = ip_to_int_value(ip)
+
+    subnet = get_subnet_by_id(connection, subnet_id) if subnet_id else None
+    if subnet is not None and not (subnet["networkInt"] <= ip_int <= subnet["broadcastInt"]):
+        raise ValueError(f"IP {ip} не входит в подсеть {subnet['name']}.")
+
+    if subnet is None:
+        for candidate in get_subnets_for_scan(connection):
+            if candidate["networkInt"] <= ip_int <= candidate["broadcastInt"]:
+                subnet = candidate
+                subnet_id = candidate["id"]
+                break
+
+    if group_id:
+        group = get_group_for_scan(connection, group_id)
+        if group is None:
+            raise ValueError("Выбранная группа не найдена.")
+        if subnet_id and group["subnetId"] != subnet_id:
+            raise ValueError("Группа диапазона не относится к выбранной подсети.")
+        if not (group["rangeStartInt"] <= ip_int <= group["rangeEndInt"]):
+            raise ValueError("IP устройства не входит в диапазон выбранной группы.")
+        subnet_id = group["subnetId"]
+
+    duplicate_ip = connection.execute(
+        "SELECT id, name FROM devices WHERE ip = ? AND id != ? LIMIT 1",
+        (ip, device_id),
+    ).fetchone()
+    if duplicate_ip is not None:
+        raise ValueError(f"IP {ip} уже назначен устройству {duplicate_ip['name']}.")
+
+    if mac:
+        duplicate_mac = connection.execute(
+            "SELECT id, name FROM devices WHERE UPPER(mac) = ? AND id != ? LIMIT 1",
+            (mac, device_id),
+        ).fetchone()
+        if duplicate_mac is not None:
+            raise ValueError(f"MAC {mac} уже назначен устройству {duplicate_mac['name']}.")
+
+    return {
+        "id": device_id,
+        "name": name,
+        "ip": ip,
+        "mac": mac,
+        "type": device_type,
+        "subnetId": subnet_id,
+        "note": note,
+        "createdAt": created_at or str(payload.get("createdAt") or utc_now_iso()),
+    }
+
+
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {
         row["name"]
@@ -1176,6 +1322,32 @@ def change_user_password(
     return updated_user
 
 
+def update_current_user_profile(connection: sqlite3.Connection, user: dict, payload: dict) -> dict:
+    row = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Пользователь не найден.")
+
+    username = sanitize_username(payload.get("username"))
+    display_name = sanitize_display_name(payload.get("displayName"), fallback=username)
+    now = utc_now_iso()
+
+    connection.execute(
+        """
+        UPDATE users
+        SET username = ?, display_name = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (username, display_name, now, user["id"]),
+    )
+    connection.commit()
+
+    updated_row = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    updated_user = user_from_row(updated_row)
+    updated_user["accessGroupIds"] = get_user_access_group_ids(connection, updated_user["id"])
+    bump_revision("user-profile-changed", {"userId": user["id"]})
+    return updated_user
+
+
 def create_access_group(connection: sqlite3.Connection, payload: dict) -> dict:
     name = str(payload.get("name", "")).strip()
     description = str(payload.get("description", "")).strip()
@@ -1395,6 +1567,133 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
         note=device.get("note", ""),
         changed_at=device["createdAt"],
     )
+    connection.commit()
+    bump_revision("state-changed", {"entity": "device"})
+    signal_background_scanner(run_scan=True)
+    return {
+        **device,
+        "subnetId": device.get("subnetId", ""),
+        "mac": device.get("mac", ""),
+    }
+
+
+def update_subnet(connection: sqlite3.Connection, subnet_id: str, subnet: dict) -> dict:
+    cursor = connection.execute(
+        """
+        UPDATE subnets
+        SET name = ?, cidr = ?, network = ?, network_int = ?, broadcast = ?, broadcast_int = ?,
+            mask_bits = ?, range_start = ?, range_end = ?, range_start_int = ?, range_end_int = ?,
+            pool_size = ?, usable_hosts = ?, scan_enabled = ?, access_group_id = ?, note = ?
+        WHERE id = ?
+        """,
+        (
+            subnet["name"],
+            subnet["cidr"],
+            subnet["network"],
+            subnet["networkInt"],
+            subnet["broadcast"],
+            subnet["broadcastInt"],
+            subnet["maskBits"],
+            subnet["rangeStart"],
+            subnet["rangeEnd"],
+            subnet["rangeStartInt"],
+            subnet["rangeEndInt"],
+            subnet["poolSize"],
+            subnet["usableHosts"],
+            1 if subnet.get("scanEnabled", True) else 0,
+            subnet.get("accessGroupId") or None,
+            subnet.get("note", ""),
+            subnet_id,
+        ),
+    )
+    connection.commit()
+    if cursor.rowcount == 0:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Подсеть не найдена.")
+    bump_revision("state-changed", {"entity": "subnet"})
+    signal_background_scanner(run_scan=True)
+    return subnet
+
+
+def update_group(connection: sqlite3.Connection, group_id: str, group: dict) -> dict:
+    cursor = connection.execute(
+        """
+        UPDATE range_groups
+        SET subnet_id = ?, name = ?, range_start = ?, range_end = ?, range_start_int = ?,
+            range_end_int = ?, note = ?
+        WHERE id = ?
+        """,
+        (
+            group["subnetId"],
+            group["name"],
+            group["rangeStart"],
+            group["rangeEnd"],
+            group["rangeStartInt"],
+            group["rangeEndInt"],
+            group.get("note", ""),
+            group_id,
+        ),
+    )
+    connection.commit()
+    if cursor.rowcount == 0:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Группа не найдена.")
+    bump_revision("state-changed", {"entity": "group"})
+    return group
+
+
+def update_device(connection: sqlite3.Connection, device_id: str, device: dict, actor: str) -> dict:
+    existing_row = connection.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+    if existing_row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Устройство не найдено.")
+
+    existing_device = device_from_row(existing_row)
+    cursor = connection.execute(
+        """
+        UPDATE devices
+        SET name = ?, ip = ?, mac = ?, type = ?, subnet_id = ?, note = ?
+        WHERE id = ?
+        """,
+        (
+            device["name"],
+            device["ip"],
+            device.get("mac", ""),
+            device["type"],
+            device.get("subnetId") or None,
+            device.get("note", ""),
+            device_id,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Устройство не найдено.")
+
+    if existing_device["ip"] != device["ip"]:
+        record_history(
+            connection,
+            device_id=device_id,
+            device_name=device["name"],
+            ip=device["ip"],
+            previous_ip=existing_device["ip"],
+            action="ip_changed",
+            actor=actor,
+            note=device.get("note", ""),
+        )
+    elif (
+        existing_device["name"] != device["name"]
+        or existing_device["mac"] != device.get("mac", "")
+        or existing_device["type"] != device["type"]
+        or existing_device.get("subnetId", "") != device.get("subnetId", "")
+        or existing_device["note"] != device.get("note", "")
+    ):
+        record_history(
+            connection,
+            device_id=device_id,
+            device_name=device["name"],
+            ip=device["ip"],
+            previous_ip="",
+            action="updated",
+            actor=actor,
+            note=device.get("note", ""),
+        )
+
     connection.commit()
     bump_revision("state-changed", {"entity": "device"})
     signal_background_scanner(run_scan=True)
@@ -1802,7 +2101,7 @@ class BackgroundScanner(threading.Thread):
 
 
 class ATLASRequestHandler(BaseHTTPRequestHandler):
-    server_version = "ATLAS/0.2.4"
+    server_version = "ATLAS/0.2.5"
 
     def handle(self) -> None:
         try:
@@ -1904,14 +2203,16 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.CREATED, insert_subnet(connection, subnet_payload))
                     return
                 if parsed.path == "/api/groups":
-                    require_accessible_subnet(connection, user, str(payload.get("subnetId") or ""))
-                    self.send_json(HTTPStatus.CREATED, insert_group(connection, payload))
+                    group_payload = normalize_group_payload(connection, payload)
+                    require_accessible_subnet(connection, user, group_payload["subnetId"])
+                    self.send_json(HTTPStatus.CREATED, insert_group(connection, group_payload))
                     return
                 if parsed.path == "/api/devices":
-                    subnet_id = str(payload.get("subnetId") or "").strip()
+                    device_payload = normalize_device_payload(connection, payload)
+                    subnet_id = str(device_payload.get("subnetId") or "").strip()
                     if subnet_id:
                         require_accessible_subnet(connection, user, subnet_id)
-                    self.send_json(HTTPStatus.CREATED, insert_device(connection, payload, actor))
+                    self.send_json(HTTPStatus.CREATED, insert_device(connection, device_payload, actor))
                     return
                 if parsed.path == "/api/scan":
                     subnet_id = str(payload.get("subnetId") or "").strip()
@@ -1963,6 +2264,62 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                         save_user_preferences(connection, user["id"], payload),
                     )
                     return
+                if parsed.path == "/api/auth/profile":
+                    user = require_authenticated_user(connection, self)
+                    updated_user = update_current_user_profile(connection, user, payload)
+                    self.send_json(HTTPStatus.OK, build_session_payload(connection, updated_user))
+                    return
+                if len([part for part in parsed.path.split("/") if part]) == 3 and parsed.path.startswith("/api/"):
+                    user = require_write_user(connection, self)
+                    actor = resolve_actor(self, payload, user)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    entity_id = parts[2]
+                    if parts[1] == "subnets":
+                        current_subnet = require_accessible_subnet(connection, user, entity_id)
+                        subnet_payload = normalize_subnet_payload(
+                            {
+                                **current_subnet,
+                                **payload,
+                                "id": entity_id,
+                                "createdAt": current_subnet["createdAt"],
+                            }
+                        )
+                        access_group_id = subnet_payload["accessGroupId"]
+                        if access_group_id and not can_assign_access_group(user, access_group_id):
+                            raise RequestError(HTTPStatus.FORBIDDEN, "Нет прав для назначения этой группы доступа.")
+                        self.send_json(HTTPStatus.OK, update_subnet(connection, entity_id, subnet_payload))
+                        return
+                    if parts[1] == "groups":
+                        current_group = get_group_for_scan(connection, entity_id)
+                        if current_group is None:
+                            raise RequestError(HTTPStatus.NOT_FOUND, "Группа не найдена.")
+                        require_accessible_subnet(connection, user, current_group["subnetId"])
+                        group_payload = normalize_group_payload(
+                            connection,
+                            {**current_group, **payload, "id": entity_id, "createdAt": current_group["createdAt"]},
+                            existing_id=entity_id,
+                            created_at=current_group["createdAt"],
+                        )
+                        require_accessible_subnet(connection, user, group_payload["subnetId"])
+                        self.send_json(HTTPStatus.OK, update_group(connection, entity_id, group_payload))
+                        return
+                    if parts[1] == "devices":
+                        existing_row = connection.execute("SELECT * FROM devices WHERE id = ?", (entity_id,)).fetchone()
+                        if existing_row is None:
+                            raise RequestError(HTTPStatus.NOT_FOUND, "Устройство не найдено.")
+                        current_device = device_from_row(existing_row)
+                        if current_device["subnetId"]:
+                            require_accessible_subnet(connection, user, current_device["subnetId"])
+                        device_payload = normalize_device_payload(
+                            connection,
+                            {**current_device, **payload, "id": entity_id, "createdAt": current_device["createdAt"]},
+                            existing_id=entity_id,
+                            created_at=current_device["createdAt"],
+                        )
+                        if device_payload["subnetId"]:
+                            require_accessible_subnet(connection, user, device_payload["subnetId"])
+                        self.send_json(HTTPStatus.OK, update_device(connection, entity_id, device_payload, actor))
+                        return
 
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
         except RequestError as error:
