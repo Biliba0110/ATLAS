@@ -5,19 +5,52 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0a0d14">
   <title>ATLAS</title>
-  <link rel="icon" type="image/svg+xml" href="/atlas-logo.svg">
-  <link rel="stylesheet" href="styles.css">
-  <script src="i18n.js" defer></script>
-  <script src="app.js" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/atlas-logo.svg?v=0.2.4-ui15">
+  <link rel="stylesheet" href="styles.css?v=0.2.4-ui15">
+  <script src="i18n.js?v=0.2.4-ui15" defer></script>
+  <script src="app.js?v=0.2.4-ui15" defer></script>
 </head>
 <body>
+  <div class="auth-screen" id="auth-screen" hidden>
+    <div class="auth-screen__panel">
+      <img src="/atlas-logo.svg" alt="ATLAS" class="auth-screen__logo">
+      <p class="eyebrow">ATLAS</p>
+      <h1 id="auth-screen-title">ATLAS</h1>
+      <p class="hero-text" data-i18n="auth_intro">
+        Войдите в систему, чтобы работать с общей базой ATLAS с любого устройства.
+      </p>
+
+      <div id="bootstrap-hint" class="result-card result-card--warn" hidden></div>
+
+      <form id="login-form" class="form-grid auth-screen__form">
+        <label>
+          <span data-i18n="login_username_label">Пользователь</span>
+          <input type="text" name="username" autocomplete="username" required>
+        </label>
+        <label>
+          <span data-i18n="login_password_label">Пароль</span>
+          <div class="password-field">
+            <input type="password" name="password" autocomplete="current-password" required>
+            <button type="button" class="password-toggle" data-password-toggle data-i18n="password_toggle_show">Показать</button>
+          </div>
+        </label>
+        <button type="submit" class="submit-button" data-i18n="login_button">Войти</button>
+      </form>
+
+      <div id="auth-status" class="result-card result-card--muted" data-i18n="auth_idle">
+        Авторизация выполняется на сервере ATLAS.
+      </div>
+    </div>
+  </div>
+
   <div class="app-shell">
     <header class="hero">
       <div class="brand-block">
         <img src="/atlas-logo.svg" alt="ATLAS" class="brand-logo">
         <div class="brand-copy">
-          <p class="eyebrow">ATLAS</p>
-          <h1 id="hero-signature">Home Lab Control Center</h1>
+          <p class="eyebrow">Network IPAM</p>
+          <h1 class="hero-title">ATLAS</h1>
+          <p class="hero-signature" id="hero-signature">Home Lab Control Center</p>
           <p class="hero-text" data-i18n="hero_description">
             Компактный центр управления подсетями, IP-адресами и сетевой занятостью.
           </p>
@@ -25,29 +58,36 @@
       </div>
 
       <div class="hero-side">
-        <div class="hero-toolbar">
-          <label class="inline-field">
-            <span data-i18n="operator_label">Оператор</span>
-            <input type="text" id="operator-input" data-i18n-placeholder="operator_placeholder" placeholder="Например: Bohdan">
-          </label>
+        <section class="hero-console">
+          <div class="hero-console__top">
+            <div class="hero-account">
+              <div class="hero-account__main">
+                <div class="hero-account__identity">
+                  <strong class="hero-account__name" id="current-user-badge">ATLAS</strong>
+                  <span class="status-badge status-badge--info" id="current-role-badge">Full access</span>
+                </div>
+                <button type="button" class="action-button action-button--ghost" id="logout-button" data-i18n="logout_button">Выйти</button>
+              </div>
+            </div>
 
-          <div class="hero-statuses">
-            <span class="status-badge status-badge--ok" id="live-status-badge">Live</span>
-            <span class="status-badge status-badge--warn" id="scan-status-badge">Ping</span>
+            <div class="hero-status-panel">
+              <span class="status-badge status-badge--warn" id="scan-status-badge">Ping</span>
+              <p class="helper-text helper-text--tight" id="scan-status-text" data-i18n="scan_not_started">
+                Сканирование еще не запускалось.
+              </p>
+            </div>
           </div>
-        </div>
 
-        <p class="helper-text helper-text--tight" id="scan-status-text" data-i18n="scan_not_started">
-          Сканирование еще не запускалось.
-        </p>
-
-        <div class="hero-actions">
-          <button type="button" class="action-button action-button--primary" data-open-modal="add-modal" data-i18n="add_button">Добавить</button>
-          <button type="button" class="action-button" id="open-export-button" data-open-modal="export-modal" data-i18n="export_button">Экспорт</button>
-          <button type="button" class="action-button" id="open-settings-button" data-open-modal="settings-modal" data-i18n="settings_button">Настройки</button>
-          <button type="button" class="action-button action-button--ghost" id="import-button" data-i18n="import_button">Импорт</button>
-          <button type="button" class="action-button action-button--ghost" id="scan-now-button" data-i18n="scan_now_button">Проверить ping</button>
-        </div>
+          <div class="hero-console__body">
+            <div class="hero-actions">
+              <button type="button" class="action-button action-button--primary hero-action--primary" data-open-modal="add-modal" data-i18n="add_button">Добавить</button>
+              <button type="button" class="action-button" id="open-export-button" data-open-modal="export-modal" data-i18n="export_button">Экспорт</button>
+              <button type="button" class="action-button" id="open-settings-button" data-open-modal="settings-modal" data-i18n="settings_button">Настройки</button>
+              <button type="button" class="action-button action-button--ghost" id="import-button" data-i18n="import_button">Импорт</button>
+              <button type="button" class="action-button action-button--ghost" id="scan-now-button" data-i18n="scan_now_button">Проверить ping</button>
+            </div>
+          </div>
+        </section>
       </div>
 
       <input type="file" id="import-file-input" accept=".json,.csv,application/json,text/csv" hidden>
@@ -82,8 +122,8 @@
       <div class="dashboard-grid dashboard-grid--minimal">
         <section class="panel panel--dashboard-card panel--dashboard-primary">
           <div class="panel-heading">
-            <p class="panel-kicker" data-i18n="automation_kicker">Автоматизация</p>
-            <h2 data-i18n="ip_status_title">Статус IP</h2>
+            <p class="panel-kicker" data-i18n="dashboard_ipcheck_kicker">IP Check</p>
+            <h2 data-i18n="dashboard_ipcheck_title">Быстрая проверка IP</h2>
           </div>
 
           <p class="helper-text dashboard-lead" id="live-summary-text" data-i18n="dashboard_primary_note">
@@ -103,20 +143,23 @@
           </div>
         </section>
 
-        <section class="panel panel--dashboard-card panel--dashboard-attention">
+        <section class="panel panel--dashboard-card panel--dashboard-summary">
           <div class="panel-heading">
-            <p class="panel-kicker" data-i18n="dashboard_attention_kicker">Внимание</p>
-            <h2 data-i18n="dashboard_attention_title">Что требует внимания</h2>
+            <p class="panel-kicker" data-i18n="dashboard_overview_kicker">Обзор</p>
+            <h2 data-i18n="dashboard_overview_title">Текущее состояние</h2>
           </div>
-          <ul class="mini-list mini-list--tight" id="dashboard-attention-list">
+
+          <ul class="mini-list mini-list--tight" id="dashboard-summary-list">
             <li class="mini-list__empty" data-i18n="dashboard_attention_empty">Сейчас нет предупреждений и проблемных зон.</li>
           </ul>
-        </section>
 
-        <section class="panel panel--dashboard-card panel--dashboard-activity">
-          <div class="panel-heading">
-            <p class="panel-kicker" data-i18n="audit_kicker">Аудит</p>
-            <h2 data-i18n="recent_changes_title">Последние изменения</h2>
+          <div class="dashboard-divider"></div>
+
+          <div class="panel-heading panel-heading--split dashboard-subheading">
+            <div>
+              <p class="panel-kicker" data-i18n="audit_kicker">Аудит</p>
+              <h2 data-i18n="recent_changes_title">Последние изменения</h2>
+            </div>
           </div>
           <ul class="mini-list" id="dashboard-history-list">
             <li class="mini-list__empty" data-i18n="empty_history">История изменений пока пуста.</li>
@@ -158,12 +201,13 @@
                   <th data-i18n="table_usage">Использование</th>
                   <th data-i18n="table_groups">Группы</th>
                   <th data-i18n="table_comment">Комментарий</th>
+                  <th data-i18n="table_auto_scan">Авто-скан</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody id="subnets-table-body">
                 <tr class="empty-row">
-                  <td colspan="7" data-i18n="empty_subnets">Подсети еще не добавлены.</td>
+                  <td colspan="8" data-i18n="empty_subnets">Подсети еще не добавлены.</td>
                 </tr>
               </tbody>
             </table>
@@ -332,6 +376,12 @@
           <input type="text" name="rangeEnd" placeholder="192.168.10.220">
         </label>
         <label class="form-grid__full">
+          <span data-i18n="field_access_group">Группа доступа</span>
+          <select name="accessGroupId" id="subnet-access-group-select">
+            <option value="" data-i18n="access_group_public">Публичная / без ограничения</option>
+          </select>
+        </label>
+        <label class="form-grid__full">
           <span data-i18n="field_comment">Комментарий</span>
           <textarea name="note" rows="3" data-i18n-placeholder="subnet_note_placeholder" placeholder="Например: основная домашняя сеть"></textarea>
         </label>
@@ -496,8 +546,132 @@
         <button type="button" class="action-button action-button--ghost" data-close-modal="settings-modal" data-i18n="close_button">Закрыть</button>
       </div>
 
-      <div class="modal-content">
-        <section class="panel panel--modal">
+      <div class="modal-content settings-modal-content">
+        <aside class="settings-sidebar">
+          <button type="button" class="settings-nav-button is-active" data-settings-tab="profile" data-i18n="settings_section_profile">Профиль</button>
+          <button type="button" class="settings-nav-button" data-settings-tab="interface" data-i18n="settings_section_interface">Интерфейс</button>
+          <button type="button" class="settings-nav-button" data-settings-tab="automation" data-i18n="settings_section_automation">Автоматизация</button>
+          <button type="button" class="settings-nav-button" data-settings-tab="templates" data-i18n="settings_section_templates">Шаблоны</button>
+          <button type="button" class="settings-nav-button admin-only" data-settings-tab="administration" data-i18n="settings_section_admin" hidden>Администрирование</button>
+        </aside>
+
+        <div class="settings-sections">
+        <section class="panel panel--modal settings-panel settings-panel--half" data-settings-section="profile">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="account_kicker">Аккаунт</p>
+            <h2 data-i18n="account_title">Пользователь и профиль</h2>
+          </div>
+
+          <div class="settings-grid">
+            <label class="setting-card">
+              <span class="setting-title" data-i18n="current_user_label">Пользователь</span>
+              <input type="text" id="current-user-display" readonly>
+              <span class="setting-note" id="current-user-note"></span>
+            </label>
+          </div>
+
+          <div class="template-editor-actions">
+            <button type="button" class="action-button action-button--ghost" id="open-password-modal-button" data-i18n="change_password_button">Сменить пароль</button>
+          </div>
+        </section>
+
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-access-panel" data-settings-section="administration" hidden>
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
+            <h2 data-i18n="access_groups_title">Группы доступа</h2>
+          </div>
+
+          <form id="access-group-form" class="form-grid">
+            <label>
+              <span data-i18n="field_name">Имя</span>
+              <input type="text" name="name" data-i18n-placeholder="access_group_name_placeholder" placeholder="Home Labs" required>
+            </label>
+            <label>
+              <span data-i18n="field_comment">Комментарий</span>
+              <input type="text" name="description" data-i18n-placeholder="access_group_description_placeholder" placeholder="Например: отдельная зона ответственности">
+            </label>
+            <button type="submit" class="submit-button" data-i18n="save_access_group">Сохранить группу доступа</button>
+          </form>
+
+          <div id="access-group-status" class="result-card result-card--muted"></div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="table_name">Имя</th>
+                  <th data-i18n="table_comment">Комментарий</th>
+                </tr>
+              </thead>
+              <tbody id="access-groups-table-body">
+                <tr class="empty-row">
+                  <td colspan="2" data-i18n="empty_access_groups">Группы доступа еще не созданы.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-users-panel" data-settings-section="administration" hidden>
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
+            <h2 data-i18n="users_title">Пользователи</h2>
+          </div>
+
+          <form id="user-form" class="form-grid">
+            <label>
+              <span data-i18n="login_username_label">Пользователь</span>
+              <input type="text" name="username" data-i18n-placeholder="user_username_placeholder" placeholder="atlas-user" required>
+            </label>
+            <label>
+              <span data-i18n="display_name_label">Отображаемое имя</span>
+              <input type="text" name="displayName" data-i18n-placeholder="display_name_placeholder" placeholder="Atlas User" required>
+            </label>
+            <label>
+              <span data-i18n="role_label">Роль</span>
+              <select name="role" required>
+                <option value="viewer" data-i18n="role_viewer">Viewer</option>
+                <option value="editor" data-i18n="role_editor">Editor</option>
+                <option value="admin" data-i18n="role_admin">Admin</option>
+              </select>
+            </label>
+            <label>
+              <span data-i18n="login_password_label">Пароль</span>
+              <div class="password-field">
+                <input type="password" name="password" data-i18n-placeholder="user_password_placeholder" placeholder="temporary password" required>
+                <button type="button" class="password-toggle" data-password-toggle data-i18n="password_toggle_show">Показать</button>
+              </div>
+            </label>
+            <label class="form-grid__full">
+              <span data-i18n="access_groups_assign_label">Группы доступа пользователя</span>
+              <div id="user-access-group-options" class="checkbox-grid"></div>
+            </label>
+            <button type="submit" class="submit-button" data-i18n="save_user">Создать пользователя</button>
+          </form>
+
+          <div id="user-status" class="result-card result-card--muted"></div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="login_username_label">Пользователь</th>
+                  <th data-i18n="display_name_label">Отображаемое имя</th>
+                  <th data-i18n="role_label">Роль</th>
+                  <th data-i18n="access_groups_title">Группы доступа</th>
+                  <th data-i18n="table_status">Статус</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body">
+                <tr class="empty-row">
+                  <td colspan="5" data-i18n="empty_users">Пользователи еще не созданы.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel panel--modal settings-panel settings-panel--half" data-settings-section="interface" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="interface_kicker">Интерфейс</p>
             <h2 data-i18n="appearance_title">Внешний вид</h2>
@@ -556,18 +730,37 @@
           </div>
         </section>
 
-        <section class="panel panel--modal">
+        <section class="panel panel--modal settings-panel settings-panel--half" data-settings-section="automation" hidden>
           <div class="panel-heading">
             <p class="panel-kicker">Ping</p>
             <h2 data-i18n="background_scan_title">Фоновое сканирование</h2>
           </div>
 
           <div class="settings-grid settings-grid--single">
+            <label class="setting-card setting-card--toggle">
+              <span class="setting-title" data-i18n="default_subnet_scan_label">Сканировать новые подсети по умолчанию</span>
+              <input type="checkbox" id="settings-default-subnet-scan">
+              <span class="setting-note" data-i18n="default_subnet_scan_note">Определяет, будет ли новая подсеть автоматически участвовать в фоне после добавления.</span>
+            </label>
+
             <label class="setting-card">
               <span class="setting-title" data-i18n="ping_interval_label">Интервал фонового ping</span>
               <input type="number" id="settings-scan-interval" min="15" max="3600" step="15">
               <span class="setting-note" id="settings-ping-meta"></span>
             </label>
+          </div>
+
+          <div class="template-editor-card template-editor-card--modal automation-subnets-card">
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="automation_subnets_title">Подсети для фонового скана</p>
+                <p class="helper-text helper-text--tight" data-i18n="automation_subnets_note">
+                  Включай только те сети, которые реально достижимы с сервера ATLAS.
+                </p>
+              </div>
+            </div>
+
+            <div id="settings-subnet-scan-list" class="automation-subnet-list"></div>
           </div>
 
           <div class="template-editor-actions">
@@ -577,7 +770,7 @@
           <div id="server-settings-status" class="result-card result-card--muted"></div>
         </section>
 
-        <section class="panel panel--modal">
+        <section class="panel panel--modal settings-panel settings-panel--full" data-settings-section="templates" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="templates_kicker">Шаблоны</p>
             <h2 data-i18n="group_templates_title">Автоподстановка групп</h2>
@@ -586,20 +779,34 @@
           <div class="template-editor-card template-editor-card--modal">
             <div class="template-editor-heading">
               <div>
-                <p class="helper-title" data-i18n="json_templates_title">JSON-шаблоны</p>
+                <p class="helper-title" data-i18n="templates_form_title">Правила подстановки</p>
                 <p class="helper-text helper-text--tight" data-i18n="json_templates_note">
-                  Редактируются локально в браузере и влияют на то, какая группа будет предложена по умолчанию.
+                  Хранятся в профиле пользователя и влияют на то, какая группа будет предложена по умолчанию.
                 </p>
               </div>
+              <button type="button" class="action-button action-button--ghost" id="add-template-rule-button" data-i18n="add_template_rule">Добавить правило</button>
             </div>
 
-            <textarea
-              id="template-editor"
-              class="template-editor"
-              rows="12"
-              spellcheck="false"
-              placeholder='[{"id":"hypervisor","label":"Hypervisor Hosts","deviceTypes":["server"],"keywords":["hypervisor","host"]}]'
-            ></textarea>
+            <div id="template-rules-list" class="template-rules-list"></div>
+
+            <details class="template-json-details">
+              <summary class="template-json-summary" data-i18n="json_templates_title">JSON-шаблоны</summary>
+              <p class="helper-text helper-text--tight" data-i18n="json_templates_note">
+                Хранятся в профиле пользователя и влияют на то, какая группа будет предложена по умолчанию.
+              </p>
+
+              <textarea
+                id="template-editor"
+                class="template-editor"
+                rows="12"
+                spellcheck="false"
+                placeholder='[{"id":"hypervisor","label":"Hypervisor Hosts","deviceTypes":["server"],"keywords":["hypervisor","host"]}]'
+              ></textarea>
+
+              <div class="template-editor-actions">
+                <button type="button" class="action-button action-button--ghost" id="apply-template-json-button" data-i18n="apply_json_templates">Применить JSON</button>
+              </div>
+            </details>
 
             <div class="template-editor-actions">
               <button type="button" class="action-button" id="save-template-settings-button" data-i18n="save_templates">Сохранить шаблоны</button>
@@ -610,7 +817,7 @@
           </div>
         </section>
 
-        <section class="panel panel--modal">
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="maintenance-panel" data-settings-section="administration" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="maintenance_kicker">Сервис</p>
             <h2 data-i18n="maintenance_title">Дополнительно</h2>
@@ -621,6 +828,7 @@
             <button type="button" class="action-button action-button--danger" id="clear-data-button" data-i18n="clear_button">Очистить</button>
           </div>
         </section>
+        </div>
       </div>
     </div>
   </div>
@@ -659,6 +867,44 @@
           </p>
         </section>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="password-modal" hidden>
+    <div class="modal-panel modal-panel--form" role="dialog" aria-modal="true" aria-labelledby="password-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="panel-kicker" data-i18n="account_kicker">Аккаунт</p>
+          <h2 id="password-modal-title" data-i18n="change_password_title">Смена пароля</h2>
+        </div>
+        <button type="button" class="action-button action-button--ghost" id="password-modal-close" data-close-modal="password-modal" data-i18n="close_button">Закрыть</button>
+      </div>
+
+      <form id="password-form" class="form-grid">
+        <label>
+          <span data-i18n="current_password_label">Текущий пароль</span>
+          <div class="password-field">
+            <input type="password" name="currentPassword" autocomplete="current-password" required>
+            <button type="button" class="password-toggle" data-password-toggle data-i18n="password_toggle_show">Показать</button>
+          </div>
+        </label>
+        <label>
+          <span data-i18n="new_password_label">Новый пароль</span>
+          <div class="password-field">
+            <input type="password" name="newPassword" autocomplete="new-password" required>
+            <button type="button" class="password-toggle" data-password-toggle data-i18n="password_toggle_show">Показать</button>
+          </div>
+        </label>
+        <label class="form-grid__full">
+          <span data-i18n="confirm_password_label">Подтвердите пароль</span>
+          <div class="password-field">
+            <input type="password" name="confirmPassword" autocomplete="new-password" required>
+            <button type="button" class="password-toggle" data-password-toggle data-i18n="password_toggle_show">Показать</button>
+          </div>
+        </label>
+        <div id="password-status" class="result-card result-card--muted form-grid__full"></div>
+        <button type="submit" class="submit-button" data-i18n="change_password_submit">Обновить пароль</button>
+      </form>
     </div>
   </div>
 

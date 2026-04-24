@@ -1,8 +1,5 @@
 const API_BASE = "/api";
-const OPERATOR_STORAGE_KEY = "atlas-operator";
 const GROUP_SUGGESTION_TEMPLATES_PATH = "/group-suggestion-templates.json";
-const SETTINGS_STORAGE_KEY = "atlas-settings";
-const CUSTOM_TEMPLATES_STORAGE_KEY = "atlas-custom-group-templates";
 const THEME_ALIASES = {
   ocean: "aurora",
 };
@@ -137,30 +134,62 @@ const state = {
       scanIntervalMax: 3600,
     },
   },
+  accessGroups: [],
+  auth: {
+    authenticated: false,
+    user: null,
+    accessGroups: [],
+    capabilities: {
+      isAdmin: false,
+      canWrite: false,
+      canManageUsers: false,
+      canManageServerSettings: false,
+      canManageAccessGroups: false,
+    },
+  },
+  admin: null,
 };
 
 const preferences = {
-  operator: localStorage.getItem(OPERATOR_STORAGE_KEY) || "",
-  settings: loadSettings(),
+  settings: { ...DEFAULT_SETTINGS },
+  customGroupTemplates: [],
 };
 
 const elements = {
+  authScreen: document.getElementById("auth-screen"),
+  authStatus: document.getElementById("auth-status"),
+  loginForm: document.getElementById("login-form"),
+  bootstrapHint: document.getElementById("bootstrap-hint"),
   heroSignature: document.getElementById("hero-signature"),
   subnetForm: document.getElementById("subnet-form"),
   deviceForm: document.getElementById("device-form"),
   groupForm: document.getElementById("group-form"),
+  accessGroupForm: document.getElementById("access-group-form"),
+  userForm: document.getElementById("user-form"),
+  passwordForm: document.getElementById("password-form"),
   subnetSelect: document.getElementById("device-subnet-select"),
+  subnetAccessGroupSelect: document.getElementById("subnet-access-group-select"),
   deviceGroupSelect: document.getElementById("device-group-select"),
   groupSubnetSelect: document.getElementById("group-subnet-select"),
   searchInput: document.getElementById("device-search-input"),
   ipCheckForm: document.getElementById("ip-check-form"),
   ipCheckResult: document.getElementById("ip-check-result"),
-  operatorInput: document.getElementById("operator-input"),
+  currentUserBadge: document.getElementById("current-user-badge"),
+  currentRoleBadge: document.getElementById("current-role-badge"),
+  currentUserDisplay: document.getElementById("current-user-display"),
+  currentUserNote: document.getElementById("current-user-note"),
+  logoutButton: document.getElementById("logout-button"),
+  openAddButton: document.querySelector('[data-open-modal="add-modal"]'),
   openSettingsButton: document.getElementById("open-settings-button"),
   settingsModal: document.getElementById("settings-modal"),
   closeSettingsButton: document.querySelector('[data-close-modal="settings-modal"]'),
+  settingsNavButtons: [...document.querySelectorAll("[data-settings-tab]")],
+  settingsSections: [...document.querySelectorAll("[data-settings-section]")],
+  openPasswordModalButton: document.getElementById("open-password-modal-button"),
+  passwordModal: document.getElementById("password-modal"),
+  passwordModalClose: document.getElementById("password-modal-close"),
+  passwordStatus: document.getElementById("password-status"),
   scanNowButton: document.getElementById("scan-now-button"),
-  liveStatusBadge: document.getElementById("live-status-badge"),
   scanStatusBadge: document.getElementById("scan-status-badge"),
   scanStatusText: document.getElementById("scan-status-text"),
   liveSummaryText: document.getElementById("live-summary-text"),
@@ -169,7 +198,7 @@ const elements = {
   modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
   openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
   closeModalButtons: [...document.querySelectorAll("[data-close-modal]")],
-  dashboardAttentionList: document.getElementById("dashboard-attention-list"),
+  dashboardAttentionList: document.getElementById("dashboard-summary-list"),
   dashboardHistoryList: document.getElementById("dashboard-history-list"),
   deviceSuggestion: document.getElementById("device-suggestion"),
   deviceFormStatus: document.getElementById("device-form-status"),
@@ -179,14 +208,26 @@ const elements = {
   settingsSignatureInput: document.getElementById("settings-signature-input"),
   settingsAutoRescan: document.getElementById("settings-auto-rescan"),
   settingsSuggestionMode: document.getElementById("settings-suggestion-mode"),
+  settingsDefaultSubnetScan: document.getElementById("settings-default-subnet-scan"),
   settingsScanInterval: document.getElementById("settings-scan-interval"),
   settingsPingMeta: document.getElementById("settings-ping-meta"),
+  settingsSubnetScanList: document.getElementById("settings-subnet-scan-list"),
   serverSettingsStatus: document.getElementById("server-settings-status"),
   saveServerSettingsButton: document.getElementById("save-server-settings-button"),
+  templateRulesList: document.getElementById("template-rules-list"),
+  addTemplateRuleButton: document.getElementById("add-template-rule-button"),
   templateEditor: document.getElementById("template-editor"),
+  applyTemplateJsonButton: document.getElementById("apply-template-json-button"),
   templateSettingsStatus: document.getElementById("template-settings-status"),
   saveTemplateSettingsButton: document.getElementById("save-template-settings-button"),
   resetTemplateSettingsButton: document.getElementById("reset-template-settings-button"),
+  accessGroupStatus: document.getElementById("access-group-status"),
+  userStatus: document.getElementById("user-status"),
+  accessGroupsTableBody: document.getElementById("access-groups-table-body"),
+  usersTableBody: document.getElementById("users-table-body"),
+  userAccessGroupOptions: document.getElementById("user-access-group-options"),
+  adminPanels: [...document.querySelectorAll(".admin-only")],
+  passwordToggleButtons: [...document.querySelectorAll("[data-password-toggle]")],
   subnetsTableBody: document.getElementById("subnets-table-body"),
   groupsTableBody: document.getElementById("groups-table-body"),
   devicesTableBody: document.getElementById("devices-table-body"),
@@ -218,6 +259,11 @@ let deviceGroupSelectionMode = "auto";
 let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 let groupSuggestionTemplateSource = "bundled";
 let activeView = "dashboard";
+let activeSettingsSection = "profile";
+let showAllDevicesInRegistry = false;
+const expandedGroupIds = new Set();
+let preferencesSaveTimer = null;
+let isAuthReady = false;
 
 initialize().catch((error) => {
   console.error(error);
@@ -260,6 +306,7 @@ function applyLocalizedUi() {
   });
 
   elements.heroSignature.textContent = preferences.settings.customSignature || t("default_signature");
+  syncPasswordToggleButtons();
 }
 
 function formatRecordsCount(count) {
@@ -272,20 +319,6 @@ function formatFilteredCount(count, total) {
 
 function formatEventsCount(count) {
   return t("events_count", { count });
-}
-
-function loadSettings() {
-  try {
-    const rawValue = localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (!rawValue) {
-      return { ...DEFAULT_SETTINGS };
-    }
-
-    const parsed = JSON.parse(rawValue);
-    return normalizeSettings(parsed);
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
 }
 
 function normalizeSettings(rawSettings) {
@@ -312,34 +345,46 @@ function normalizeSettings(rawSettings) {
   };
 }
 
-function persistSettings() {
-  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(preferences.settings));
+function normalizeUserPreferences(rawPreferences = {}) {
+  return {
+    settings: normalizeSettings(rawPreferences),
+    customGroupTemplates: Array.isArray(rawPreferences?.customGroupTemplates)
+      ? rawPreferences.customGroupTemplates
+      : [],
+  };
+}
+
+function normalizeBoolean(value, fallback = true) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return fallback;
 }
 
 async function initialize() {
-  await loadGroupSuggestionTemplates();
   bindEvents();
-  elements.operatorInput.value = preferences.operator;
   setActiveView(activeView);
-  syncSettingsForm();
   applyVisualSettings();
   applyLocalizedUi();
-  renderTemplateEditor();
   renderAll();
-  await refreshState();
-  connectLiveStream();
-  pollIntervalId = window.setInterval(() => {
-    refreshState(true);
-  }, 30000);
+  await restoreSession();
 }
 
 function bindEvents() {
+  elements.loginForm.addEventListener("submit", handleLoginSubmit);
   elements.subnetForm.addEventListener("submit", handleSubnetSubmit);
   elements.deviceForm.addEventListener("submit", handleDeviceSubmit);
   elements.groupForm.addEventListener("submit", handleGroupSubmit);
+  elements.accessGroupForm.addEventListener("submit", handleAccessGroupSubmit);
+  elements.userForm.addEventListener("submit", handleUserSubmit);
+  elements.passwordForm.addEventListener("submit", handlePasswordSubmit);
   elements.searchInput.addEventListener("input", renderDevicesTable);
   elements.ipCheckForm.addEventListener("submit", handleIpCheck);
-  elements.operatorInput.addEventListener("input", handleOperatorInput);
+  elements.logoutButton.addEventListener("click", handleLogout);
+  elements.openPasswordModalButton.addEventListener("click", () => openPasswordModal(false));
+  elements.passwordToggleButtons.forEach((button) => {
+    button.addEventListener("click", handlePasswordToggle);
+  });
   elements.viewTabs.forEach((button) => {
     button.addEventListener("click", () => {
       setActiveView(button.dataset.viewTab);
@@ -373,7 +418,17 @@ function bindEvents() {
   elements.settingsThemeSelect.addEventListener("change", handleSettingsChange);
   elements.settingsAutoRescan.addEventListener("change", handleSettingsChange);
   elements.settingsSuggestionMode.addEventListener("change", handleSettingsChange);
+  elements.settingsNavButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveSettingsSection(button.dataset.settingsTab);
+    });
+  });
   elements.saveServerSettingsButton.addEventListener("click", handleServerSettingsSave);
+  elements.addTemplateRuleButton.addEventListener("click", handleAddTemplateRule);
+  elements.templateRulesList.addEventListener("click", handleTemplateRuleListClick);
+  elements.templateRulesList.addEventListener("input", syncTemplateJsonFromCards);
+  elements.templateRulesList.addEventListener("change", syncTemplateJsonFromCards);
+  elements.applyTemplateJsonButton.addEventListener("click", handleTemplateJsonApply);
   elements.saveTemplateSettingsButton.addEventListener("click", handleTemplateSettingsSave);
   elements.resetTemplateSettingsButton.addEventListener("click", handleTemplateSettingsReset);
   elements.exportJsonButton.addEventListener("click", exportJson);
@@ -384,6 +439,7 @@ function bindEvents() {
   elements.importFileInput.addEventListener("change", handleImportFile);
   elements.clearDataButton.addEventListener("click", clearAllData);
   elements.subnetsTableBody.addEventListener("click", handleSubnetTableActions);
+  elements.subnetsTableBody.addEventListener("change", handleSubnetScanToggle);
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
   window.addEventListener("focus", () => refreshState(true));
@@ -392,17 +448,6 @@ function bindEvents() {
 
 async function loadGroupSuggestionTemplates() {
   try {
-    const localTemplates = localStorage.getItem(CUSTOM_TEMPLATES_STORAGE_KEY);
-    if (localTemplates) {
-      const parsedTemplates = JSON.parse(localTemplates);
-      const normalizedLocalTemplates = normalizeGroupSuggestionTemplates(parsedTemplates);
-      if (normalizedLocalTemplates.length > 0) {
-        groupSuggestionTemplates = normalizedLocalTemplates;
-        groupSuggestionTemplateSource = "local";
-        return;
-      }
-    }
-
     const response = await fetch(GROUP_SUGGESTION_TEMPLATES_PATH, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -421,6 +466,40 @@ async function loadGroupSuggestionTemplates() {
 
   groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
   groupSuggestionTemplateSource = "default";
+}
+
+async function restoreSession() {
+  try {
+    await loadGroupSuggestionTemplates();
+    const session = await apiRequest("/auth/session", { allowUnauthorized: true });
+    applyAuthSession(session);
+
+    if (!session?.authenticated) {
+      openAuthScreen(session);
+      return;
+    }
+
+    await finishAuthenticatedBootstrap();
+  } catch (error) {
+    console.error(error);
+    openAuthScreen();
+    showToast(error.message || t("server_unavailable"), true);
+  }
+}
+
+async function finishAuthenticatedBootstrap() {
+  closeAuthScreen();
+  const stateLoaded = await refreshState();
+  if (!stateLoaded || !state.auth?.authenticated) {
+    return;
+  }
+  connectLiveStream();
+  if (pollIntervalId) {
+    window.clearInterval(pollIntervalId);
+  }
+  pollIntervalId = window.setInterval(() => {
+    refreshState(true);
+  }, 30000);
 }
 
 function normalizeGroupSuggestionTemplates(rawTemplates) {
@@ -463,6 +542,15 @@ function syncSettingsForm() {
   elements.settingsThemeSelect.value = preferences.settings.accentTheme;
   elements.settingsAutoRescan.checked = preferences.settings.autoRescanAfterDeviceSave;
   elements.settingsSuggestionMode.value = preferences.settings.suggestionMode;
+  const currentUser = state.auth?.user;
+  elements.currentUserBadge.textContent = currentUser?.displayName || "ATLAS";
+  elements.currentRoleBadge.textContent = currentUser?.role ? t(`role_summary_${currentUser.role}`) : t("role_summary_guest");
+  elements.currentUserDisplay.value = currentUser
+    ? `${currentUser.displayName} (${currentUser.username})`
+    : "";
+  elements.currentUserNote.textContent = currentUser?.mustChangePassword
+    ? t("must_change_password_note")
+    : t("current_role_note", { role: currentUser?.role || "guest" });
   const currentScanInterval = state.settings?.scanIntervalSeconds || state.meta?.scanIntervalSeconds || 90;
   if (document.activeElement !== elements.settingsScanInterval) {
     elements.settingsScanInterval.value = String(currentScanInterval);
@@ -477,24 +565,213 @@ function syncSettingsForm() {
     timeout: state.settings?.scanTimeoutMs || 1000,
     concurrency: state.settings?.scanConcurrency || 32,
   });
+  elements.settingsDefaultSubnetScan.checked = Boolean(state.settings?.defaultSubnetScanEnabled);
+  renderSubnetScanSettings();
 }
 
 function applyVisualSettings() {
   document.body.dataset.accentTheme = preferences.settings.accentTheme;
 }
 
+function renderSubnetScanSettings() {
+  const canManage = Boolean(state.auth?.capabilities?.canManageServerSettings);
+
+  if (state.subnets.length === 0) {
+    elements.settingsSubnetScanList.innerHTML = `
+      <div class="result-card result-card--muted">${escapeHtml(t("automation_subnets_empty"))}</div>
+    `;
+    return;
+  }
+
+  const rows = state.subnets
+    .slice()
+    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
+    .map((subnet) => `
+      <label class="checkbox-card automation-subnet-card">
+        <input
+          type="checkbox"
+          data-subnet-scan-id="${escapeHtml(subnet.id)}"
+          ${subnet.scanEnabled ? "checked" : ""}
+          ${canManage ? "" : "disabled"}
+        >
+        <span>
+          <strong>${escapeHtml(subnet.name)}</strong>
+          <span class="automation-subnet-meta">${escapeHtml(subnet.cidr)} · ${escapeHtml(subnet.rangeStart)}-${escapeHtml(subnet.rangeEnd)}</span>
+        </span>
+      </label>
+    `);
+
+  elements.settingsSubnetScanList.innerHTML = rows.join("");
+}
+
+function createBlankTemplateRule() {
+  return {
+    id: "",
+    label: "",
+    deviceTypes: ["server"],
+    keywords: [],
+  };
+}
+
+function slugifyTemplateId(value, fallbackIndex = 0) {
+  const normalized = normalizeSearchableText(value)
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return normalized || `template-${fallbackIndex + 1}`;
+}
+
+function renderTemplateRuleCards(templates) {
+  const effectiveTemplates = templates.length > 0 ? templates : [createBlankTemplateRule()];
+
+  elements.templateRulesList.innerHTML = effectiveTemplates.map((template, index) => {
+    const selectedTypes = new Set(template.deviceTypes || []);
+    const keywords = Array.isArray(template.keywords) ? template.keywords.join(", ") : "";
+    const hasLabel = Boolean(template.label);
+    const title = hasLabel ? template.label : t("template_rule_fallback", { index: index + 1 });
+    const deviceTypeSummary = (template.deviceTypes || [])
+      .map((type) => getDeviceTypeLabel(type))
+      .join(" · ");
+    const summaryMeta = [
+      deviceTypeSummary,
+      template.keywords?.length ? t("template_keywords_count", { count: template.keywords.length }) : "",
+    ].filter(Boolean).join(" · ");
+    const shouldOpen = !hasLabel || index === 0;
+
+    return `
+      <details class="template-rule-card" data-template-id="${escapeHtml(template.id || "")}" ${shouldOpen ? "open" : ""}>
+        <summary class="template-rule-summary">
+          <div class="template-rule-summary__main">
+            <strong class="template-rule-summary__title">${escapeHtml(title)}</strong>
+            <span class="template-rule-summary__meta">${escapeHtml(summaryMeta || t("template_rule_summary_empty"))}</span>
+          </div>
+          <span class="pill template-rule-summary__hint">${escapeHtml(t("template_edit_rule"))}</span>
+        </summary>
+
+        <div class="template-rule-body">
+          <div class="template-rule-grid">
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("template_label_title"))}</span>
+              <input type="text" data-template-field="label" value="${escapeHtml(template.label || "")}" placeholder="${escapeHtml(t("template_label_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("template_label_note"))}</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("template_keywords_title"))}</span>
+              <input type="text" data-template-field="keywords" value="${escapeHtml(keywords)}" placeholder="${escapeHtml(t("template_keywords_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("template_keywords_note"))}</span>
+            </label>
+          </div>
+
+          <div class="template-rule-types">
+            ${Object.keys(DEVICE_TYPES).map((type) => `
+              <label class="checkbox-card">
+                <input type="checkbox" data-template-field="deviceType" value="${escapeHtml(type)}" ${selectedTypes.has(type) ? "checked" : ""}>
+                <span>${escapeHtml(getDeviceTypeLabel(type))}</span>
+              </label>
+            `).join("")}
+          </div>
+
+          <div class="template-rule-actions">
+            <button type="button" class="link-button" data-remove-template-rule="${index}">${escapeHtml(t("remove_template_rule"))}</button>
+          </div>
+        </div>
+      </details>
+    `;
+  }).join("");
+}
+
+function collectTemplateRulesFromCards() {
+  const rows = [...elements.templateRulesList.querySelectorAll(".template-rule-card")];
+  const draftRules = rows.map((row, index) => {
+    const label = String(row.querySelector('[data-template-field="label"]')?.value || "").trim();
+    const keywords = String(row.querySelector('[data-template-field="keywords"]')?.value || "")
+      .split(",")
+      .map((item) => normalizeSearchableText(item))
+      .filter(Boolean);
+    const deviceTypes = [...row.querySelectorAll('[data-template-field="deviceType"]:checked')]
+      .map((input) => input.value)
+      .filter((item) => DEVICE_TYPES[item]);
+
+    if (!label && keywords.length === 0) {
+      return null;
+    }
+
+    return {
+      id: row.dataset.templateId || slugifyTemplateId(label, index),
+      label,
+      deviceTypes,
+      keywords,
+    };
+  }).filter(Boolean);
+
+  const normalizedTemplates = normalizeGroupSuggestionTemplates(draftRules);
+  if (normalizedTemplates.length === 0 || normalizedTemplates.length !== draftRules.length) {
+    throw new Error(t("templates_invalid_form"));
+  }
+
+  return normalizedTemplates;
+}
+
+function syncTemplateJsonFromCards() {
+  try {
+    const normalizedTemplates = collectTemplateRulesFromCards();
+    if (document.activeElement !== elements.templateEditor) {
+      elements.templateEditor.value = JSON.stringify(normalizedTemplates, null, 2);
+    }
+  } catch {
+    // Keep the JSON editor intact until the form becomes valid again.
+  }
+}
+
 function renderTemplateEditor() {
+  const effectiveTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
+  if (effectiveTemplates.length > 0) {
+    groupSuggestionTemplates = effectiveTemplates;
+    groupSuggestionTemplateSource = "user";
+  }
+
+  renderTemplateRuleCards(groupSuggestionTemplates);
   if (document.activeElement !== elements.templateEditor) {
     elements.templateEditor.value = JSON.stringify(groupSuggestionTemplates, null, 2);
   }
 
   const sourceLabel =
-    groupSuggestionTemplateSource === "local"
-      ? t("templates_source_local")
+    groupSuggestionTemplateSource === "user"
+      ? t("templates_source_user")
       : groupSuggestionTemplateSource === "bundled"
         ? t("templates_source_bundled")
         : t("templates_source_default");
   setTemplateSettingsStatus(sourceLabel, "muted");
+}
+
+function handleAddTemplateRule() {
+  const currentTemplates = (() => {
+    try {
+      return collectTemplateRulesFromCards();
+    } catch {
+      return normalizeGroupSuggestionTemplates(groupSuggestionTemplates);
+    }
+  })();
+
+  renderTemplateRuleCards([...currentTemplates, createBlankTemplateRule()]);
+  syncTemplateJsonFromCards();
+}
+
+function handleTemplateRuleListClick(event) {
+  const removeButton = event.target.closest("[data-remove-template-rule]");
+  if (!removeButton) {
+    return;
+  }
+
+  const row = removeButton.closest(".template-rule-card");
+  row?.remove();
+
+  if (!elements.templateRulesList.children.length) {
+    renderTemplateRuleCards([createBlankTemplateRule()]);
+  }
+
+  syncTemplateJsonFromCards();
 }
 
 function setTemplateSettingsStatus(message, tone = "muted") {
@@ -527,6 +804,16 @@ function setServerSettingsStatus(message, tone = "muted") {
   elements.serverSettingsStatus.textContent = message;
 }
 
+function setAccessGroupStatus(message, tone = "muted") {
+  elements.accessGroupStatus.className = `result-card result-card--${tone}`;
+  elements.accessGroupStatus.textContent = message;
+}
+
+function setUserStatus(message, tone = "muted") {
+  elements.userStatus.className = `result-card result-card--${tone}`;
+  elements.userStatus.textContent = message;
+}
+
 function handleSettingsChange() {
   preferences.settings = normalizeSettings({
     language: elements.settingsLanguageSelect.value,
@@ -535,12 +822,20 @@ function handleSettingsChange() {
     autoRescanAfterDeviceSave: elements.settingsAutoRescan.checked,
     suggestionMode: elements.settingsSuggestionMode.value,
   });
-  persistSettings();
   applyVisualSettings();
   applyLocalizedUi();
   renderDeviceGroupOptions();
   renderAll();
+  if (!elements.settingsModal.hidden) {
+    renderTemplateEditor();
+  }
   updateSuggestedIp();
+  savePreferences({
+    ...preferences.settings,
+  }).catch((error) => {
+    console.error(error);
+    showToast(error.message || t("preferences_save_failed"), true);
+  });
 }
 
 function handleSignatureInput() {
@@ -548,8 +843,10 @@ function handleSignatureInput() {
     ...preferences.settings,
     customSignature: elements.settingsSignatureInput.value,
   });
-  persistSettings();
   applyLocalizedUi();
+  schedulePreferencesSave({
+    customSignature: preferences.settings.customSignature,
+  });
 }
 
 async function handleServerSettingsSave() {
@@ -562,9 +859,19 @@ async function handleServerSettingsSave() {
       throw new Error(t("ping_interval_invalid", { min: minInterval, max: maxInterval }));
     }
 
+    const subnetScanSettings = [...elements.settingsSubnetScanList.querySelectorAll("[data-subnet-scan-id]")]
+      .map((input) => ({
+        id: input.dataset.subnetScanId,
+        scanEnabled: input.checked,
+      }));
+
     await apiRequest("/settings", {
       method: "PATCH",
-      body: JSON.stringify({ scanIntervalSeconds: interval }),
+      body: JSON.stringify({
+        scanIntervalSeconds: interval,
+        defaultSubnetScanEnabled: elements.settingsDefaultSubnetScan.checked,
+        subnetScanSettings,
+      }),
     });
     await refreshState(true);
     syncSettingsForm();
@@ -575,17 +882,13 @@ async function handleServerSettingsSave() {
   }
 }
 
-function handleTemplateSettingsSave() {
+async function handleTemplateSettingsSave() {
   try {
-    const parsedTemplates = JSON.parse(elements.templateEditor.value);
-    const normalizedTemplates = normalizeGroupSuggestionTemplates(parsedTemplates);
-    if (normalizedTemplates.length === 0) {
-      throw new Error(t("templates_invalid"));
-    }
-
-    localStorage.setItem(CUSTOM_TEMPLATES_STORAGE_KEY, JSON.stringify(normalizedTemplates));
+    const normalizedTemplates = collectTemplateRulesFromCards();
+    preferences.customGroupTemplates = normalizedTemplates;
     groupSuggestionTemplates = normalizedTemplates;
-    groupSuggestionTemplateSource = "local";
+    groupSuggestionTemplateSource = "user";
+    await savePreferences({ customGroupTemplates: normalizedTemplates });
     renderDeviceGroupOptions();
     updateSuggestedIp();
     renderTemplateEditor();
@@ -595,9 +898,31 @@ function handleTemplateSettingsSave() {
   }
 }
 
+async function handleTemplateJsonApply() {
+  try {
+    const parsedTemplates = JSON.parse(elements.templateEditor.value);
+    const normalizedTemplates = normalizeGroupSuggestionTemplates(parsedTemplates);
+    if (normalizedTemplates.length === 0) {
+      throw new Error(t("templates_invalid"));
+    }
+
+    preferences.customGroupTemplates = normalizedTemplates;
+    groupSuggestionTemplates = normalizedTemplates;
+    groupSuggestionTemplateSource = "user";
+    await savePreferences({ customGroupTemplates: normalizedTemplates });
+    renderDeviceGroupOptions();
+    updateSuggestedIp();
+    renderTemplateEditor();
+    setTemplateSettingsStatus(t("templates_json_applied"), "ok");
+  } catch (error) {
+    setTemplateSettingsStatus(error.message || t("templates_invalid"), "danger");
+  }
+}
+
 async function handleTemplateSettingsReset() {
-  localStorage.removeItem(CUSTOM_TEMPLATES_STORAGE_KEY);
+  preferences.customGroupTemplates = [];
   await loadGroupSuggestionTemplates();
+  await savePreferences({ customGroupTemplates: [] });
   renderDeviceGroupOptions();
   updateSuggestedIp();
   renderTemplateEditor();
@@ -606,6 +931,10 @@ async function handleTemplateSettingsReset() {
 
 function handleOpenModalRequest(modalId) {
   if (!modalId) {
+    return;
+  }
+  const trigger = document.querySelector(`[data-open-modal="${modalId}"]`);
+  if (trigger?.disabled) {
     return;
   }
 
@@ -643,6 +972,9 @@ function closeModal(modalId) {
   if (!modal) {
     return;
   }
+  if (modal.id === "password-modal" && state.auth?.user?.mustChangePassword && elements.passwordModalClose.hidden) {
+    return;
+  }
 
   modal.hidden = true;
   if (modal.id === "device-modal") {
@@ -664,7 +996,244 @@ function openSettingsModal() {
   setServerSettingsStatus(t("ping_server_running", {
     interval: state.settings?.scanIntervalSeconds || 90,
   }), "muted");
+  renderAdminPanels();
+  setActiveSettingsSection(activeSettingsSection);
   openModal("settings-modal");
+}
+
+function applyAuthSession(session) {
+  state.auth = session && session.authenticated
+    ? {
+      authenticated: true,
+      user: session.user,
+      accessGroups: session.accessGroups || [],
+      capabilities: session.capabilities || state.auth.capabilities,
+    }
+    : {
+      authenticated: false,
+      user: null,
+      accessGroups: [],
+      capabilities: {
+        isAdmin: false,
+        canWrite: false,
+        canManageUsers: false,
+        canManageServerSettings: false,
+        canManageAccessGroups: false,
+      },
+    };
+
+  if (session?.bootstrapLoginHint) {
+    elements.bootstrapHint.hidden = false;
+    elements.bootstrapHint.textContent = t("bootstrap_login_hint", {
+      username: session.bootstrapLoginHint.username,
+      password: session.bootstrapLoginHint.password,
+    });
+  } else {
+    elements.bootstrapHint.hidden = true;
+  }
+}
+
+function applyPreferences(nextPreferences) {
+  preferences.settings = nextPreferences.settings;
+  preferences.customGroupTemplates = nextPreferences.customGroupTemplates;
+  const normalizedCustomTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
+  if (normalizedCustomTemplates.length > 0) {
+    groupSuggestionTemplates = normalizedCustomTemplates;
+    groupSuggestionTemplateSource = "user";
+  } else if (groupSuggestionTemplateSource === "user") {
+    groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
+    groupSuggestionTemplateSource = "default";
+  }
+  applyVisualSettings();
+  applyLocalizedUi();
+}
+
+function openAuthScreen(session = null) {
+  applyAuthSession(session);
+  elements.authScreen.hidden = false;
+  document.body.classList.add("auth-open");
+  elements.authStatus.className = "result-card result-card--muted";
+  elements.authStatus.textContent = t("auth_idle");
+  elements.loginForm.reset();
+  syncPasswordToggleButtons(elements.loginForm);
+  elements.loginForm.querySelector('input[name="username"]')?.focus();
+}
+
+function closeAuthScreen() {
+  elements.authScreen.hidden = true;
+  document.body.classList.remove("auth-open");
+}
+
+function openPasswordModal(isForced = false) {
+  elements.passwordStatus.className = "result-card result-card--muted form-grid__full";
+  elements.passwordStatus.textContent = isForced ? t("password_force_notice") : t("password_change_hint");
+  elements.passwordForm.reset();
+  syncPasswordToggleButtons(elements.passwordForm);
+  elements.passwordModalClose.hidden = isForced;
+  openModal("password-modal");
+}
+
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+
+  try {
+    elements.authStatus.className = "result-card result-card--muted";
+    elements.authStatus.textContent = t("auth_logging_in");
+    const session = await apiRequest("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({
+        username: formData.get("username"),
+        password: formData.get("password"),
+      }),
+    });
+    applyAuthSession(session);
+    const verifiedSession = await apiRequest("/auth/session", { allowUnauthorized: true });
+    applyAuthSession(verifiedSession);
+    if (!verifiedSession?.authenticated) {
+      throw new Error(t("auth_session_not_persisted"));
+    }
+    await finishAuthenticatedBootstrap();
+  } catch (error) {
+    elements.authStatus.className = "result-card result-card--danger";
+    elements.authStatus.textContent = error.message;
+  }
+}
+
+async function handleLogout() {
+  try {
+    await apiRequest("/auth/logout", {
+      method: "POST",
+    });
+  } catch (error) {
+    console.warn(error);
+  } finally {
+    disconnectLiveStream();
+    if (pollIntervalId) {
+      window.clearInterval(pollIntervalId);
+      pollIntervalId = null;
+    }
+    openAuthScreen();
+    showToast(t("logout_done"));
+  }
+}
+
+async function handlePasswordSubmit(event) {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+  const currentPassword = String(formData.get("currentPassword") || "");
+  const newPassword = String(formData.get("newPassword") || "");
+  const confirmPassword = String(formData.get("confirmPassword") || "");
+
+  if (newPassword !== confirmPassword) {
+    elements.passwordStatus.className = "result-card result-card--danger form-grid__full";
+    elements.passwordStatus.textContent = t("password_mismatch");
+    return;
+  }
+
+  try {
+    elements.passwordStatus.className = "result-card result-card--muted form-grid__full";
+    elements.passwordStatus.textContent = t("password_updating");
+    const session = await apiRequest("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    applyAuthSession(session);
+    closeModal("password-modal");
+    await refreshState(true);
+    showToast(t("password_changed"));
+  } catch (error) {
+    elements.passwordStatus.className = "result-card result-card--danger form-grid__full";
+    elements.passwordStatus.textContent = error.message;
+  }
+}
+
+async function savePreferences(partial = null) {
+  const payload = partial || {
+    ...preferences.settings,
+    customGroupTemplates: preferences.customGroupTemplates,
+  };
+  const savedPreferences = await apiRequest("/preferences", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  applyPreferences(normalizeUserPreferences(savedPreferences));
+  renderTemplateEditor();
+  syncSettingsForm();
+}
+
+function schedulePreferencesSave(partial = null) {
+  window.clearTimeout(preferencesSaveTimer);
+  preferencesSaveTimer = window.setTimeout(() => {
+    savePreferences(partial).catch((error) => {
+      console.error(error);
+      showToast(error.message || t("preferences_save_failed"), true);
+    });
+  }, 260);
+}
+
+function renderPermissionAwareUi() {
+  const capabilities = state.auth?.capabilities || {};
+  const canWrite = Boolean(capabilities.canWrite);
+  const isAdmin = Boolean(capabilities.isAdmin);
+
+  document.body.dataset.canWrite = canWrite ? "true" : "false";
+  document.body.dataset.isAdmin = isAdmin ? "true" : "false";
+
+  elements.openAddButton.disabled = !canWrite;
+  elements.subnetAccessGroupSelect.disabled = !canWrite;
+  elements.subnetForm.querySelector('[type="submit"]').disabled = !canWrite;
+  elements.deviceForm.querySelector('[type="submit"]').disabled = !canWrite || isDeviceSubmitting;
+  elements.groupForm.querySelector('[type="submit"]').disabled = !canWrite;
+  elements.scanNowButton.disabled = !canWrite || isManualScanRunning;
+  elements.importButton.disabled = !isAdmin;
+  elements.saveServerSettingsButton.disabled = !Boolean(capabilities.canManageServerSettings);
+  elements.settingsDefaultSubnetScan.disabled = !Boolean(capabilities.canManageServerSettings);
+  elements.settingsScanInterval.disabled = !Boolean(capabilities.canManageServerSettings);
+  elements.clearDataButton.disabled = !isAdmin;
+  elements.saveTemplateSettingsButton.disabled = !state.auth?.authenticated;
+  elements.resetTemplateSettingsButton.disabled = !state.auth?.authenticated;
+
+  elements.adminPanels.forEach((panel) => {
+    panel.hidden = !isAdmin;
+  });
+
+  setActiveSettingsSection(activeSettingsSection);
+}
+
+function renderAdminPanels() {
+  renderAccessGroupsTable();
+  renderUsersTable();
+  renderUserAccessGroupOptions();
+}
+
+function setActiveSettingsSection(sectionName) {
+  const isAdmin = Boolean(state.auth?.capabilities?.isAdmin);
+  const requestedSection = sectionName || "profile";
+  const resolvedSection = requestedSection === "administration" && !isAdmin
+    ? "profile"
+    : requestedSection;
+  activeSettingsSection = resolvedSection;
+
+  elements.settingsNavButtons.forEach((button) => {
+    const isAdminOnly = button.classList.contains("admin-only");
+    if (isAdminOnly && !isAdmin) {
+      button.hidden = true;
+      button.classList.remove("is-active");
+      return;
+    }
+
+    button.hidden = false;
+    button.classList.toggle("is-active", button.dataset.settingsTab === activeSettingsSection);
+  });
+
+  elements.settingsSections.forEach((section) => {
+    const sectionNameForNode = section.dataset.settingsSection;
+    const isAdminOnly = section.classList.contains("admin-only");
+    const isActive = sectionNameForNode === activeSettingsSection;
+    section.hidden = isAdminOnly ? !isAdmin || !isActive : !isActive;
+  });
 }
 
 function handleGlobalKeydown(event) {
@@ -692,33 +1261,48 @@ async function refreshState(silent = false) {
     const snapshot = await apiRequest("/state");
     applyState(normalizeState(snapshot));
     renderAll();
+    isAuthReady = true;
+    if (state.auth?.user?.mustChangePassword) {
+      openPasswordModal(true);
+    }
+    return true;
   } catch (error) {
     console.error(error);
+    if (error.status === 401) {
+      openAuthScreen();
+      disconnectLiveStream();
+      return false;
+    }
     if (!silent) {
       showToast(error.message || t("server_data_load_failed"), true);
     }
+    return false;
   }
 }
 
 function connectLiveStream() {
+  if (!state.auth?.authenticated) {
+    return;
+  }
   if (eventSource) {
     eventSource.close();
   }
 
-  eventSource = new EventSource(`${API_BASE}/stream`);
-  setLiveStatus(t("live_connecting"), "info");
-
-  eventSource.onopen = () => {
-    setLiveStatus(t("live_badge"), "ok");
-  };
+  eventSource = new EventSource(`${API_BASE}/stream`, { withCredentials: true });
+  eventSource.onopen = () => {};
 
   eventSource.onmessage = async () => {
     await refreshState(true);
   };
 
-  eventSource.onerror = () => {
-    setLiveStatus(t("live_reconnecting"), "warn");
-  };
+  eventSource.onerror = () => {};
+}
+
+function disconnectLiveStream() {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
 }
 
 function applyState(snapshot) {
@@ -729,6 +1313,10 @@ function applyState(snapshot) {
   state.history = snapshot.history;
   state.meta = snapshot.meta;
   state.settings = snapshot.settings;
+  state.accessGroups = snapshot.accessGroups || [];
+  state.auth = snapshot.auth || state.auth;
+  state.admin = snapshot.admin || null;
+  applyPreferences(normalizeUserPreferences(snapshot.preferences || {}));
 }
 
 async function handleSubnetSubmit(event) {
@@ -743,6 +1331,7 @@ async function handleSubnetSubmit(event) {
       cidr: formData.get("cidr"),
       rangeStart: formData.get("rangeStart"),
       rangeEnd: formData.get("rangeEnd"),
+      accessGroupId: formData.get("accessGroupId"),
       note: formData.get("note"),
       createdAt: new Date().toISOString(),
     });
@@ -923,10 +1512,52 @@ async function handleScanNow() {
   }
 }
 
-function handleOperatorInput(event) {
-  preferences.operator = event.currentTarget.value.trim();
-  localStorage.setItem(OPERATOR_STORAGE_KEY, preferences.operator);
-  updateAutomationWidgets();
+async function handleAccessGroupSubmit(event) {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+
+  try {
+    await apiRequest("/admin/access-groups", {
+      method: "POST",
+      body: JSON.stringify({
+        name: formData.get("name"),
+        description: formData.get("description"),
+      }),
+    });
+    event.currentTarget.reset();
+    await refreshState(true);
+    setAccessGroupStatus(t("access_group_saved"), "ok");
+  } catch (error) {
+    setAccessGroupStatus(error.message, "danger");
+  }
+}
+
+async function handleUserSubmit(event) {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+  const accessGroupIds = [...elements.userAccessGroupOptions.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => input.value);
+
+  try {
+    await apiRequest("/admin/users", {
+      method: "POST",
+      body: JSON.stringify({
+        username: formData.get("username"),
+        displayName: formData.get("displayName"),
+        role: formData.get("role"),
+        password: formData.get("password"),
+        accessGroupIds,
+        mustChangePassword: true,
+      }),
+    });
+    event.currentTarget.reset();
+    syncPasswordToggleButtons(event.currentTarget);
+    renderUserAccessGroupOptions();
+    await refreshState(true);
+    setUserStatus(t("user_saved"), "ok");
+  } catch (error) {
+    setUserStatus(error.message, "danger");
+  }
 }
 
 function handleIpCheck(event) {
@@ -995,15 +1626,15 @@ function handleIpCheck(event) {
 function updateAutomationWidgets() {
   const lastScanAt = state.meta?.lastScanAt;
   const reachableCount = getReachableScanIps().size;
-  const operatorLabel = preferences.operator || t("operator_not_set");
+  const userLabel = state.auth?.user?.displayName || state.auth?.user?.username || "ATLAS";
 
   if (state.meta?.scanInProgress || isManualScanRunning) {
     setScanStatus(t("scan_status_running"), "info");
     elements.scanStatusText.textContent = t("scan_scope_all");
   } else if (lastScanAt) {
     setScanStatus(t("scan_status_online", { count: reachableCount }), reachableCount > 0 ? "ok" : "warn");
-    elements.scanStatusText.textContent = t("scan_last_run", {
-      date: formatDateTime(lastScanAt),
+    elements.scanStatusText.textContent = t("scan_last_run_compact", {
+      date: formatHeroDateTime(lastScanAt),
       seconds: state.meta.scanIntervalSeconds || 90,
     });
   } else {
@@ -1011,7 +1642,31 @@ function updateAutomationWidgets() {
     elements.scanStatusText.textContent = t("scan_not_started");
   }
 
-  elements.liveSummaryText.textContent = t("live_summary", { operator: operatorLabel });
+  elements.liveSummaryText.textContent = t("live_summary", { user: userLabel });
+}
+
+function syncPasswordToggleButtons(scope = document) {
+  scope.querySelectorAll?.("[data-password-toggle]").forEach((button) => {
+    const field = button.closest(".password-field");
+    const input = field?.querySelector('input[type="password"], input[type="text"]');
+    if (!input) {
+      return;
+    }
+    const isVisible = input.type === "text";
+    button.textContent = isVisible ? t("password_toggle_hide") : t("password_toggle_show");
+    button.setAttribute("aria-pressed", isVisible ? "true" : "false");
+  });
+}
+
+function handlePasswordToggle(event) {
+  const button = event.currentTarget;
+  const field = button.closest(".password-field");
+  const input = field?.querySelector('input[type="password"], input[type="text"]');
+  if (!input) {
+    return;
+  }
+  input.type = input.type === "password" ? "text" : "password";
+  syncPasswordToggleButtons(field.parentElement || document);
 }
 
 function updateSuggestedIp() {
@@ -1188,10 +1843,15 @@ function suggestFreeIp(subnet, group = null) {
 
 async function rescanScopeForDevice(device, selectedGroupId = "") {
   const subnetId = device.subnetId || findSubnetForIp(ipToInt(device.ip), state.subnets)?.id || "";
+  const subnet = subnetId ? state.subnets.find((entry) => entry.id === subnetId) : null;
   const group =
     (selectedGroupId
       ? state.groups.find((entry) => entry.id === selectedGroupId && entry.subnetId === subnetId) || null
       : null) || (subnetId ? findRangeGroupForIp(ipToInt(device.ip), subnetId) : null);
+
+  if (subnet && !subnet.scanEnabled) {
+    return;
+  }
 
   try {
     if (group) {
@@ -1460,17 +2120,7 @@ async function clearAllData() {
     await apiRequest("/state", {
       method: "DELETE",
     });
-    applyState(
-      normalizeState({
-        subnets: [],
-        groups: [],
-        devices: [],
-        scanResults: [],
-        history: [],
-        meta: {},
-      })
-    );
-    renderAll();
+    await refreshState(true);
     showToast(t("clear_success"));
   } catch (error) {
     showToast(error.message, true);
@@ -1512,7 +2162,53 @@ async function handleSubnetTableActions(event) {
   }
 }
 
+async function handleSubnetScanToggle(event) {
+  const input = event.target.closest("[data-subnet-scan-toggle]");
+  if (!input) {
+    return;
+  }
+
+  const subnetId = input.dataset.subnetScanToggle;
+  const subnet = state.subnets.find((entry) => entry.id === subnetId);
+  if (!subnet) {
+    return;
+  }
+
+  const nextValue = input.checked;
+  input.disabled = true;
+
+  try {
+    await apiRequest("/settings", {
+      method: "PATCH",
+      body: JSON.stringify({
+        subnetScanSettings: [{ id: subnetId, scanEnabled: nextValue }],
+      }),
+    });
+    await refreshState(true);
+    showToast(t("subnet_scan_toggle_saved", {
+      name: subnet.name,
+      state: nextValue ? t("table_auto_scan_on") : t("table_auto_scan_off"),
+    }));
+  } catch (error) {
+    input.checked = !nextValue;
+    input.disabled = false;
+    showToast(error.message, true);
+  }
+}
+
 async function handleGroupTableActions(event) {
+  const toggleButton = event.target.closest("[data-toggle-group-devices]");
+  if (toggleButton) {
+    const groupId = toggleButton.dataset.toggleGroupDevices;
+    if (expandedGroupIds.has(groupId)) {
+      expandedGroupIds.delete(groupId);
+    } else {
+      expandedGroupIds.add(groupId);
+    }
+    renderGroupsTable();
+    return;
+  }
+
   const button = event.target.closest("[data-delete-group]");
   if (!button) {
     return;
@@ -1541,6 +2237,13 @@ async function handleGroupTableActions(event) {
 }
 
 async function handleDeviceTableActions(event) {
+  const toggleButton = event.target.closest("[data-toggle-devices-list]");
+  if (toggleButton) {
+    showAllDevicesInRegistry = !showAllDevicesInRegistry;
+    renderDevicesTable();
+    return;
+  }
+
   const button = event.target.closest("[data-delete-device]");
   if (!button) {
     return;
@@ -1575,18 +2278,24 @@ function renderAll() {
   renderGroupsTable();
   renderDevicesTable();
   renderHistoryTable();
+  renderAccessGroupsTable();
+  renderUsersTable();
+  renderUserAccessGroupOptions();
   renderStats();
   renderDashboardPanels();
   updateAutomationWidgets();
   updateSuggestedIp();
+  renderPermissionAwareUi();
 }
 
 function renderSubnetOptions() {
   const previousDeviceSubnet = elements.subnetSelect.value;
   const previousDeviceGroup = elements.deviceGroupSelect.value;
   const previousGroupSubnet = elements.groupSubnetSelect.value;
+  const previousSubnetAccessGroup = elements.subnetAccessGroupSelect.value;
   const options = [`<option value="">${escapeHtml(t("auto_detect_ip"))}</option>`];
   const requiredOptions = [`<option value="">${escapeHtml(t("select_subnet"))}</option>`];
+  const accessGroupOptions = [`<option value="">${escapeHtml(t("access_group_public"))}</option>`];
 
   state.subnets
     .slice()
@@ -1599,16 +2308,26 @@ function renderSubnetOptions() {
 
   elements.subnetSelect.innerHTML = options.join("");
   elements.groupSubnetSelect.innerHTML = requiredOptions.join("");
+  state.accessGroups
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name, "ru"))
+    .forEach((group) => {
+      accessGroupOptions.push(`<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`);
+    });
+  elements.subnetAccessGroupSelect.innerHTML = accessGroupOptions.join("");
   elements.subnetSelect.value = previousDeviceSubnet;
   elements.groupSubnetSelect.value = previousGroupSubnet;
+  elements.subnetAccessGroupSelect.value = previousSubnetAccessGroup;
   renderDeviceGroupOptions(previousDeviceGroup);
 }
 
 function renderSubnetsTable() {
+  const canWrite = Boolean(state.auth?.capabilities?.canWrite);
+  const canManageAutomation = Boolean(state.auth?.capabilities?.canManageServerSettings);
   if (state.subnets.length === 0) {
     elements.subnetsTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="7">${escapeHtml(t("empty_subnets"))}</td>
+        <td colspan="8">${escapeHtml(t("empty_subnets"))}</td>
       </tr>
     `;
     elements.subnetsCounter.textContent = formatRecordsCount(0);
@@ -1633,7 +2352,10 @@ function renderSubnetsTable() {
 
       return `
         <tr>
-          <td><strong>${escapeHtml(subnet.name)}</strong></td>
+          <td>
+            <strong>${escapeHtml(subnet.name)}</strong>
+            <div class="secondary-line">${escapeHtml(subnet.accessGroupName || t("access_group_public_short"))}</div>
+          </td>
           <td class="mono">${escapeHtml(subnet.cidr)}</td>
           <td class="mono">${escapeHtml(subnet.rangeStart)} - ${escapeHtml(subnet.rangeEnd)}</td>
           <td>
@@ -1644,7 +2366,20 @@ function renderSubnetsTable() {
           <td><div class="secondary-line">${escapeHtml(groupSummary)}</div></td>
           <td>${escapeHtml(subnet.note || t("no_data"))}</td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}">${escapeHtml(t("delete_row"))}</button>
+            <label class="table-switch" title="${escapeHtml(t("table_auto_scan_note"))}">
+              <input
+                type="checkbox"
+                class="table-switch__input"
+                data-subnet-scan-toggle="${escapeHtml(subnet.id)}"
+                ${subnet.scanEnabled ? "checked" : ""}
+                ${canManageAutomation ? "" : "disabled"}
+              >
+              <span class="table-switch__slider" aria-hidden="true"></span>
+              <span class="table-switch__label">${escapeHtml(subnet.scanEnabled ? t("table_auto_scan_on") : t("table_auto_scan_off"))}</span>
+            </label>
+          </td>
+          <td>
+            <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
           </td>
         </tr>
       `;
@@ -1655,6 +2390,7 @@ function renderSubnetsTable() {
 }
 
 function renderGroupsTable() {
+  const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   if (state.groups.length === 0) {
     elements.groupsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -1679,9 +2415,42 @@ function renderGroupsTable() {
       const deviceCount = countAssignedInGroup(group);
       const pingOnlyCount = countPingOnlyInGroup(group, reachableSet);
       const freeCount = countFreeInGroup(group);
+      const groupDevices = state.devices
+        .filter((device) => {
+          const subnetId = device.subnetId || resolveDeviceSubnet(device)?.id || "";
+          if (subnetId !== group.subnetId) {
+            return false;
+          }
+          const ipInt = ipToInt(device.ip);
+          return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
+        })
+        .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip));
+      const isExpanded = expandedGroupIds.has(group.id);
+      const groupDevicesMarkup = groupDevices.length > 0
+        ? groupDevices.map((device) => {
+          const status = evaluateDeviceStatus(device, subnet);
+          const pingBadge = renderPingBadge(device.ip);
+          return `
+            <li class="group-device-item">
+              <div>
+                <strong>${escapeHtml(device.name)}</strong>
+                <div class="secondary-line">${escapeHtml(getDeviceTypeLabel(device.type))}</div>
+              </div>
+              <span class="mono">${escapeHtml(device.ip)}</span>
+              <div>${pingBadge}</div>
+              <span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span>
+            </li>
+          `;
+        }).join("")
+        : `<li class="group-device-empty">${escapeHtml(t("group_devices_empty"))}</li>`;
+
       return `
         <tr>
-          <td><strong>${escapeHtml(group.name)}</strong></td>
+          <td>
+            <button type="button" class="link-button table-row-link" data-toggle-group-devices="${escapeHtml(group.id)}">
+              ${escapeHtml(group.name)}
+            </button>
+          </td>
           <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : escapeHtml(t("no_data"))}</td>
           <td class="mono">${escapeHtml(formatGroupRange(group, true))}</td>
           <td>
@@ -1691,9 +2460,24 @@ function renderGroupsTable() {
           </td>
           <td>${escapeHtml(group.note || t("no_data"))}</td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}">${escapeHtml(t("delete_row"))}</button>
+            <button type="button" class="row-button row-button--danger" data-delete-group="${escapeHtml(group.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
           </td>
         </tr>
+        ${isExpanded ? `
+          <tr class="group-devices-row">
+            <td colspan="6">
+              <div class="group-devices-panel">
+                <div class="group-devices-header">
+                  <strong>${escapeHtml(t("group_devices_title", { name: group.name }))}</strong>
+                  <span class="pill">${escapeHtml(t("records_count", { count: groupDevices.length }))}</span>
+                </div>
+                <ul class="group-devices-list">
+                  ${groupDevicesMarkup}
+                </ul>
+              </div>
+            </td>
+          </tr>
+        ` : ""}
       `;
     });
 
@@ -1701,7 +2485,85 @@ function renderGroupsTable() {
   elements.groupsCounter.textContent = formatRecordsCount(state.groups.length);
 }
 
+function renderAccessGroupsTable() {
+  const accessGroups = state.admin?.accessGroups || [];
+  if (accessGroups.length === 0) {
+    elements.accessGroupsTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="2">${escapeHtml(t("empty_access_groups"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.accessGroupsTableBody.innerHTML = accessGroups
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name, "ru"))
+    .map((group) => `
+      <tr>
+        <td><strong>${escapeHtml(group.name)}</strong></td>
+        <td>${escapeHtml(group.description || t("no_data"))}</td>
+      </tr>
+    `)
+    .join("");
+}
+
+function renderUsersTable() {
+  const users = state.admin?.users || [];
+  if (users.length === 0) {
+    elements.usersTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="5">${escapeHtml(t("empty_users"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.usersTableBody.innerHTML = users
+    .slice()
+    .sort((left, right) => left.username.localeCompare(right.username, "ru"))
+    .map((user) => {
+      const accessGroupNames = (state.admin?.accessGroups || [])
+        .filter((group) => user.accessGroupIds.includes(group.id))
+        .map((group) => group.name);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(user.username)}</strong></td>
+          <td>${escapeHtml(user.displayName)}</td>
+          <td>${escapeHtml(t(`role_${user.role}`))}</td>
+          <td>${escapeHtml(accessGroupNames.join(", ") || t("access_group_public_short"))}</td>
+          <td>
+            <span class="status-badge status-badge--${user.mustChangePassword ? "warn" : "ok"}">
+              ${escapeHtml(user.mustChangePassword ? t("must_change_password_short") : t("status_ok"))}
+            </span>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderUserAccessGroupOptions() {
+  const accessGroups = state.admin?.accessGroups || [];
+  if (accessGroups.length === 0) {
+    elements.userAccessGroupOptions.innerHTML = `<div class="secondary-line">${escapeHtml(t("empty_access_groups"))}</div>`;
+    return;
+  }
+
+  elements.userAccessGroupOptions.innerHTML = accessGroups
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name, "ru"))
+    .map((group) => `
+      <label class="checkbox-card">
+        <input type="checkbox" value="${escapeHtml(group.id)}">
+        <span>${escapeHtml(group.name)}</span>
+      </label>
+    `)
+    .join("");
+}
+
 function renderDevicesTable() {
+  const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   const searchTerm = normalizeSearch(elements.searchInput.value);
   const filteredDevices = state.devices.filter((device) => matchesSearch(device, searchTerm));
 
@@ -1720,9 +2582,14 @@ function renderDevicesTable() {
     return;
   }
 
-  const rows = filteredDevices
+  const sortedDevices = filteredDevices
     .slice()
-    .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip))
+    .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip));
+  const visibleDevices = searchTerm || showAllDevicesInRegistry
+    ? sortedDevices
+    : sortedDevices.slice(0, 5);
+
+  const rows = visibleDevices
     .map((device) => {
       const subnet = resolveDeviceSubnet(device);
       const group = resolveDeviceGroup(device, subnet);
@@ -1742,11 +2609,25 @@ function renderDevicesTable() {
           <td>${pingBadge}</td>
           <td><span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span></td>
           <td>
-            <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}">${escapeHtml(t("delete_row"))}</button>
+            <button type="button" class="row-button row-button--danger" data-delete-device="${escapeHtml(device.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
           </td>
         </tr>
       `;
     });
+
+  if (!searchTerm && filteredDevices.length > 5) {
+    rows.push(`
+      <tr class="table-expand-row">
+        <td colspan="9">
+          <button type="button" class="link-button table-expand-button" data-toggle-devices-list>
+            ${escapeHtml(showAllDevicesInRegistry
+              ? t("show_less_devices")
+              : t("show_all_devices", { count: filteredDevices.length }))}
+          </button>
+        </td>
+      </tr>
+    `);
+  }
 
   elements.devicesTableBody.innerHTML = rows.join("");
   elements.devicesCounter.textContent = searchTerm
@@ -1817,6 +2698,11 @@ function renderDashboardAttention() {
     const totalCount = group.rangeEndInt - group.rangeStartInt + 1;
     return totalCount > 0 && countAssignedInGroup(group) >= totalCount;
   }).length;
+  const lowCapacityGroups = state.groups.filter((group) => {
+    const freeCount = countFreeInGroup(group);
+    return freeCount > 0 && freeCount <= 2;
+  }).length;
+  const automationExcluded = state.subnets.filter((subnet) => !subnet.scanEnabled).length;
 
   const items = [
     {
@@ -1843,16 +2729,21 @@ function renderDashboardAttention() {
       note: t("dashboard_attention_capacity_note"),
       tone: fullGroups > 0 ? "warn" : "ok",
     },
+    {
+      value: lowCapacityGroups,
+      title: t("dashboard_attention_low_capacity_title"),
+      note: t("dashboard_attention_low_capacity_note"),
+      tone: lowCapacityGroups > 0 ? "warn" : "ok",
+    },
+    {
+      value: automationExcluded,
+      title: t("dashboard_attention_automation_title"),
+      note: t("dashboard_attention_automation_note"),
+      tone: automationExcluded > 0 ? "info" : "ok",
+    },
   ];
 
-  const hasAttention = items.some((item) => item.value > 0);
-  if (!hasAttention) {
-    elements.dashboardAttentionList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("dashboard_attention_empty"))}</li>`;
-    return;
-  }
-
   elements.dashboardAttentionList.innerHTML = items
-    .filter((item) => item.value > 0)
     .map((item) => `
       <li class="mini-item mini-item--attention mini-item--${escapeHtml(item.tone)}">
         <div class="mini-title">${escapeHtml(item.title)}</div>
@@ -1870,7 +2761,7 @@ function renderDashboardHistory() {
   }
 
   const items = state.history
-    .slice(0, 5)
+    .slice(0, 3)
     .map((entry) => {
       const ipLabel = entry.previousIp ? `${entry.previousIp} → ${entry.ip}` : entry.ip;
       return `
@@ -1891,11 +2782,6 @@ function renderDashboardHistory() {
 function renderIpCheckResult(message, tone) {
   elements.ipCheckResult.className = `result-card result-card--${tone}`;
   elements.ipCheckResult.textContent = message;
-}
-
-function setLiveStatus(label, variant) {
-  elements.liveStatusBadge.className = `status-badge status-badge--${variant}`;
-  elements.liveStatusBadge.textContent = label;
 }
 
 function setScanStatus(label, variant) {
@@ -1936,8 +2822,14 @@ function normalizeState(rawState, baseGroups = []) {
     scanIntervalSeconds: Number(rawState?.meta?.scanIntervalSeconds || 90),
   };
   const settings = normalizeServerSettings(rawState?.settings, meta);
+  const accessGroups = Array.isArray(rawState?.accessGroups)
+    ? rawState.accessGroups.map(normalizeAccessGroup)
+    : [];
+  const auth = normalizeAuthState(rawState?.auth);
+  const admin = normalizeAdminState(rawState?.admin);
+  const preferences = normalizeUserPreferences(rawState?.preferences || {});
 
-  return { subnets, groups, devices, scanResults, history, meta, settings };
+  return { subnets, groups, devices, scanResults, history, meta, settings, accessGroups, auth, admin, preferences };
 }
 
 function normalizeServerSettings(rawSettings, meta = {}) {
@@ -1951,12 +2843,63 @@ function normalizeServerSettings(rawSettings, meta = {}) {
 
   return {
     scanIntervalSeconds,
+    defaultSubnetScanEnabled: normalizeBoolean(rawSettings?.defaultSubnetScanEnabled, true),
     scanTimeoutMs,
     scanConcurrency,
     limits: {
       scanIntervalMin,
       scanIntervalMax,
     },
+  };
+}
+
+function normalizeAccessGroup(entry) {
+  return {
+    id: String(entry?.id || "").trim(),
+    name: String(entry?.name || "").trim(),
+    description: String(entry?.description || "").trim(),
+    createdAt: entry?.createdAt || new Date().toISOString(),
+    updatedAt: entry?.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeAuthState(rawAuth = {}) {
+  return {
+    authenticated: Boolean(rawAuth?.authenticated),
+    user: rawAuth?.user || null,
+    accessGroups: Array.isArray(rawAuth?.accessGroups)
+      ? rawAuth.accessGroups.map(normalizeAccessGroup)
+      : [],
+    capabilities: {
+      isAdmin: Boolean(rawAuth?.capabilities?.isAdmin),
+      canWrite: Boolean(rawAuth?.capabilities?.canWrite),
+      canManageUsers: Boolean(rawAuth?.capabilities?.canManageUsers),
+      canManageServerSettings: Boolean(rawAuth?.capabilities?.canManageServerSettings),
+      canManageAccessGroups: Boolean(rawAuth?.capabilities?.canManageAccessGroups),
+    },
+  };
+}
+
+function normalizeAdminState(rawAdmin = null) {
+  if (!rawAdmin) {
+    return null;
+  }
+
+  return {
+    accessGroups: Array.isArray(rawAdmin?.accessGroups)
+      ? rawAdmin.accessGroups.map(normalizeAccessGroup)
+      : [],
+    users: Array.isArray(rawAdmin?.users)
+      ? rawAdmin.users.map((entry) => ({
+        id: String(entry?.id || "").trim(),
+        username: String(entry?.username || "").trim(),
+        displayName: String(entry?.displayName || "").trim(),
+        role: String(entry?.role || "").trim(),
+        mustChangePassword: Boolean(entry?.mustChangePassword),
+        isActive: Boolean(entry?.isActive),
+        accessGroupIds: Array.isArray(entry?.accessGroupIds) ? entry.accessGroupIds.map((id) => String(id)) : [],
+      }))
+      : [],
   };
 }
 
@@ -2002,6 +2945,9 @@ function applyStateToTarget(targetState, snapshot) {
   targetState.history = snapshot.history;
   targetState.meta = snapshot.meta;
   targetState.settings = snapshot.settings;
+  targetState.accessGroups = snapshot.accessGroups || [];
+  targetState.auth = snapshot.auth || targetState.auth;
+  targetState.admin = snapshot.admin || null;
 }
 
 function cloneState(snapshot) {
@@ -2016,6 +2962,9 @@ function cloneState(snapshot) {
       ...snapshot.settings,
       limits: { ...snapshot.settings.limits },
     },
+    accessGroups: (snapshot.accessGroups || []).map((entry) => ({ ...entry })),
+    auth: snapshot.auth ? JSON.parse(JSON.stringify(snapshot.auth)) : null,
+    admin: snapshot.admin ? JSON.parse(JSON.stringify(snapshot.admin)) : null,
   };
 }
 
@@ -2023,6 +2972,9 @@ function normalizeSubnet(rawSubnet) {
   const name = String(rawSubnet?.name || "").trim();
   const cidr = String(rawSubnet?.cidr || "").trim();
   const note = String(rawSubnet?.note || "").trim();
+  const accessGroupId = String(rawSubnet?.accessGroupId || "").trim();
+  const accessGroupName = String(rawSubnet?.accessGroupName || "").trim();
+  const scanEnabled = normalizeBoolean(rawSubnet?.scanEnabled, true);
 
   if (!name) {
     throw new Error(t("error_subnet_name_required"));
@@ -2059,6 +3011,9 @@ function normalizeSubnet(rawSubnet) {
     rangeEndInt,
     poolSize: rangeEndInt - rangeStartInt + 1,
     usableHosts: parsed.usableHosts,
+    scanEnabled,
+    accessGroupId,
+    accessGroupName,
     note,
     createdAt: rawSubnet?.createdAt || new Date().toISOString(),
   };
@@ -2607,6 +3562,22 @@ function formatDateTime(value) {
   }).format(date);
 }
 
+function formatHeroDateTime(value) {
+  if (!value) {
+    return t("no_data");
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat(DATE_LOCALES[getLanguage()] || DATE_LOCALES.ru, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function normalizeSearch(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -2879,21 +3850,23 @@ async function apiRequest(path, options = {}) {
     headers.set("Content-Type", "application/json");
   }
 
-  const actor = preferences.operator.trim();
-  if (actor) {
-    headers.set("X-ATLAS-Actor", actor);
-  }
-
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers,
+    credentials: "include",
   });
 
   const isJson = response.headers.get("content-type")?.includes("application/json");
   const payload = isJson ? await response.json() : null;
 
+  if (response.status === 401 && options.allowUnauthorized) {
+    return payload;
+  }
+
   if (!response.ok) {
-    throw new Error(payload?.error || t("error_request_failed", { status: response.status }));
+    const error = new Error(payload?.error || t("error_request_failed", { status: response.status }));
+    error.status = response.status;
+    throw error;
   }
 
   return payload;
