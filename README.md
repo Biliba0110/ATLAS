@@ -1,237 +1,124 @@
 # ATLAS
 
-ATLAS — self-hosted IPAM и inventory для home-lab и небольших инфраструктур. Проект помогает вести учет подсетей, диапазонов и устройств, отслеживать занятые адреса по базе и `ping`, а также постепенно двигаться к многопользовательскому и модульному продукту без лишнего перегруза.
+ATLAS is a self-hosted IPAM and lightweight infrastructure inventory for home-labs, small teams, and growing internal networks.
 
-Версия `0.2.4` развивает базовую автоматизацию и добавляет многопользовательскую основу: вход по пользователям, роли, группы доступа и серверное хранение персональных настроек.
+`ATLAS — инфраструктура под контролем, без лишней сложности.`
 
-## Возможности
+## What ATLAS Does
 
-- добавление подсетей с `CIDR`, пулом адресов и комментарием
-- добавление именованных групп диапазонов внутри подсети
-- ручное добавление устройств: имя, IP, необязательный `MAC`, тип, комментарий
-- поиск по `IP`, `MAC`, имени, типу, подсети и группе
-- экспорт в `JSON` и `CSV`
-- импорт из `JSON` и `CSV`
-- серверное хранение данных в `SQLite`
-- live-обновления через `Server-Sent Events`
-- история действий с IP
-- базовая проверка занятости IP через `ping`
-- автоподбор свободного IP при создании устройства
-- шаблоны автоподстановки групп по ключевым словам
-- вход по пользователям с сессиями на сервере
-- роли `admin / editor / viewer`
-- группы доступа для фильтрации видимости подсетей и данных
-- серверное хранение пользовательских настроек и шаблонов
+ATLAS helps keep network state understandable without turning the interface into a heavy enterprise control panel.
 
-## Стек
+Core capabilities today:
+
+- subnet management with `CIDR`, pools, and notes
+- named IP range groups inside a subnet
+- manual device registry with `name`, `IP`, optional `MAC`, `type`, and notes
+- IP availability checks using database records and `ping`
+- free IP suggestions
+- conflict detection
+- search by `IP`, `MAC`, device name, type, subnet, and group
+- history of IP-related changes
+- live updates in the UI
+- import/export via `JSON` and `CSV`
+- multi-user access with roles and access groups
+- server-side user preferences and group suggestion templates
+
+## Stack
 
 - `Python 3`
 - `SQLite`
 - `HTML / CSS / Vanilla JavaScript`
 - `Server-Sent Events`
 
-## Структура
+## Quick Start
 
-- [index.html](/Users/bohdan/Documents/Projects/WEB/IPAM/index.html) — интерфейс
-- [styles.css](/Users/bohdan/Documents/Projects/WEB/IPAM/styles.css) — стили
-- [app.js](/Users/bohdan/Documents/Projects/WEB/IPAM/app.js) — клиентская логика
-- [server.py](/Users/bohdan/Documents/Projects/WEB/IPAM/server.py) — API, статика, `SQLite`, `ping`
-- [group-suggestion-templates.json](/Users/bohdan/Documents/Projects/WEB/IPAM/group-suggestion-templates.json) — шаблоны автоподстановки групп
-- `data/atlas.db` — база, создается автоматически при первом запуске
-
-## Запуск
+Run:
 
 ```bash
 python3 server.py
 ```
 
-После запуска интерфейс доступен по адресу:
+Open:
 
-- `http://localhost:4173` на локальной машине
-- `http://<IP_сервера>:4173` с других устройств в сети
+- `http://localhost:4173`
+- `http://<server-ip>:4173`
 
-Если сервер уже был запущен и код изменился, процесс стоит перезапустить, чтобы обновились API, логика сканирования и статические файлы.
+On first clean start, ATLAS creates a bootstrap admin user:
 
-## Переменные окружения
+- username: `Admin`
+- password: `Atlas`
 
-- `ATLAS_HOST` — адрес bind, по умолчанию `0.0.0.0`
-- `ATLAS_PORT` — порт, по умолчанию `4173`
-- `ATLAS_DB_PATH` — путь к базе, по умолчанию `data/atlas.db`
-- `ATLAS_SCAN_INTERVAL` — интервал фонового `ping`-сканирования в секундах, по умолчанию `90`
-- `ATLAS_SCAN_TIMEOUT_MS` — таймаут одного `ping`, по умолчанию `1000`
-- `ATLAS_SCAN_CONCURRENCY` — число параллельных `ping`, по умолчанию `32`
-- `ATLAS_HISTORY_LIMIT` — сколько последних событий истории отдавать в UI, по умолчанию `200`
+The password must be changed after the first login.
 
-Пример запуска на другом порту:
+## Data Storage
 
-```bash
-ATLAS_PORT=4180 python3 server.py
-```
+ATLAS stores shared state in server-side `SQLite`.
 
-## Хранение данных
+- default database path: `data/atlas.db`
+- the database is created automatically
+- the repository stays clean without embedded data
+- multiple devices can use the same ATLAS instance if they connect to the same server
 
-Все рабочие данные лежат в серверной `SQLite`-базе.
+Stored data includes:
 
-- по умолчанию база создается в `data/atlas.db`
-- каталог `data/` исключен из git через `.gitignore`
-- чистая установка получается автоматически, если в репозитории нет файла базы
-- один и тот же экземпляр ATLAS можно открывать с нескольких устройств, если они подключаются к одному серверу
+- subnets
+- range groups
+- devices
+- ping scan results
+- IP history
+- users
+- access groups
+- sessions
+- user preferences
 
-В базе хранятся:
+## Access Model
 
-- подсети
-- группы диапазонов
-- устройства
-- результаты `ping`
-- история IP-событий
-- пользователи
-- группы доступа
-- сессии входа
-- персональные настройки пользователей
+ATLAS currently supports:
 
-## Пользователи и доступ
+- `admin` — full access, users, access groups, server settings
+- `editor` — read/write access to allowed data
+- `viewer` — read-only access to allowed data
 
-В `v0.2.4` ATLAS перестает быть single-user приложением и получает базовую серверную модель доступа.
+Access groups are used to limit visibility.
 
-Что уже есть:
+- a subnet can be public or bound to an access group
+- `admin` sees everything
+- non-admin users see public subnets and the restricted subnets assigned to their groups
+- devices, groups, scan results, and relevant history follow the same visibility rules
 
-- вход по пользователям через cookie-сессию
-- bootstrap-учетка `Admin / Atlas` при первой чистой установке
-- обязательная смена пароля при первом входе под bootstrap-admin
-- роли `admin`, `editor`, `viewer`
-- группы доступа для ограничения видимости подсетей
-- серверное хранение персональных настроек пользователя
+## Ping and Scanning
 
-Поведение ролей:
+`ping` in ATLAS is a lightweight occupancy signal, not full discovery.
 
-- `admin` — полный доступ, управление пользователями, группами доступа и серверными настройками
-- `editor` — просмотр и изменение доступных ему данных, без admin-функций
-- `viewer` — только просмотр разрешенных данных без изменения состояния
+What it is used for:
 
-Поведение групп доступа:
+- detecting addresses that may already be in use
+- helping free IP suggestions avoid obviously active addresses
+- giving a quick network-state snapshot
 
-- подсеть может быть публичной или привязанной к конкретной группе доступа
-- `admin` видит все подсети
-- остальные пользователи видят публичные подсети и только те ограниченные подсети, к чьим группам они привязаны
-- история, результаты `ping`, диапазоны и устройства фильтруются по той же зоне видимости
+What it is not:
 
-## Первый запуск после чистой установки
+- DHCP / ARP / SNMP replacement
+- complete device discovery
+- guaranteed proof that an IP is free
 
-Если база создается с нуля, сервер автоматически поднимает bootstrap-пользователя:
+Current scan behavior:
 
-- логин: `Admin`
-- пароль: `Atlas`
+- background scanning runs on a configured interval
+- only subnets enabled for automation participate in background scanning
+- each subnet can be included or excluded from background scans
+- new subnets can inherit a default scan policy
+- manual scans can be triggered from the UI
+- group creation can trigger a scan only for that group range
 
-После первого входа ATLAS требует сменить пароль до начала обычной работы.
+## Import and Export
 
-## Группы диапазонов
+Supported formats:
 
-Группы нужны для логического деления подсети на зоны, например:
+- `JSON` — full state snapshot
+- `CSV` — separate exports for subnets, range groups, and devices
 
-- `2-4` — `hypervisor`
-- `5-19` — `VM`
-
-Или
-- `192.168.1.2-192.168.1.4` — `hypervisor`
-
-Особенности:
-
-- группа всегда относится к конкретной подсети
-- диапазоны внутри одной подсети не должны пересекаться
-- для `/24` можно указывать только последний октет, например `2` и `4`
-- после создания группы сервер сразу выполняет `ping`-проверку именно этого диапазона
-
-## Как работает ping-проверка
-
-В этой версии `ping` используется как простой индикатор того, что адрес уже может быть кем-то занят в сети, даже если устройства еще нет в базе ATLAS.
-
-Важно:
-
-- `ping` не определяет тип устройства
-- `ping` не гарантирует, что IP свободен, если узел не отвечает
-- `ping` не заменяет DHCP, ARP, SNMP или полноценное автообнаружение
-
-### Когда запускается ping
-
-Проверка выполняется в нескольких сценариях:
-
-- при старте сервера планируется первый фоновый проход по всем пулам
-- далее фоновый скан повторяется через интервал `ATLAS_SCAN_INTERVAL`
-- при добавлении подсети сервер помечает состояние как требующее нового фонового скана
-- при добавлении устройства клиент после сохранения обновляет скан затронутой группы, а если группа не определена — подсети
-- при создании группы сразу запускается скан только ее диапазона
-- кнопку `Проверить ping` в интерфейсе можно использовать для ручного полного скана
-
-### Что именно сканируется
-
-- полный ручной или фоновый скан проходит по пулу адресов каждой подсети от `rangeStart` до `rangeEnd`
-- скан группы проходит только по IP внутри диапазона этой группы
-- если устройство добавляется в группу, для подсказки IP обновляется именно эта группа
-
-### Как интерпретируются данные
-
-В интерфейсе используются несколько счетчиков:
-
-- `в базе` — адреса, закрепленные за устройствами в ATLAS
-- `ping` — адреса, которые ответили на последний `ping`
-- `занято` — объединение записей в базе и отвечающих на `ping` адресов без дублей
-- `свободно` — количество адресов в пуле или группе, которые не заняты по текущему снимку данных
-
-Подсказка свободного IP при создании устройства работает именно на объединении двух источников:
-
-- записей в базе
-- последних результатов `ping`
-
-Это позволяет не предлагать адрес, который не закреплен в ATLAS, но уже отвечает в сети.
-
-## Автоподбор групп
-
-При добавлении устройства форма может предложить подходящую группу диапазона. Это не жесткая привязка, а рекомендация.
-
-Как это работает:
-
-- клиент загружает шаблоны из [group-suggestion-templates.json](/Users/bohdan/Documents/Projects/WEB/IPAM/group-suggestion-templates.json:1)
-- каждый шаблон содержит типы устройств и набор ключевых слов
-- имя и комментарий группы сравниваются с ключевыми словами шаблонов
-- если находится лучшее совпадение, группа подставляется автоматически
-- пользователь всегда может изменить выбор вручную
-- если файл шаблонов недоступен, клиент использует встроенный fallback-набор
-
-Это решение сделано специально так, чтобы позже шаблоны можно было редактировать через настройки без изменения основной логики формы.
-
-## Live-обновления
-
-Интерфейс получает изменения через `Server-Sent Events`.
-
-Это значит, что:
-
-- новые устройства, подсети и группы появляются у подключенных клиентов автоматически
-- результаты `ping`-сканов подхватываются без ручного обновления страницы
-- история действий и состояние таблиц синхронизируются между открытыми клиентами
-
-Если live-соединение временно рвется, клиент пытается переподключиться автоматически.
-
-## История IP-событий
-
-История хранит базовые события:
-
-- назначение IP
-- импорт состояния
-- изменение IP через импорт
-- освобождение IP
-
-В `v0.2.4` подписью автора действия выступает сам текущий пользователь ATLAS. Отдельная сущность `Оператор` в интерфейсе больше не используется.
-
-## Импорт и экспорт
-
-Поддерживается:
-
-- `JSON` — полный снимок состояния
-- `CSV` для подсетей
-- `CSV` для групп диапазонов
-- `CSV` для устройств
-
-В `JSON` входят:
+`JSON` includes:
 
 - `subnets`
 - `groups`
@@ -239,26 +126,44 @@ ATLAS_PORT=4180 python3 server.py
 - `scanResults`
 - `history`
 
-При импорте можно:
+Import can either:
 
-- заменить текущее состояние
-- объединить новые данные с текущими
+- merge data into the current state
+- replace the current state
 
-## Ограничения версии 0.2.4
+## Configuration
 
-- нет DHCP-интеграции
-- нет редактирования записей через UI
-- нет ARP/SNMP и полноценного автообнаружения устройств
-- `ping` показывает только доступность IP, но не источник этой доступности
-- роли и группы доступа пока покрывают базовый сценарий, без SSO, approval-flow и детального enterprise-RBAC
-- управление пользователями пока базовое: создание, назначение роли и групп доступа без расширенного lifecycle management
+Environment variables:
 
-## Идея для следующей версии
+- `ATLAS_HOST` — bind address, default `0.0.0.0`
+- `ATLAS_PORT` — port, default `4173`
+- `ATLAS_DB_PATH` — database path, default `data/atlas.db`
+- `ATLAS_SCAN_INTERVAL` — background scan interval in seconds, default `90`
+- `ATLAS_SCAN_TIMEOUT_MS` — timeout for a single ping, default `1000`
+- `ATLAS_SCAN_CONCURRENCY` — parallel ping workers, default `32`
+- `ATLAS_HISTORY_LIMIT` — history entries returned to the UI, default `200`
 
-Логичное развитие `v0.3`:
+Example:
 
-- Docker / Proxmox / IoT integration
-- связь `host -> containers / services / devices`
-- source tracking и orphan detection
-- дальнейшая подготовка интерфейса к модульной навигации
-- более детальная история изменений
+```bash
+ATLAS_PORT=4180 python3 server.py
+```
+
+## Project Structure
+
+- [index.html](/Users/bohdan/Documents/Projects/WEB/IPAM/index.html) — main UI
+- [styles.css](/Users/bohdan/Documents/Projects/WEB/IPAM/styles.css) — styles
+- [app.js](/Users/bohdan/Documents/Projects/WEB/IPAM/app.js) — client logic
+- [server.py](/Users/bohdan/Documents/Projects/WEB/IPAM/server.py) — API, auth, static files, SQLite, scanning
+- [group-suggestion-templates.json](/Users/bohdan/Documents/Projects/WEB/IPAM/group-suggestion-templates.json) — bundled group suggestion rules
+- [PRODUCT_VISION.md](/Users/bohdan/Documents/Projects/WEB/IPAM/PRODUCT_VISION.md) — product direction and roadmap
+
+## Notes
+
+- ATLAS is designed to stay simple by default and grow by need
+- unused complexity should not dominate the interface
+- larger capabilities are being prepared as future optional layers, not forced workflow
+
+## License
+
+No license file is defined yet.
