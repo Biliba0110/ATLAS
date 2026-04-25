@@ -2,31 +2,22 @@
 
 Language versions: [English](README.md) | [Українська](README.uk.md) | [Русский](README.ru.md)
 
-ATLAS is a self-hosted IPAM and lightweight infrastructure inventory for home-labs, small teams, and growing internal networks.
+ATLAS is a self-hosted IPAM and lightweight network inventory for home-labs, small teams, and growing internal networks.
 
-`ATLAS — infrastructure under control, without unnecessary complexity.`
+## What ATLAS does
 
-## Features
+- manages subnets with `CIDR`, pools, notes, and optional access scopes
+- supports named IP range groups inside a subnet
+- stores devices with `name`, `IP`, optional `MAC`, `type`, and notes
+- suggests free IPs based on the database and optional `ping`
+- detects IP conflicts
+- keeps IP change history
+- supports multi-user access with roles and access groups
+- imports and exports data with `JSON`, `CSV`, and full `backup`
 
-- subnet management with `CIDR`, pools, notes, and optional access scopes
-- named IP range groups inside a subnet
-- manual device registry with `name`, `IP`, optional `MAC`, `type`, and notes
-- free IP suggestions based on database records and `ping`
-- IP conflict detection
-- history of IP-related changes
-- live UI updates
-- import/export with `JSON` and `CSV`
-- multi-user access with roles and access groups
-- server-side user preferences and group suggestion templates
+## Quick start
 
-## Stack
-
-- `Python 3`
-- `SQLite`
-- `HTML / CSS / Vanilla JavaScript`
-- `Server-Sent Events`
-
-## Quick Start
+Run:
 
 ```bash
 python3 server.py
@@ -37,24 +28,26 @@ Open:
 - `http://localhost:4173`
 - `http://<server-ip>:4173`
 
-First clean start bootstrap account:
+Bootstrap account on a clean install:
 
 - username: `Admin`
 - password: `Atlas`
 
 The bootstrap password must be changed after the first sign-in.
 
-## Storage
+## How to use
 
-ATLAS stores shared state in server-side `SQLite`.
+Basic workflow:
 
-- default database path: `data/atlas.db`
-- the database is created automatically
-- multiple devices can connect to the same ATLAS instance
+1. Add a subnet.
+2. Create range groups inside the subnet if needed.
+3. Add devices manually.
+4. Use search, filters, and history to track usage.
+5. Export or back up the instance when needed.
 
-Stored data includes subnets, range groups, devices, scan results, history, users, sessions, access groups, and user preferences.
+## Users and access
 
-## Access Model
+Roles:
 
 - `admin` — full access, users, access groups, server settings
 - `editor` — read/write access to allowed data
@@ -66,34 +59,38 @@ Access groups control visibility:
 - `admin` sees everything
 - non-admin users see public subnets and the subnets assigned to their groups
 
-## Ping and Scanning
+## Ping and automation
 
-`ping` in ATLAS is a lightweight occupancy signal, not full discovery.
+`ping` in ATLAS is an occupancy signal, not full discovery.
 
-It is used for:
+Use it for:
 
-- spotting addresses that may already be in use
-- making IP suggestions safer
+- safer free IP suggestions
 - quick subnet-level checks
+- detecting addresses that may already be in use
 
-It is not a replacement for DHCP, ARP, SNMP, or full asset discovery.
+Recommended practice:
 
-Current behavior:
+- enable auto-scan only for subnets reachable from the ATLAS server
+- disable it for remote or isolated networks where `ping` is not reliable
 
-- background scanning runs on a configured interval
-- only subnets enabled for automation are scanned in the background
-- new subnets can inherit the default automation policy
-- subnet checks can be triggered directly from the registry
-- group creation can trigger a targeted range scan
-
-## Import and Export
+## Import, export, and backup
 
 Supported formats:
 
-- `JSON` — full state snapshot
+- `JSON` — ATLAS state snapshot
 - `CSV` — separate exports for subnets, range groups, and devices
+- `Backup ATLAS` — full backup for restore or migration
 
-Import can merge data into the current state or replace it.
+Use `Backup ATLAS` when you want to restore a full instance with users, settings, and access model.
+
+## Storage
+
+ATLAS stores shared state in server-side `SQLite`.
+
+- default database path: `data/atlas.db`
+- the database is created automatically
+- multiple devices can connect to the same ATLAS instance
 
 ## Configuration
 
@@ -113,17 +110,10 @@ Example:
 ATLAS_PORT=4180 python3 server.py
 ```
 
-## Project Files
+## Project files
 
 - `index.html` — main UI
 - `styles.css` — styles
 - `app.js` — client logic
 - `server.py` — API, auth, static serving, SQLite, scanning
 - `group-suggestion-templates.json` — bundled group suggestion rules
-- `PRODUCT_VISION.md` — product direction and roadmap
-
-## Product Direction
-
-ATLAS is designed to stay simple by default and grow only when needed.
-
-The long-term product vision is documented in [PRODUCT_VISION.md](PRODUCT_VISION.md).
