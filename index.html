@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0a0d14">
   <title>ATLAS</title>
-  <link rel="icon" type="image/svg+xml" href="/atlas-logo.svg?v=0.2.5-ui7">
-  <link rel="stylesheet" href="styles.css?v=0.2.5-ui7">
-  <script src="i18n.js?v=0.2.5-ui7" defer></script>
-  <script src="app.js?v=0.2.5-ui7" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/atlas-logo.svg?v=0.2.5-ui26">
+  <link rel="stylesheet" href="styles.css?v=0.2.5-ui26">
+  <script src="i18n.js?v=0.2.5-ui26" defer></script>
+  <script src="app.js?v=0.2.5-ui26" defer></script>
 </head>
 <body>
   <div class="auth-screen" id="auth-screen" hidden>
@@ -174,8 +174,8 @@
             <input type="search" id="device-search-input" data-i18n-placeholder="device_search_placeholder" placeholder="Например: 10.10.10.15 или proxmox">
           </label>
 
-          <div class="settings-grid">
-            <label class="setting-card">
+          <div class="settings-grid registry-filters-grid">
+            <label class="setting-card registry-filter-card">
               <span class="setting-title" data-i18n="device_filter_label">Быстрый фильтр</span>
               <select id="device-filter-select">
                 <option value="all" data-i18n="device_filter_all">Все устройства</option>
@@ -184,7 +184,7 @@
                 <option value="outside-pool" data-i18n="device_filter_outside_pool">Вне пула</option>
               </select>
             </label>
-            <label class="setting-card">
+            <label class="setting-card registry-filter-card">
               <span class="setting-title" data-i18n="device_group_filter_label">Группа диапазона</span>
               <select id="device-group-filter-select">
                 <option value="" data-i18n="device_group_filter_all">Все группы</option>
@@ -420,6 +420,11 @@
             <option value="" data-i18n="access_group_public">Публичная / без ограничения</option>
           </select>
         </label>
+        <label class="setting-card setting-card--toggle form-grid__full">
+          <span class="setting-title" data-i18n="subnet_scan_enabled_label">Доступен для ping и авто-скана</span>
+          <input type="checkbox" name="scanEnabled" checked>
+          <span class="setting-note" data-i18n="subnet_scan_enabled_note">Если выключено, подсеть не участвует в ping, авто-скане и связанных подсказках.</span>
+        </label>
         <label class="form-grid__full">
           <span data-i18n="field_comment">Комментарий</span>
           <textarea name="note" rows="3" data-i18n-placeholder="subnet_note_placeholder" placeholder="Например: основная домашняя сеть"></textarea>
@@ -455,9 +460,6 @@
         <label>
           <span data-i18n="table_type">Тип</span>
           <select name="type" required>
-            <option value="server" data-i18n="device_type_server">Сервер</option>
-            <option value="container" data-i18n="device_type_container">Контейнер</option>
-            <option value="iot" data-i18n="device_type_iot">IoT</option>
           </select>
         </label>
         <label class="form-grid__full">
@@ -560,14 +562,86 @@
         </label>
 
         <label class="setting-card">
+          <span class="setting-title" data-i18n="backup_export_title">Backup ATLAS</span>
+          <span class="setting-note" data-i18n="backup_export_note">Экспортирует выбранные разделы и позволяет полностью восстановить ATLAS на другом экземпляре.</span>
+          <div class="checkbox-grid">
+            <label class="checkbox-card">
+              <input type="checkbox" id="backup-include-inventory" checked>
+              <span data-i18n="backup_section_inventory">Реестр сети</span>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="backup-include-activity" checked>
+              <span data-i18n="backup_section_activity">История и scan</span>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="backup-include-system" checked>
+              <span data-i18n="backup_section_system">Системные настройки</span>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="backup-include-access" checked>
+              <span data-i18n="backup_section_access">Пользователи и доступ</span>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="backup-include-preferences" checked>
+              <span data-i18n="backup_section_preferences">Пользовательские настройки</span>
+            </label>
+          </div>
+          <button type="button" class="action-button" id="export-backup-button" data-i18n="export_backup_button">Экспорт backup</button>
+        </label>
+
+        <div class="setting-card export-table-card">
           <span class="setting-title" data-i18n="tabular_exports_title">Табличные выгрузки</span>
           <span class="setting-note" data-i18n="tabular_exports_note">Отдельные CSV по подсетям, диапазонам и устройствам.</span>
-          <div class="template-editor-actions">
-            <button type="button" class="action-button" id="export-subnets-csv-button" data-i18n="export_subnets_csv">Подсети CSV</button>
-            <button type="button" class="action-button" id="export-groups-csv-button" data-i18n="export_groups_csv">Диапазоны CSV</button>
-            <button type="button" class="action-button" id="export-devices-csv-button" data-i18n="export_devices_csv">Устройства CSV</button>
+          <div class="export-csv-table" role="table" aria-label="CSV exports">
+            <div class="export-csv-table__head" role="row">
+              <span role="columnheader" data-i18n="csv_table_dataset_header">Набор данных</span>
+              <span role="columnheader" data-i18n="csv_table_contents_header">Что входит</span>
+              <span role="columnheader" data-i18n="csv_table_action_header">Действие</span>
+            </div>
+
+            <div class="export-csv-table__row" role="row">
+              <div class="export-csv-table__dataset" role="cell">
+                <span class="export-csv-table__title" data-i18n="export_subnets_csv">Подсети CSV</span>
+                <span class="export-csv-table__note" data-i18n="csv_subnets_note">Подсети, пул, использование, авто-скан и комментарии.</span>
+              </div>
+              <div class="export-csv-table__contents" role="cell">
+                <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
+                <span class="export-csv-table__fields" data-i18n="csv_subnets_fields">CIDR, IP-пул, занятость, авто-скан, описание.</span>
+              </div>
+              <div class="export-csv-table__action" role="cell">
+                <button type="button" class="action-button" id="export-subnets-csv-button" data-i18n="export_subnets_csv">Подсети CSV</button>
+              </div>
+            </div>
+
+            <div class="export-csv-table__row" role="row">
+              <div class="export-csv-table__dataset" role="cell">
+                <span class="export-csv-table__title" data-i18n="export_groups_csv">Диапазоны CSV</span>
+                <span class="export-csv-table__note" data-i18n="csv_groups_note">Группы диапазонов внутри подсетей с их использованием и привязкой.</span>
+              </div>
+              <div class="export-csv-table__contents" role="cell">
+                <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
+                <span class="export-csv-table__fields" data-i18n="csv_groups_fields">Подсеть, диапазон, группа, занято, свободно, комментарий.</span>
+              </div>
+              <div class="export-csv-table__action" role="cell">
+                <button type="button" class="action-button" id="export-groups-csv-button" data-i18n="export_groups_csv">Диапазоны CSV</button>
+              </div>
+            </div>
+
+            <div class="export-csv-table__row" role="row">
+              <div class="export-csv-table__dataset" role="cell">
+                <span class="export-csv-table__title" data-i18n="export_devices_csv">Устройства CSV</span>
+                <span class="export-csv-table__note" data-i18n="csv_devices_note">Полный реестр устройств с IP, MAC, типом, группой и статусом.</span>
+              </div>
+              <div class="export-csv-table__contents" role="cell">
+                <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
+                <span class="export-csv-table__fields" data-i18n="csv_devices_fields">Имя, IP, MAC, тип, подсеть, группа, комментарий, статус.</span>
+              </div>
+              <div class="export-csv-table__action" role="cell">
+                <button type="button" class="action-button" id="export-devices-csv-button" data-i18n="export_devices_csv">Устройства CSV</button>
+              </div>
+            </div>
           </div>
-        </label>
+        </div>
       </div>
     </div>
   </div>
@@ -594,6 +668,41 @@
         <div id="ip-check-result" class="result-card result-card--muted form-grid__full" data-i18n="ip_check_hint">
           Введите IP, чтобы узнать, свободен ли он, отвечает ли на ping и к чему относится.
         </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="missing-type-modal" hidden>
+    <div class="modal-panel modal-panel--form" role="dialog" aria-modal="true" aria-labelledby="missing-type-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="panel-kicker" data-i18n="device_types_title">Типы устройств</p>
+          <h2 id="missing-type-modal-title" data-i18n="missing_type_modal_title">Назначить тип устройствам</h2>
+          <p class="helper-text" data-i18n="missing_type_modal_note">
+            Выберите общий тип и отметьте устройства, для которых он должен быть назначен.
+          </p>
+        </div>
+        <button type="button" class="action-button action-button--ghost" data-close-modal="missing-type-modal" data-i18n="close_button">Закрыть</button>
+      </div>
+
+      <form id="missing-type-form" class="form-grid">
+        <label class="form-grid__full">
+          <span data-i18n="missing_type_target_label">Назначить тип</span>
+          <select id="missing-type-target-select" required></select>
+        </label>
+
+        <div class="form-grid__full">
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker" data-i18n="devices_title">Устройства</p>
+              <h3 data-i18n="missing_type_devices_title">Без заданного типа</h3>
+            </div>
+          </div>
+          <div id="missing-type-device-list" class="automation-subnet-list"></div>
+        </div>
+
+        <button type="submit" class="submit-button" data-i18n="missing_type_apply_button">Применить тип</button>
+        <div id="missing-type-status" class="result-card result-card--muted form-grid__full"></div>
       </form>
     </div>
   </div>
@@ -673,11 +782,12 @@
                 <tr>
                   <th data-i18n="table_name">Имя</th>
                   <th data-i18n="table_comment">Комментарий</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody id="access-groups-table-body">
                 <tr class="empty-row">
-                  <td colspan="2" data-i18n="empty_access_groups">Группы доступа еще не созданы.</td>
+                  <td colspan="3" data-i18n="empty_access_groups">Группы доступа еще не созданы.</td>
                 </tr>
               </tbody>
             </table>
@@ -732,11 +842,12 @@
                   <th data-i18n="role_label">Роль</th>
                   <th data-i18n="access_groups_title">Группы доступа</th>
                   <th data-i18n="table_status">Статус</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody id="users-table-body">
                 <tr class="empty-row">
-                  <td colspan="5" data-i18n="empty_users">Пользователи еще не созданы.</td>
+                  <td colspan="6" data-i18n="empty_users">Пользователи еще не созданы.</td>
                 </tr>
               </tbody>
             </table>
@@ -851,10 +962,42 @@
         <section class="panel panel--modal settings-panel settings-panel--full" data-settings-section="templates" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="templates_kicker">Шаблоны</p>
-            <h2 data-i18n="group_templates_title">Автоподстановка групп</h2>
+            <h2 data-i18n="templates_section_title">Типы устройств и шаблоны</h2>
           </div>
 
-          <div class="template-editor-card template-editor-card--modal">
+          <div class="template-section-tabs" role="tablist" aria-label="Template settings sections">
+            <button type="button" class="template-section-tab is-active" data-template-tab="device-types" data-i18n="device_types_title">Типы устройств</button>
+            <button type="button" class="template-section-tab" data-template-tab="group-suggestions" data-i18n="group_templates_title">Автоподстановка групп</button>
+          </div>
+
+          <div class="template-editor-card template-editor-card--modal" data-template-panel="device-types">
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="device_types_title">Типы устройств</p>
+                <p class="helper-text helper-text--tight" data-i18n="device_types_note">
+                  Базовые типы остаются встроенными, а свои можно добавить под собственные сценарии и фильтры.
+                </p>
+              </div>
+              <button type="button" class="action-button action-button--ghost" id="add-custom-device-type-button" data-i18n="add_device_type">Добавить тип</button>
+            </div>
+
+            <div class="device-types-builtin">
+              <span class="pill" data-i18n="device_type_server">Server</span>
+              <span class="pill" data-i18n="device_type_container">Container</span>
+              <span class="pill" data-i18n="device_type_iot">IoT</span>
+            </div>
+
+            <div id="custom-device-types-list" class="template-rules-list"></div>
+
+            <div class="template-editor-actions">
+              <button type="button" class="action-button" id="save-device-type-settings-button" data-i18n="save_device_types">Сохранить типы</button>
+              <button type="button" class="action-button action-button--ghost" id="reset-device-type-settings-button" data-i18n="reset_device_types">Сбросить типы</button>
+            </div>
+
+            <div id="device-type-settings-status" class="result-card result-card--muted"></div>
+          </div>
+
+          <div class="template-editor-card template-editor-card--modal" data-template-panel="group-suggestions" hidden>
             <div class="template-editor-heading">
               <div>
                 <p class="helper-title" data-i18n="templates_form_title">Правила подстановки</p>
@@ -865,12 +1008,26 @@
               <button type="button" class="action-button action-button--ghost" id="add-template-rule-button" data-i18n="add_template_rule">Добавить правило</button>
             </div>
 
-            <div id="template-rules-list" class="template-rules-list"></div>
+            <details class="template-settings-group">
+              <summary class="template-settings-group__summary" data-i18n="bundled_templates_title">Комплектные правила</summary>
+              <p class="helper-text helper-text--tight" data-i18n="bundled_templates_note">
+                Эти правила встроены в ATLAS и используются как стартовый набор для автоматических рекомендаций.
+              </p>
+              <div id="bundled-template-rules-list" class="template-rules-list"></div>
+            </details>
+
+            <details class="template-settings-group">
+              <summary class="template-settings-group__summary" data-i18n="custom_templates_title">Пользовательские правила</summary>
+              <p class="helper-text helper-text--tight" data-i18n="custom_templates_note">
+                Добавляйте сюда свои правила. Они работают вместе с комплектными и дополняют их.
+              </p>
+              <div id="custom-template-rules-list" class="template-rules-list"></div>
+            </details>
 
             <details class="template-json-details">
               <summary class="template-json-summary" data-i18n="json_templates_title">JSON-шаблоны</summary>
               <p class="helper-text helper-text--tight" data-i18n="json_templates_note">
-                Хранятся в профиле пользователя и влияют на то, какая группа будет предложена по умолчанию.
+                JSON применяется только к пользовательским правилам и удобен для bulk-редактирования.
               </p>
 
               <textarea

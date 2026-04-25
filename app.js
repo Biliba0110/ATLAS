@@ -5,11 +5,12 @@ const THEME_ALIASES = {
   ocean: "aurora",
 };
 const SUPPORTED_THEMES = ["atlas", "ember", "aurora", "fuchsia", "mono", "solaris", "forest", "neon", "arctic", "lotus", "ruby", "tide"];
-const DEVICE_TYPES = {
-  server: "device_type_server",
-  container: "device_type_container",
-  iot: "device_type_iot",
-};
+const BUILTIN_DEVICE_TYPES = [
+  { id: "server", labelKey: "device_type_server" },
+  { id: "container", labelKey: "device_type_container" },
+  { id: "iot", labelKey: "device_type_iot" },
+];
+const BUILTIN_DEVICE_TYPE_IDS = new Set(BUILTIN_DEVICE_TYPES.map((item) => item.id));
 
 const DEFAULT_SETTINGS = {
   accentTheme: "atlas",
@@ -155,6 +156,7 @@ const state = {
 const preferences = {
   settings: { ...DEFAULT_SETTINGS },
   customGroupTemplates: [],
+  customDeviceTypes: [],
 };
 
 const elements = {
@@ -194,6 +196,8 @@ const elements = {
   closeSettingsButton: document.querySelector('[data-close-modal="settings-modal"]'),
   settingsNavButtons: [...document.querySelectorAll("[data-settings-tab]")],
   settingsSections: [...document.querySelectorAll("[data-settings-section]")],
+  templateTabButtons: [...document.querySelectorAll("[data-template-tab]")],
+  templatePanels: [...document.querySelectorAll("[data-template-panel]")],
   openPasswordModalButton: document.getElementById("open-password-modal-button"),
   passwordModal: document.getElementById("password-modal"),
   passwordModalClose: document.getElementById("password-modal-close"),
@@ -206,6 +210,11 @@ const elements = {
   closeModalButtons: [...document.querySelectorAll("[data-close-modal]")],
   dashboardAttentionList: document.getElementById("dashboard-summary-list"),
   dashboardHistoryList: document.getElementById("dashboard-history-list"),
+  missingTypeModal: document.getElementById("missing-type-modal"),
+  missingTypeForm: document.getElementById("missing-type-form"),
+  missingTypeTargetSelect: document.getElementById("missing-type-target-select"),
+  missingTypeDeviceList: document.getElementById("missing-type-device-list"),
+  missingTypeStatus: document.getElementById("missing-type-status"),
   deviceSuggestion: document.getElementById("device-suggestion"),
   deviceFormStatus: document.getElementById("device-form-status"),
   applySuggestionButton: document.getElementById("apply-suggestion-button"),
@@ -218,17 +227,24 @@ const elements = {
   settingsScanInterval: document.getElementById("settings-scan-interval"),
   settingsPingMeta: document.getElementById("settings-ping-meta"),
   settingsSubnetScanList: document.getElementById("settings-subnet-scan-list"),
+  deviceTypeSelect: document.querySelector('#device-form select[name="type"]'),
   saveProfileSettingsButton: document.getElementById("save-profile-settings-button"),
   profileSettingsStatus: document.getElementById("profile-settings-status"),
   saveInterfaceSettingsButton: document.getElementById("save-interface-settings-button"),
   interfaceSettingsStatus: document.getElementById("interface-settings-status"),
   serverSettingsStatus: document.getElementById("server-settings-status"),
   saveServerSettingsButton: document.getElementById("save-server-settings-button"),
-  templateRulesList: document.getElementById("template-rules-list"),
+  bundledTemplateRulesList: document.getElementById("bundled-template-rules-list"),
+  templateRulesList: document.getElementById("custom-template-rules-list"),
+  customDeviceTypesList: document.getElementById("custom-device-types-list"),
+  addCustomDeviceTypeButton: document.getElementById("add-custom-device-type-button"),
   addTemplateRuleButton: document.getElementById("add-template-rule-button"),
   templateEditor: document.getElementById("template-editor"),
   applyTemplateJsonButton: document.getElementById("apply-template-json-button"),
+  deviceTypeSettingsStatus: document.getElementById("device-type-settings-status"),
   templateSettingsStatus: document.getElementById("template-settings-status"),
+  saveDeviceTypeSettingsButton: document.getElementById("save-device-type-settings-button"),
+  resetDeviceTypeSettingsButton: document.getElementById("reset-device-type-settings-button"),
   saveTemplateSettingsButton: document.getElementById("save-template-settings-button"),
   resetTemplateSettingsButton: document.getElementById("reset-template-settings-button"),
   accessGroupStatus: document.getElementById("access-group-status"),
@@ -254,6 +270,12 @@ const elements = {
   statOccupied: document.getElementById("stat-occupied"),
   statAvailable: document.getElementById("stat-available"),
   exportJsonButton: document.getElementById("export-json-button"),
+  exportBackupButton: document.getElementById("export-backup-button"),
+  backupIncludeInventory: document.getElementById("backup-include-inventory"),
+  backupIncludeActivity: document.getElementById("backup-include-activity"),
+  backupIncludeSystem: document.getElementById("backup-include-system"),
+  backupIncludeAccess: document.getElementById("backup-include-access"),
+  backupIncludePreferences: document.getElementById("backup-include-preferences"),
   exportSubnetsCsvButton: document.getElementById("export-subnets-csv-button"),
   exportGroupsCsvButton: document.getElementById("export-groups-csv-button"),
   exportDevicesCsvButton: document.getElementById("export-devices-csv-button"),
@@ -275,10 +297,11 @@ let eventSource = null;
 let isManualScanRunning = false;
 let isDeviceSubmitting = false;
 let deviceGroupSelectionMode = "auto";
+let bundledGroupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
-let groupSuggestionTemplateSource = "bundled";
 let activeView = "dashboard";
 let activeSettingsSection = "profile";
+let activeTemplateSection = "device-types";
 let showAllDevicesInRegistry = false;
 const expandedGroupIds = new Set();
 let isAuthReady = false;
@@ -286,6 +309,8 @@ let interfaceSettingsBaseline = null;
 let editingSubnetId = "";
 let editingGroupId = "";
 let editingDeviceId = "";
+let editingAccessGroupId = "";
+let editingUserId = "";
 
 initialize().catch((error) => {
   console.error(error);
@@ -305,9 +330,53 @@ function t(key, vars = {}) {
   return template.replace(/\{(\w+)\}/g, (_, token) => String(vars[token] ?? ""));
 }
 
+function getAvailableDeviceTypes() {
+  const customTypes = normalizeCustomDeviceTypes(preferences.customDeviceTypes);
+  return [
+    ...BUILTIN_DEVICE_TYPES.map((item) => ({
+      id: item.id,
+      builtIn: true,
+      label: t(item.labelKey),
+    })),
+    ...customTypes.map((item) => ({
+      id: item.id,
+      builtIn: false,
+      label: item.label,
+    })),
+  ];
+}
+
+function getAvailableDeviceTypeIds() {
+  return new Set(getAvailableDeviceTypes().map((item) => item.id));
+}
+
+function rebuildEffectiveGroupSuggestionTemplates() {
+  const bundledTemplates = normalizeGroupSuggestionTemplates(bundledGroupSuggestionTemplates);
+  const customTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
+  groupSuggestionTemplates = [...bundledTemplates, ...customTemplates];
+}
+
+function isKnownDeviceType(type) {
+  return getAvailableDeviceTypeIds().has(String(type || "").trim().toLowerCase());
+}
+
+function humanizeDeviceType(type) {
+  return String(type || "")
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (symbol) => symbol.toUpperCase());
+}
+
 function getDeviceTypeLabel(type) {
-  const key = DEVICE_TYPES[type];
-  return key ? t(key) : type;
+  const normalizedType = String(type || "").trim().toLowerCase();
+  const builtIn = BUILTIN_DEVICE_TYPES.find((item) => item.id === normalizedType);
+  if (builtIn) {
+    return t(builtIn.labelKey);
+  }
+
+  const customType = normalizeCustomDeviceTypes(preferences.customDeviceTypes)
+    .find((item) => item.id === normalizedType);
+  return customType?.label || humanizeDeviceType(normalizedType) || type;
 }
 
 function getActionLabel(action) {
@@ -393,10 +462,16 @@ function normalizeUserPreferences(rawPreferences = {}) {
     : Array.isArray(rawSettings?.customGroupTemplates)
       ? rawSettings.customGroupTemplates
       : [];
+  const rawCustomDeviceTypes = Array.isArray(rawPreferences?.customDeviceTypes)
+    ? rawPreferences.customDeviceTypes
+    : Array.isArray(rawSettings?.customDeviceTypes)
+      ? rawSettings.customDeviceTypes
+      : [];
 
   return {
     settings: normalizeSettings(rawSettings),
     customGroupTemplates: rawCustomGroupTemplates,
+    customDeviceTypes: normalizeCustomDeviceTypes(rawCustomDeviceTypes),
   };
 }
 
@@ -449,9 +524,9 @@ function bindEvents() {
   elements.accessGroupForm.addEventListener("submit", handleAccessGroupSubmit);
   elements.userForm.addEventListener("submit", handleUserSubmit);
   elements.passwordForm.addEventListener("submit", handlePasswordSubmit);
-  elements.searchInput.addEventListener("input", renderDevicesTable);
-  elements.deviceFilterSelect?.addEventListener("change", renderDevicesTable);
-  elements.deviceGroupFilterSelect?.addEventListener("change", renderDevicesTable);
+  elements.searchInput.addEventListener("input", handleRegistryDeviceFiltersChange);
+  elements.deviceFilterSelect?.addEventListener("change", handleRegistryDeviceFiltersChange);
+  elements.deviceGroupFilterSelect?.addEventListener("change", handleRegistryDeviceFiltersChange);
   elements.ipCheckForm.addEventListener("submit", handleIpCheck);
   elements.logoutButton.addEventListener("click", handleLogout);
   elements.openPasswordModalButton.addEventListener("click", () => openPasswordModal(false));
@@ -513,15 +588,26 @@ function bindEvents() {
       setActiveSettingsSection(button.dataset.settingsTab);
     });
   });
+  elements.templateTabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveTemplateSection(button.dataset.templateTab);
+    });
+  });
   elements.saveServerSettingsButton.addEventListener("click", handleServerSettingsSave);
   elements.addTemplateRuleButton.addEventListener("click", handleAddTemplateRule);
   elements.templateRulesList.addEventListener("click", handleTemplateRuleListClick);
   elements.templateRulesList.addEventListener("input", syncTemplateJsonFromCards);
   elements.templateRulesList.addEventListener("change", syncTemplateJsonFromCards);
+  elements.addCustomDeviceTypeButton?.addEventListener("click", handleAddCustomDeviceType);
+  elements.customDeviceTypesList?.addEventListener("click", handleCustomDeviceTypeListClick);
+  elements.customDeviceTypesList?.addEventListener("input", handleCustomDeviceTypeListInput);
   elements.applyTemplateJsonButton.addEventListener("click", handleTemplateJsonApply);
+  elements.saveDeviceTypeSettingsButton?.addEventListener("click", handleDeviceTypeSettingsSave);
+  elements.resetDeviceTypeSettingsButton?.addEventListener("click", handleDeviceTypeSettingsReset);
   elements.saveTemplateSettingsButton.addEventListener("click", handleTemplateSettingsSave);
   elements.resetTemplateSettingsButton.addEventListener("click", handleTemplateSettingsReset);
   elements.exportJsonButton.addEventListener("click", exportJson);
+  elements.exportBackupButton?.addEventListener("click", exportBackup);
   elements.exportSubnetsCsvButton.addEventListener("click", exportSubnetsCsv);
   elements.exportGroupsCsvButton.addEventListener("click", exportGroupsCsv);
   elements.exportDevicesCsvButton.addEventListener("click", exportDevicesCsv);
@@ -532,9 +618,13 @@ function bindEvents() {
   elements.subnetsTableBody.addEventListener("change", handleSubnetScanToggle);
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
+  elements.accessGroupsTableBody?.addEventListener("click", handleAccessGroupTableActions);
+  elements.usersTableBody?.addEventListener("click", handleUserAdminTableActions);
   elements.historySearchInput?.addEventListener("input", renderHistoryTable);
   elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
   elements.historyScopeFilter?.addEventListener("change", renderHistoryTable);
+  elements.dashboardAttentionList?.addEventListener("click", handleDashboardAttentionClick);
+  elements.missingTypeForm?.addEventListener("submit", handleMissingTypeSubmit);
   document.addEventListener("click", handleDocumentClick);
   window.addEventListener("focus", () => refreshState(true));
   window.addEventListener("keydown", handleGlobalKeydown);
@@ -550,16 +640,16 @@ async function loadGroupSuggestionTemplates() {
     const payload = await response.json();
     const normalizedTemplates = normalizeGroupSuggestionTemplates(payload);
     if (normalizedTemplates.length > 0) {
-      groupSuggestionTemplates = normalizedTemplates;
-      groupSuggestionTemplateSource = "bundled";
+      bundledGroupSuggestionTemplates = normalizedTemplates;
+      rebuildEffectiveGroupSuggestionTemplates();
       return;
     }
   } catch (error) {
     console.warn("Failed to load group suggestion templates, using fallback set.", error);
   }
 
-  groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
-  groupSuggestionTemplateSource = "default";
+  bundledGroupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
+  rebuildEffectiveGroupSuggestionTemplates();
 }
 
 async function restoreSession() {
@@ -582,11 +672,12 @@ async function restoreSession() {
 }
 
 async function finishAuthenticatedBootstrap() {
-  closeAuthScreen();
+  document.body.classList.add("app-ready");
   const stateLoaded = await refreshState();
   if (!stateLoaded || !state.auth?.authenticated) {
     return;
   }
+  closeAuthScreen();
   connectLiveStream();
   if (pollIntervalId) {
     window.clearInterval(pollIntervalId);
@@ -608,7 +699,7 @@ function normalizeGroupSuggestionTemplates(rawTemplates) {
       const deviceTypes = Array.isArray(template?.deviceTypes)
         ? template.deviceTypes
             .map((item) => String(item || "").trim().toLowerCase())
-            .filter((item) => DEVICE_TYPES[item])
+            .filter((item) => isKnownDeviceType(item))
         : [];
       const keywords = Array.isArray(template?.keywords)
         ? template.keywords
@@ -704,6 +795,47 @@ function renderSubnetScanSettings() {
   elements.settingsSubnetScanList.innerHTML = rows.join("");
 }
 
+function normalizeCustomDeviceTypes(rawTypes) {
+  if (!Array.isArray(rawTypes)) {
+    return [];
+  }
+
+  const seenIds = new Set();
+
+  return rawTypes
+    .map((entry, index) => {
+      const label = String(entry?.label || "").trim();
+      const suggestedId = String(entry?.id || "").trim() || slugifyDeviceTypeId(label, index);
+      const normalizedId = normalizeDeviceTypeValue(suggestedId);
+
+      if (!label || !normalizedId || BUILTIN_DEVICE_TYPE_IDS.has(normalizedId) || seenIds.has(normalizedId)) {
+        return null;
+      }
+
+      seenIds.add(normalizedId);
+      return {
+        id: normalizedId,
+        label,
+      };
+    })
+    .filter(Boolean);
+}
+
+function createBlankCustomDeviceType() {
+  return {
+    id: "",
+    label: "",
+  };
+}
+
+function slugifyDeviceTypeId(value, fallbackIndex = 0) {
+  const normalized = normalizeSearchableText(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return normalized || `device-type-${fallbackIndex + 1}`;
+}
+
 function createBlankTemplateRule() {
   return {
     id: "",
@@ -723,6 +855,7 @@ function slugifyTemplateId(value, fallbackIndex = 0) {
 
 function renderTemplateRuleCards(templates) {
   const effectiveTemplates = templates.length > 0 ? templates : [createBlankTemplateRule()];
+  const availableDeviceTypes = getAvailableDeviceTypes();
 
   elements.templateRulesList.innerHTML = effectiveTemplates.map((template, index) => {
     const selectedTypes = new Set(template.deviceTypes || []);
@@ -736,10 +869,8 @@ function renderTemplateRuleCards(templates) {
       deviceTypeSummary,
       template.keywords?.length ? t("template_keywords_count", { count: template.keywords.length }) : "",
     ].filter(Boolean).join(" · ");
-    const shouldOpen = !hasLabel || index === 0;
-
     return `
-      <details class="template-rule-card" data-template-id="${escapeHtml(template.id || "")}" ${shouldOpen ? "open" : ""}>
+      <details class="template-rule-card" data-template-id="${escapeHtml(template.id || "")}">
         <summary class="template-rule-summary">
           <div class="template-rule-summary__main">
             <strong class="template-rule-summary__title">${escapeHtml(title)}</strong>
@@ -764,16 +895,102 @@ function renderTemplateRuleCards(templates) {
           </div>
 
           <div class="template-rule-types">
-            ${Object.keys(DEVICE_TYPES).map((type) => `
+            ${availableDeviceTypes.map((type) => `
               <label class="checkbox-card">
-                <input type="checkbox" data-template-field="deviceType" value="${escapeHtml(type)}" ${selectedTypes.has(type) ? "checked" : ""}>
-                <span>${escapeHtml(getDeviceTypeLabel(type))}</span>
+                <input type="checkbox" data-template-field="deviceType" value="${escapeHtml(type.id)}" ${selectedTypes.has(type.id) ? "checked" : ""}>
+                <span>${escapeHtml(type.label)}</span>
               </label>
             `).join("")}
           </div>
 
           <div class="template-rule-actions">
             <button type="button" class="link-button" data-remove-template-rule="${index}">${escapeHtml(t("remove_template_rule"))}</button>
+          </div>
+        </div>
+      </details>
+    `;
+  }).join("");
+}
+
+function renderBundledTemplateRuleCards(templates) {
+  elements.bundledTemplateRulesList.innerHTML = templates.map((template) => {
+    const deviceTypeSummary = (template.deviceTypes || [])
+      .map((type) => getDeviceTypeLabel(type))
+      .join(" · ");
+    const summaryMeta = [
+      deviceTypeSummary,
+      template.keywords?.length ? t("template_keywords_count", { count: template.keywords.length }) : "",
+    ].filter(Boolean).join(" · ");
+
+    return `
+      <details class="template-rule-card">
+        <summary class="template-rule-summary">
+          <div class="template-rule-summary__main">
+            <strong class="template-rule-summary__title">${escapeHtml(template.label)}</strong>
+            <span class="template-rule-summary__meta">${escapeHtml(summaryMeta || t("template_rule_summary_empty"))}</span>
+          </div>
+          <span class="pill template-rule-summary__hint">${escapeHtml(t("template_bundled_badge"))}</span>
+        </summary>
+
+        <div class="template-rule-body">
+          <div class="template-rule-grid">
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("template_label_title"))}</span>
+              <input type="text" value="${escapeHtml(template.label || "")}" disabled>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("template_keywords_title"))}</span>
+              <input type="text" value="${escapeHtml((template.keywords || []).join(", "))}" disabled>
+            </label>
+          </div>
+
+          <div class="template-rule-types">
+            ${(template.deviceTypes || []).map((type) => `
+              <span class="pill">${escapeHtml(getDeviceTypeLabel(type))}</span>
+            `).join("")}
+          </div>
+        </div>
+      </details>
+    `;
+  }).join("");
+}
+
+function renderCustomDeviceTypeCards(deviceTypes) {
+  const effectiveTypes = deviceTypes.length > 0 ? deviceTypes : [createBlankCustomDeviceType()];
+
+  elements.customDeviceTypesList.innerHTML = effectiveTypes.map((deviceType, index) => {
+    const title = deviceType.label || t("device_type_custom_fallback", { index: index + 1 });
+    const typeId = deviceType.id || slugifyDeviceTypeId(deviceType.label, index);
+    const summaryMeta = typeId ? t("device_type_id_meta", { id: typeId }) : t("device_type_id_pending");
+
+    return `
+      <details class="template-rule-card" data-custom-device-type-id="${escapeHtml(deviceType.id || "")}">
+        <summary class="template-rule-summary">
+          <div class="template-rule-summary__main">
+            <strong class="template-rule-summary__title">${escapeHtml(title)}</strong>
+            <span class="template-rule-summary__meta">${escapeHtml(summaryMeta)}</span>
+          </div>
+          <span class="pill template-rule-summary__hint">${escapeHtml(t("device_type_edit_rule"))}</span>
+        </summary>
+
+        <div class="template-rule-body">
+          <div class="template-rule-grid">
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("device_type_label_title"))}</span>
+              <input type="text" data-device-type-field="label" value="${escapeHtml(deviceType.label || "")}" placeholder="${escapeHtml(t("device_type_label_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("device_type_label_note"))}</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("device_type_id_title"))}</span>
+              <input type="text" data-device-type-field="id" value="${escapeHtml(deviceType.id || "")}" placeholder="${escapeHtml(t("device_type_id_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("device_type_id_note"))}</span>
+            </label>
+          </div>
+
+          <div class="template-rule-actions">
+            <button type="button" class="link-button" data-remove-custom-device-type="${index}">${escapeHtml(t("remove_device_type"))}</button>
           </div>
         </div>
       </details>
@@ -791,7 +1008,7 @@ function collectTemplateRulesFromCards() {
       .filter(Boolean);
     const deviceTypes = [...row.querySelectorAll('[data-template-field="deviceType"]:checked')]
       .map((input) => input.value)
-      .filter((item) => DEVICE_TYPES[item]);
+      .filter((item) => isKnownDeviceType(item));
 
     if (!label && keywords.length === 0) {
       return null;
@@ -813,6 +1030,30 @@ function collectTemplateRulesFromCards() {
   return normalizedTemplates;
 }
 
+function collectCustomDeviceTypesFromCards() {
+  const rows = [...elements.customDeviceTypesList.querySelectorAll(".template-rule-card")];
+  const draftTypes = rows.map((row, index) => {
+    const label = String(row.querySelector('[data-device-type-field="label"]')?.value || "").trim();
+    const idValue = String(row.querySelector('[data-device-type-field="id"]')?.value || "").trim();
+
+    if (!label && !idValue) {
+      return null;
+    }
+
+    return {
+      id: idValue || slugifyDeviceTypeId(label, index),
+      label,
+    };
+  }).filter(Boolean);
+
+  const normalizedTypes = normalizeCustomDeviceTypes(draftTypes);
+  if (normalizedTypes.length !== draftTypes.length) {
+    throw new Error(t("device_types_invalid_form"));
+  }
+
+  return normalizedTypes;
+}
+
 function syncTemplateJsonFromCards() {
   try {
     const normalizedTemplates = collectTemplateRulesFromCards();
@@ -824,25 +1065,42 @@ function syncTemplateJsonFromCards() {
   }
 }
 
+function handleCustomDeviceTypeListInput() {
+  try {
+    const normalizedTypes = collectCustomDeviceTypesFromCards();
+    preferences.customDeviceTypes = normalizedTypes;
+    renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+    const templateDraft = (() => {
+      try {
+        return collectTemplateRulesFromCards();
+      } catch {
+        return normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
+      }
+    })();
+    renderTemplateRuleCards(templateDraft);
+    syncTemplateJsonFromCards();
+  } catch {
+    // Keep manual input intact until the form becomes valid.
+  }
+}
+
 function renderTemplateEditor() {
-  const effectiveTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
-  if (effectiveTemplates.length > 0) {
-    groupSuggestionTemplates = effectiveTemplates;
-    groupSuggestionTemplateSource = "user";
-  }
+  const bundledTemplates = normalizeGroupSuggestionTemplates(bundledGroupSuggestionTemplates);
+  const customTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
+  const customDeviceTypes = normalizeCustomDeviceTypes(preferences.customDeviceTypes);
 
-  renderTemplateRuleCards(groupSuggestionTemplates);
+  preferences.customDeviceTypes = customDeviceTypes;
+  preferences.customGroupTemplates = customTemplates;
+  rebuildEffectiveGroupSuggestionTemplates();
+  renderCustomDeviceTypeCards(customDeviceTypes);
+  renderBundledTemplateRuleCards(bundledTemplates);
+  renderTemplateRuleCards(customTemplates);
+  renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
   if (document.activeElement !== elements.templateEditor) {
-    elements.templateEditor.value = JSON.stringify(groupSuggestionTemplates, null, 2);
+    elements.templateEditor.value = JSON.stringify(customTemplates, null, 2);
   }
-
-  const sourceLabel =
-    groupSuggestionTemplateSource === "user"
-      ? t("templates_source_user")
-      : groupSuggestionTemplateSource === "bundled"
-        ? t("templates_source_bundled")
-        : t("templates_source_default");
-  setTemplateSettingsStatus(sourceLabel, "muted");
+  setTemplateSettingsStatus(t("custom_templates_note"), "muted");
+  setDeviceTypeSettingsStatus(t("device_types_note"), "muted");
 }
 
 function handleAddTemplateRule() {
@@ -850,12 +1108,24 @@ function handleAddTemplateRule() {
     try {
       return collectTemplateRulesFromCards();
     } catch {
-      return normalizeGroupSuggestionTemplates(groupSuggestionTemplates);
+      return normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
     }
   })();
 
   renderTemplateRuleCards([...currentTemplates, createBlankTemplateRule()]);
   syncTemplateJsonFromCards();
+}
+
+function handleAddCustomDeviceType() {
+  const currentTypes = (() => {
+    try {
+      return collectCustomDeviceTypesFromCards();
+    } catch {
+      return normalizeCustomDeviceTypes(preferences.customDeviceTypes);
+    }
+  })();
+
+  renderCustomDeviceTypeCards([...currentTypes, createBlankCustomDeviceType()]);
 }
 
 function handleTemplateRuleListClick(event) {
@@ -874,9 +1144,44 @@ function handleTemplateRuleListClick(event) {
   syncTemplateJsonFromCards();
 }
 
+function handleCustomDeviceTypeListClick(event) {
+  const removeButton = event.target.closest("[data-remove-custom-device-type]");
+  if (!removeButton) {
+    return;
+  }
+
+  const row = removeButton.closest(".template-rule-card");
+  row?.remove();
+
+  if (!elements.customDeviceTypesList.children.length) {
+    renderCustomDeviceTypeCards([createBlankCustomDeviceType()]);
+  }
+
+  try {
+    preferences.customDeviceTypes = collectCustomDeviceTypesFromCards();
+  } catch {
+    preferences.customDeviceTypes = normalizeCustomDeviceTypes(preferences.customDeviceTypes);
+  }
+  renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+  const templateDraft = (() => {
+    try {
+      return collectTemplateRulesFromCards();
+    } catch {
+      return normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
+    }
+  })();
+  renderTemplateRuleCards(templateDraft);
+  syncTemplateJsonFromCards();
+}
+
 function setTemplateSettingsStatus(message, tone = "muted") {
   elements.templateSettingsStatus.className = `result-card result-card--${tone}`;
   elements.templateSettingsStatus.textContent = message;
+}
+
+function setDeviceTypeSettingsStatus(message, tone = "muted") {
+  elements.deviceTypeSettingsStatus.className = `result-card result-card--${tone}`;
+  elements.deviceTypeSettingsStatus.textContent = message;
 }
 
 function setDeviceFormStatus(message, tone = "muted", visible = true) {
@@ -1040,12 +1345,32 @@ async function handleServerSettingsSave() {
   }
 }
 
+async function handleDeviceTypeSettingsSave() {
+  try {
+    const normalizedDeviceTypes = collectCustomDeviceTypesFromCards();
+    preferences.customDeviceTypes = normalizedDeviceTypes;
+    await savePreferences({ customDeviceTypes: normalizedDeviceTypes });
+    renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+    renderTemplateEditor();
+    setDeviceTypeSettingsStatus(t("device_types_saved"), "ok");
+  } catch (error) {
+    setDeviceTypeSettingsStatus(error.message || t("device_types_invalid_form"), "danger");
+  }
+}
+
+async function handleDeviceTypeSettingsReset() {
+  preferences.customDeviceTypes = [];
+  await savePreferences({ customDeviceTypes: [] });
+  renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+  renderTemplateEditor();
+  setDeviceTypeSettingsStatus(t("device_types_reset_done"), "warn");
+}
+
 async function handleTemplateSettingsSave() {
   try {
     const normalizedTemplates = collectTemplateRulesFromCards();
     preferences.customGroupTemplates = normalizedTemplates;
-    groupSuggestionTemplates = normalizedTemplates;
-    groupSuggestionTemplateSource = "user";
+    rebuildEffectiveGroupSuggestionTemplates();
     await savePreferences({ customGroupTemplates: normalizedTemplates });
     renderDeviceGroupOptions();
     updateSuggestedIp();
@@ -1060,13 +1385,8 @@ async function handleTemplateJsonApply() {
   try {
     const parsedTemplates = JSON.parse(elements.templateEditor.value);
     const normalizedTemplates = normalizeGroupSuggestionTemplates(parsedTemplates);
-    if (normalizedTemplates.length === 0) {
-      throw new Error(t("templates_invalid"));
-    }
-
     preferences.customGroupTemplates = normalizedTemplates;
-    groupSuggestionTemplates = normalizedTemplates;
-    groupSuggestionTemplateSource = "user";
+    rebuildEffectiveGroupSuggestionTemplates();
     await savePreferences({ customGroupTemplates: normalizedTemplates });
     renderDeviceGroupOptions();
     updateSuggestedIp();
@@ -1079,7 +1399,7 @@ async function handleTemplateJsonApply() {
 
 async function handleTemplateSettingsReset() {
   preferences.customGroupTemplates = [];
-  await loadGroupSuggestionTemplates();
+  rebuildEffectiveGroupSuggestionTemplates();
   await savePreferences({ customGroupTemplates: [] });
   renderDeviceGroupOptions();
   updateSuggestedIp();
@@ -1099,7 +1419,44 @@ function prepareSubnetModal(subnet = null) {
     elements.subnetForm.elements.rangeEnd.value = subnet.rangeEnd;
     elements.subnetForm.elements.note.value = subnet.note || "";
     elements.subnetForm.elements.accessGroupId.value = subnet.accessGroupId || "";
+    elements.subnetForm.elements.scanEnabled.checked = Boolean(subnet.scanEnabled);
+  } else {
+    elements.subnetForm.elements.scanEnabled.checked = true;
   }
+}
+
+function prepareAccessGroupForm(accessGroup = null) {
+  editingAccessGroupId = accessGroup?.id || "";
+  elements.accessGroupForm.reset();
+  const submitButton = elements.accessGroupForm.querySelector('[type="submit"]');
+  if (submitButton) {
+    submitButton.textContent = accessGroup ? t("update_access_group") : t("save_access_group");
+  }
+  if (accessGroup) {
+    elements.accessGroupForm.elements.name.value = accessGroup.name;
+    elements.accessGroupForm.elements.description.value = accessGroup.description || "";
+  }
+}
+
+function prepareUserForm(user = null) {
+  editingUserId = user?.id || "";
+  elements.userForm.reset();
+  const passwordInput = elements.userForm.elements.password;
+  const submitButton = elements.userForm.querySelector('[type="submit"]');
+  if (submitButton) {
+    submitButton.textContent = user ? t("update_user") : t("save_user");
+  }
+  if (user) {
+    elements.userForm.elements.username.value = user.username;
+    elements.userForm.elements.displayName.value = user.displayName || "";
+    elements.userForm.elements.role.value = user.role || "viewer";
+    passwordInput.value = "";
+    passwordInput.required = false;
+  } else {
+    passwordInput.required = true;
+  }
+  renderUserAccessGroupOptions(user?.accessGroupIds || []);
+  syncPasswordToggleButtons(elements.userForm);
 }
 
 function prepareGroupModal(group = null) {
@@ -1123,13 +1480,13 @@ function prepareDeviceModal(device = null) {
   setDeviceFormPending(false);
   elements.deviceModalTitle.textContent = device ? t("edit_device") : t("add_device");
   elements.deviceSubmitButton.textContent = device ? t("update_device") : t("save_device");
+  renderDeviceTypeOptions(device?.type || "server");
   if (device) {
     const subnet = resolveDeviceSubnet(device);
     const group = resolveDeviceGroup(device, subnet);
     elements.deviceForm.elements.name.value = device.name;
     elements.deviceForm.elements.ip.value = device.ip;
     elements.deviceForm.elements.mac.value = device.mac || "";
-    elements.deviceForm.elements.type.value = device.type;
     elements.subnetSelect.value = subnet?.id || device.subnetId || "";
     renderDeviceGroupOptions(group?.id || "");
     elements.deviceGroupSelect.value = group?.id || "";
@@ -1305,22 +1662,18 @@ function applyAuthSession(session) {
 function applyPreferences(nextPreferences) {
   preferences.settings = nextPreferences.settings;
   preferences.customGroupTemplates = nextPreferences.customGroupTemplates;
+  preferences.customDeviceTypes = nextPreferences.customDeviceTypes;
   persistCachedInterfaceSettings(preferences.settings);
-  const normalizedCustomTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
-  if (normalizedCustomTemplates.length > 0) {
-    groupSuggestionTemplates = normalizedCustomTemplates;
-    groupSuggestionTemplateSource = "user";
-  } else if (groupSuggestionTemplateSource === "user") {
-    groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
-    groupSuggestionTemplateSource = "default";
-  }
+  rebuildEffectiveGroupSuggestionTemplates();
   applyVisualSettings();
   applyLocalizedUi();
+  renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
 }
 
 function openAuthScreen(session = null) {
   applyAuthSession(session);
   closeUserMenu();
+  document.body.classList.add("app-ready");
   elements.authScreen.hidden = false;
   document.body.classList.add("auth-open");
   elements.authStatus.className = "result-card result-card--muted";
@@ -1424,6 +1777,7 @@ async function savePreferences(partial = null) {
   const payload = partial || {
     ...preferences.settings,
     customGroupTemplates: preferences.customGroupTemplates,
+    customDeviceTypes: preferences.customDeviceTypes,
   };
   const savedPreferences = await apiRequest("/preferences", {
     method: "PATCH",
@@ -1447,6 +1801,9 @@ function renderPermissionAwareUi() {
   elements.deviceForm.querySelector('[type="submit"]').disabled = !canWrite || isDeviceSubmitting;
   elements.groupForm.querySelector('[type="submit"]').disabled = !canWrite;
   elements.importButton.disabled = !isAdmin;
+  if (elements.exportBackupButton) {
+    elements.exportBackupButton.disabled = !isAdmin;
+  }
   elements.saveProfileSettingsButton.disabled = !state.auth?.authenticated;
   elements.saveInterfaceSettingsButton.disabled = !state.auth?.authenticated;
   elements.saveServerSettingsButton.disabled = !Boolean(capabilities.canManageServerSettings);
@@ -1455,6 +1812,14 @@ function renderPermissionAwareUi() {
   elements.clearDataButton.disabled = !isAdmin;
   elements.saveTemplateSettingsButton.disabled = !state.auth?.authenticated;
   elements.resetTemplateSettingsButton.disabled = !state.auth?.authenticated;
+  elements.saveDeviceTypeSettingsButton.disabled = !state.auth?.authenticated;
+  elements.resetDeviceTypeSettingsButton.disabled = !state.auth?.authenticated;
+  if (elements.addCustomDeviceTypeButton) {
+    elements.addCustomDeviceTypeButton.disabled = !state.auth?.authenticated;
+  }
+  if (elements.addTemplateRuleButton) {
+    elements.addTemplateRuleButton.disabled = !state.auth?.authenticated;
+  }
 
   elements.adminPanels.forEach((panel) => {
     panel.hidden = !isAdmin;
@@ -1464,9 +1829,18 @@ function renderPermissionAwareUi() {
 }
 
 function renderAdminPanels() {
+  if (!editingAccessGroupId) {
+    prepareAccessGroupForm();
+  }
+  if (!editingUserId) {
+    prepareUserForm();
+  }
   renderAccessGroupsTable();
   renderUsersTable();
-  renderUserAccessGroupOptions();
+  const editingUser = editingUserId
+    ? (state.admin?.users || []).find((entry) => entry.id === editingUserId) || null
+    : null;
+  renderUserAccessGroupOptions(editingUser?.accessGroupIds || []);
 }
 
 function setActiveSettingsSection(sectionName) {
@@ -1494,6 +1868,24 @@ function setActiveSettingsSection(sectionName) {
     const isAdminOnly = section.classList.contains("admin-only");
     const isActive = sectionNameForNode === activeSettingsSection;
     section.hidden = isAdminOnly ? !isAdmin || !isActive : !isActive;
+  });
+
+  if (activeSettingsSection === "templates") {
+    setActiveTemplateSection(activeTemplateSection);
+  }
+}
+
+function setActiveTemplateSection(sectionName) {
+  const resolvedSection = sectionName || "device-types";
+  activeTemplateSection = resolvedSection;
+
+  elements.templateTabButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.templateTab === activeTemplateSection);
+    button.setAttribute("aria-selected", button.dataset.templateTab === activeTemplateSection ? "true" : "false");
+  });
+
+  elements.templatePanels.forEach((panel) => {
+    panel.hidden = panel.dataset.templatePanel !== activeTemplateSection;
   });
 }
 
@@ -1612,6 +2004,7 @@ async function handleSubnetSubmit(event) {
       cidr: formData.get("cidr"),
       rangeStart: formData.get("rangeStart"),
       rangeEnd: formData.get("rangeEnd"),
+      scanEnabled: formData.get("scanEnabled") === "on",
       accessGroupId: formData.get("accessGroupId"),
       note: formData.get("note"),
       createdAt: currentSubnet?.createdAt || new Date().toISOString(),
@@ -1713,6 +2106,16 @@ function handleStatNavigation(target) {
   }
 }
 
+function handleRegistryDeviceFiltersChange() {
+  renderDevicesTable();
+  const searchTerm = normalizeSearch(elements.searchInput?.value || "");
+  const quickFilter = elements.deviceFilterSelect?.value || "all";
+  const groupFilter = elements.deviceGroupFilterSelect?.value || "";
+  if (searchTerm || quickFilter !== "all" || groupFilter) {
+    document.getElementById("registry-panel-devices")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
 async function handleGroupSubmit(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1796,19 +2199,26 @@ async function handleGroupSubmit(event) {
 
 async function handleAccessGroupSubmit(event) {
   event.preventDefault();
-  const formData = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const formData = new FormData(form);
 
   try {
-    await apiRequest("/admin/access-groups", {
-      method: "POST",
+    const isEditing = Boolean(editingAccessGroupId);
+    await apiRequest(isEditing ? `/admin/access-groups/${encodeURIComponent(editingAccessGroupId)}` : "/admin/access-groups", {
+      method: isEditing ? "PATCH" : "POST",
       body: JSON.stringify({
         name: formData.get("name"),
         description: formData.get("description"),
       }),
     });
-    event.currentTarget.reset();
+    form.reset();
+    editingAccessGroupId = "";
+    const submitButton = form.querySelector('[type="submit"]');
+    if (submitButton) {
+      submitButton.textContent = t("save_access_group");
+    }
     await refreshState(true);
-    setAccessGroupStatus(t("access_group_saved"), "ok");
+    setAccessGroupStatus(t(isEditing ? "access_group_updated" : "access_group_saved"), "ok");
   } catch (error) {
     setAccessGroupStatus(error.message, "danger");
   }
@@ -1816,27 +2226,172 @@ async function handleAccessGroupSubmit(event) {
 
 async function handleUserSubmit(event) {
   event.preventDefault();
-  const formData = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const formData = new FormData(form);
   const accessGroupIds = [...elements.userAccessGroupOptions.querySelectorAll('input[type="checkbox"]:checked')]
     .map((input) => input.value);
 
   try {
-    await apiRequest("/admin/users", {
-      method: "POST",
+    const isEditing = Boolean(editingUserId);
+    await apiRequest(isEditing ? `/admin/users/${encodeURIComponent(editingUserId)}` : "/admin/users", {
+      method: isEditing ? "PATCH" : "POST",
       body: JSON.stringify({
         username: formData.get("username"),
         displayName: formData.get("displayName"),
         role: formData.get("role"),
         password: formData.get("password"),
         accessGroupIds,
-        mustChangePassword: true,
+        mustChangePassword: isEditing ? undefined : true,
       }),
     });
-    event.currentTarget.reset();
-    syncPasswordToggleButtons(event.currentTarget);
+    form.reset();
+    editingUserId = "";
+    const submitButton = form.querySelector('[type="submit"]');
+    if (submitButton) {
+      submitButton.textContent = t("save_user");
+    }
+    syncPasswordToggleButtons(form);
     renderUserAccessGroupOptions();
     await refreshState(true);
-    setUserStatus(t("user_saved"), "ok");
+    setUserStatus(t(isEditing ? "user_updated" : "user_saved"), "ok");
+  } catch (error) {
+    setUserStatus(error.message, "danger");
+  }
+}
+
+async function handleAccessGroupTableActions(event) {
+  const editButton = event.target.closest("[data-edit-access-group]");
+  if (editButton) {
+    const accessGroup = (state.admin?.accessGroups || []).find((entry) => entry.id === editButton.dataset.editAccessGroup);
+    if (!accessGroup) {
+      return;
+    }
+    openSettingsModal("administration");
+    prepareAccessGroupForm(accessGroup);
+    document.getElementById("admin-access-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  const deleteButton = event.target.closest("[data-delete-access-group]");
+  if (!deleteButton) {
+    return;
+  }
+
+  const accessGroup = (state.admin?.accessGroups || []).find((entry) => entry.id === deleteButton.dataset.deleteAccessGroup);
+  if (!accessGroup) {
+    return;
+  }
+
+  const confirmed = window.confirm(t("delete_access_group_confirm", { name: accessGroup.name }));
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiRequest(`/admin/access-groups/${encodeURIComponent(accessGroup.id)}`, { method: "DELETE" });
+    if (editingAccessGroupId === accessGroup.id) {
+      prepareAccessGroupForm();
+    }
+    await refreshState(true);
+    setAccessGroupStatus(t("access_group_deleted", { name: accessGroup.name }), "ok");
+  } catch (error) {
+    setAccessGroupStatus(error.message, "danger");
+  }
+}
+
+async function handleUserAdminTableActions(event) {
+  const editButton = event.target.closest("[data-edit-user]");
+  if (editButton) {
+    const user = (state.admin?.users || []).find((entry) => entry.id === editButton.dataset.editUser);
+    if (!user) {
+      return;
+    }
+    openSettingsModal("administration");
+    prepareUserForm(user);
+    document.getElementById("admin-users-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  const resetButton = event.target.closest("[data-reset-user-password]");
+  if (resetButton) {
+    const user = (state.admin?.users || []).find((entry) => entry.id === resetButton.dataset.resetUserPassword);
+    if (!user) {
+      return;
+    }
+    const newPassword = window.prompt(t("reset_password_prompt", { name: user.username }), "");
+    if (newPassword === null) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/admin/users/${encodeURIComponent(user.id)}/reset-password`, {
+        method: "POST",
+        body: JSON.stringify({ newPassword }),
+      });
+      await refreshState(true);
+      setUserStatus(t("user_password_reset_done", { name: user.username }), "ok");
+    } catch (error) {
+      setUserStatus(error.message, "danger");
+    }
+    return;
+  }
+
+  const toggleButton = event.target.closest("[data-toggle-user-active]");
+  if (toggleButton) {
+    const user = (state.admin?.users || []).find((entry) => entry.id === toggleButton.dataset.toggleUserActive);
+    if (!user) {
+      return;
+    }
+
+    const nextIsActive = !user.isActive;
+    const confirmed = window.confirm(
+      t(nextIsActive ? "enable_user_confirm" : "disable_user_confirm", { name: user.username })
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/admin/users/${encodeURIComponent(user.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          username: user.username,
+          displayName: user.displayName,
+          role: user.role,
+          accessGroupIds: user.accessGroupIds || [],
+          isActive: nextIsActive,
+        }),
+      });
+      await refreshState(true);
+      setUserStatus(t(nextIsActive ? "user_enabled" : "user_disabled", { name: user.username }), "ok");
+    } catch (error) {
+      setUserStatus(error.message, "danger");
+    }
+    return;
+  }
+
+  const deleteButton = event.target.closest("[data-delete-user]");
+  if (!deleteButton) {
+    return;
+  }
+
+  const deleteTarget = (state.admin?.users || []).find((entry) => entry.id === deleteButton.dataset.deleteUser);
+  if (!deleteTarget) {
+    return;
+  }
+
+  const deleteConfirmed = window.confirm(t("delete_user_confirm", { name: deleteTarget.username }));
+  if (!deleteConfirmed) {
+    return;
+  }
+
+  try {
+    await apiRequest(`/admin/users/${encodeURIComponent(deleteTarget.id)}`, { method: "DELETE" });
+    if (editingUserId === deleteTarget.id) {
+      prepareUserForm();
+    }
+    await refreshState(true);
+    setUserStatus(t("user_deleted", { name: deleteTarget.username }), "ok");
   } catch (error) {
     setUserStatus(error.message, "danger");
   }
@@ -2173,15 +2728,7 @@ async function rescanScopeForDevice(device, selectedGroupId = "") {
 }
 
 function exportJson() {
-  const payload = {
-    exportedAt: new Date().toISOString(),
-    version: "0.2",
-    subnets: state.subnets,
-    groups: state.groups,
-    devices: state.devices,
-    scanResults: state.scanResults,
-    history: state.history,
-  };
+  const payload = serializeSnapshotPayload(state);
 
   downloadFile(
     `atlas-${timestampForFile()}.json`,
@@ -2191,9 +2738,52 @@ function exportJson() {
   closeModal("export-modal");
 }
 
+async function exportBackup() {
+  const include = {
+    inventory: Boolean(elements.backupIncludeInventory?.checked),
+    activity: Boolean(elements.backupIncludeActivity?.checked),
+    system: Boolean(elements.backupIncludeSystem?.checked),
+    access: Boolean(elements.backupIncludeAccess?.checked),
+    preferences: Boolean(elements.backupIncludePreferences?.checked),
+  };
+
+  if (!Object.values(include).some(Boolean)) {
+    showToast(t("backup_export_select_section"), true);
+    return;
+  }
+
+  try {
+    const backup = await apiRequest("/admin/backup/export", {
+      method: "POST",
+      body: JSON.stringify({ include }),
+    });
+
+    downloadFile(
+      `atlas-backup-${timestampForFile()}.json`,
+      JSON.stringify(backup, null, 2),
+      "application/json"
+    );
+    closeModal("export-modal");
+    showToast(t("backup_export_done"));
+  } catch (error) {
+    showToast(error.message || t("server_data_load_failed"), true);
+  }
+}
+
 function exportSubnetsCsv() {
-  const rows = state.subnets.map((subnet) => ({
-    [t("export_header_id")]: subnet.id,
+  const rows = [...state.subnets]
+    .sort((left, right) => {
+      const networkDiff = left.networkInt - right.networkInt;
+      if (networkDiff !== 0) {
+        return networkDiff;
+      }
+      const maskDiff = Number(left.maskBits || 0) - Number(right.maskBits || 0);
+      if (maskDiff !== 0) {
+        return maskDiff;
+      }
+      return String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" });
+    })
+    .map((subnet) => ({
     [t("export_header_name")]: subnet.name,
     [t("export_header_cidr")]: subnet.cidr,
     [t("export_header_network")]: subnet.network,
@@ -2202,7 +2792,7 @@ function exportSubnetsCsv() {
     [t("export_header_pool_end")]: subnet.rangeEnd,
     [t("export_header_usable_hosts")]: subnet.usableHosts,
     [t("export_header_note")]: subnet.note,
-  }));
+    }));
 
   downloadFile(
     `atlas-subnets-${timestampForFile()}.csv`,
@@ -2213,19 +2803,31 @@ function exportSubnetsCsv() {
 }
 
 function exportGroupsCsv() {
-  const rows = state.groups.map((group) => {
-    const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
-    return {
-      [t("export_header_id")]: group.id,
-      [t("export_header_name")]: group.name,
-      [t("export_header_subnet_id")]: group.subnetId,
-      [t("export_header_subnet")]: subnet?.name || "",
-      [t("export_header_cidr")]: subnet?.cidr || "",
-      [t("export_header_range_start")]: group.rangeStart,
-      [t("export_header_range_end")]: group.rangeEnd,
-      [t("export_header_note")]: group.note,
-    };
-  });
+  const rows = [...state.groups]
+    .sort((left, right) => {
+      const leftSubnet = state.subnets.find((entry) => entry.id === left.subnetId);
+      const rightSubnet = state.subnets.find((entry) => entry.id === right.subnetId);
+      const subnetDiff = Number(leftSubnet?.networkInt || 0) - Number(rightSubnet?.networkInt || 0);
+      if (subnetDiff !== 0) {
+        return subnetDiff;
+      }
+      const rangeDiff = ipToInt(left.rangeStart) - ipToInt(right.rangeStart);
+      if (rangeDiff !== 0) {
+        return rangeDiff;
+      }
+      return String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" });
+    })
+    .map((group) => {
+      const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
+      return {
+        [t("export_header_name")]: group.name,
+        [t("export_header_subnet")]: subnet?.name || "",
+        [t("export_header_cidr")]: subnet?.cidr || "",
+        [t("export_header_range_start")]: group.rangeStart,
+        [t("export_header_range_end")]: group.rangeEnd,
+        [t("export_header_note")]: group.note,
+      };
+    });
 
   downloadFile(
     `atlas-groups-${timestampForFile()}.csv`,
@@ -2236,25 +2838,34 @@ function exportGroupsCsv() {
 }
 
 function exportDevicesCsv() {
-  const rows = state.devices.map((device) => {
-    const subnet = resolveDeviceSubnet(device);
-    const group = resolveDeviceGroup(device, subnet);
-    const pingState = getPingState(device.ip);
-    return {
-      [t("export_header_id")]: device.id,
-      [t("export_header_name")]: device.name,
-      [t("export_header_ip")]: device.ip,
-      [t("export_header_mac")]: device.mac || "",
-      [t("export_header_type")]: getDeviceTypeLabel(device.type),
-      [t("export_header_subnet_id")]: device.subnetId || "",
-      [t("export_header_subnet")]: subnet?.name || "",
-      [t("export_header_cidr")]: subnet?.cidr || "",
-      [t("export_header_group_id")]: group?.id || "",
-      [t("export_header_group")]: group?.name || "",
-      [t("export_header_ping")]: pingState ? (pingState.isReachable ? "online" : "offline") : "",
-      [t("export_header_note")]: device.note,
-    };
-  });
+  const rows = [...state.devices]
+    .sort((left, right) => {
+      const subnetDiff = Number(resolveDeviceSubnet(left)?.networkInt || 0) - Number(resolveDeviceSubnet(right)?.networkInt || 0);
+      if (subnetDiff !== 0) {
+        return subnetDiff;
+      }
+      const ipDiff = ipToInt(left.ip) - ipToInt(right.ip);
+      if (ipDiff !== 0) {
+        return ipDiff;
+      }
+      return String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" });
+    })
+    .map((device) => {
+      const subnet = resolveDeviceSubnet(device);
+      const group = resolveDeviceGroup(device, subnet);
+      const pingState = getPingState(device.ip);
+      return {
+        [t("export_header_name")]: device.name,
+        [t("export_header_ip")]: device.ip,
+        [t("export_header_mac")]: device.mac || "",
+        [t("export_header_type")]: device.type || device.unknownType || "",
+        [t("export_header_subnet")]: subnet?.name || "",
+        [t("export_header_cidr")]: subnet?.cidr || "",
+        [t("export_header_group")]: group?.name || "",
+        [t("export_header_ping")]: pingState ? (pingState.isReachable ? "online" : "offline") : "",
+        [t("export_header_note")]: device.note,
+      };
+    });
 
   downloadFile(
     `atlas-devices-${timestampForFile()}.csv`,
@@ -2274,23 +2885,51 @@ async function handleImportFile(event) {
 
   try {
     const text = await file.text();
-    const shouldReplace = window.confirm(t("import_confirm_replace"));
+    const parsedJson = file.name.toLowerCase().endsWith(".json") ? JSON.parse(text) : null;
 
-    if (file.name.toLowerCase().endsWith(".json")) {
-      importJson(text, shouldReplace, state);
-    } else if (file.name.toLowerCase().endsWith(".csv")) {
-      importCsv(text, shouldReplace, state);
+    if (parsedJson && parsedJson.kind === "atlas-backup") {
+      const confirmed = window.confirm(t("backup_import_confirm"));
+      if (!confirmed) {
+        return;
+      }
+
+      const result = await apiRequest("/admin/backup/import", {
+        method: "POST",
+        body: JSON.stringify({ backup: parsedJson }),
+      });
+
+      if (result?.requiresReauth) {
+        disconnectLiveStream();
+        if (pollIntervalId) {
+          window.clearInterval(pollIntervalId);
+          pollIntervalId = null;
+        }
+        showToast(t("backup_import_requires_reauth"));
+        window.location.reload();
+        return;
+      }
+
+      await refreshState(true);
+      showToast(t("backup_import_done", { name: file.name }));
     } else {
-      throw new Error(t("import_supported_only"));
+      const shouldReplace = window.confirm(t("import_confirm_replace"));
+
+      if (parsedJson) {
+        importJson(parsedJson, shouldReplace, state);
+      } else if (file.name.toLowerCase().endsWith(".csv")) {
+        importCsv(text, shouldReplace, state);
+      } else {
+        throw new Error(t("import_supported_only"));
+      }
+
+      await apiRequest("/state", {
+        method: "PUT",
+        body: JSON.stringify(serializeSnapshotPayload(state)),
+      });
+
+      await refreshState(true);
+      showToast(t("import_success", { name: file.name }));
     }
-
-    await apiRequest("/state", {
-      method: "PUT",
-      body: JSON.stringify(state),
-    });
-
-    await refreshState(true);
-    showToast(t("import_success", { name: file.name }));
   } catch (error) {
     applyState(snapshotBeforeImport);
     renderAll();
@@ -2300,8 +2939,7 @@ async function handleImportFile(event) {
   }
 }
 
-function importJson(text, replace, targetState) {
-  const parsed = JSON.parse(text);
+function importJson(parsed, replace, targetState) {
   const normalized = normalizeState(parsed, replace ? [] : targetState.groups);
 
   if (replace) {
@@ -2344,14 +2982,17 @@ function importCsv(text, replace, targetState) {
 
   if (looksLikeSubnetCsv) {
     const importedSubnets = rows.map((row) =>
-      normalizeSubnet({
-        id: row.id || createId(),
-        name: row.name,
-        cidr: row.cidr,
-        rangeStart: row.range_start || row.rangeStart,
-        rangeEnd: row.range_end || row.rangeEnd,
-        note: row.note,
-      })
+      {
+        const existingSubnet = findExistingSubnetForCsv(row, targetState.subnets);
+        return normalizeSubnet({
+          id: row.id || existingSubnet?.id || createId(),
+          name: row.name,
+          cidr: row.cidr,
+          rangeStart: row.range_start || row.rangeStart,
+          rangeEnd: row.range_end || row.rangeEnd,
+          note: row.note,
+        });
+      }
     );
 
     targetState.subnets = replace ? importedSubnets : mergeById(targetState.subnets, importedSubnets);
@@ -2369,10 +3010,12 @@ function importCsv(text, replace, targetState) {
         throw new Error(t("csv_group_subnet_missing", { row: index + 2 }));
       }
 
+      const existingGroup = findExistingGroupForCsv(row, subnet.id, targetState.groups);
+
       importedGroups.push(
         normalizeRangeGroup(
           {
-            id: row.id || createId(),
+            id: row.id || existingGroup?.id || createId(),
             subnetId: subnet.id,
             name: row.name,
             rangeStart: row.range_start || row.rangeStart,
@@ -2391,9 +3034,10 @@ function importCsv(text, replace, targetState) {
   if (looksLikeDeviceCsv) {
     const importedDevices = rows.map((row) => {
       const subnet = findSubnetByReference(row, targetState.subnets);
+      const existingDevice = findExistingDeviceForCsv(row, targetState.devices);
       return normalizeDevice(
         {
-          id: row.id || createId(),
+          id: row.id || existingDevice?.id || createId(),
           name: row.name,
           ip: row.ip,
           mac: row.mac,
@@ -2563,6 +3207,17 @@ async function handleGroupTableActions(event) {
     return;
   }
 
+  const editDeviceButton = event.target.closest("[data-edit-device]");
+  if (editDeviceButton) {
+    const device = state.devices.find((entry) => entry.id === editDeviceButton.dataset.editDevice);
+    if (!device) {
+      return;
+    }
+    prepareDeviceModal(device);
+    openModal("device-modal");
+    return;
+  }
+
   const button = event.target.closest("[data-delete-group]");
   if (!button) {
     return;
@@ -2664,14 +3319,13 @@ function renderAll() {
     syncSettingsForm();
   }
   renderSubnetOptions();
+  renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
   renderDeviceGroupFilterOptions();
   renderSubnetsTable();
   renderGroupsTable();
   renderDevicesTable();
   renderHistoryTable();
-  renderAccessGroupsTable();
-  renderUsersTable();
-  renderUserAccessGroupOptions();
+  renderAdminPanels();
   renderStats();
   renderDashboardPanels();
   updateAutomationWidgets();
@@ -2798,7 +3452,7 @@ function renderSubnetsTable() {
           <td>
             <div class="table-actions">
               <button type="button" class="row-button" data-edit-subnet="${escapeHtml(subnet.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
-              <button type="button" class="row-button" data-scan-subnet="${escapeHtml(subnet.id)}" ${canManageAutomation ? "" : "disabled"}>${escapeHtml(t("scan_subnet_button"))}</button>
+              ${subnet.scanEnabled ? `<button type="button" class="row-button" data-scan-subnet="${escapeHtml(subnet.id)}" ${canManageAutomation ? "" : "disabled"}>${escapeHtml(t("scan_subnet_button"))}</button>` : ""}
               <button type="button" class="row-button row-button--danger" data-delete-subnet="${escapeHtml(subnet.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
             </div>
           </td>
@@ -2854,13 +3508,16 @@ function renderGroupsTable() {
           const pingBadge = renderPingBadge(device.ip, subnet);
           return `
             <li class="group-device-item">
-              <div>
+              <div class="group-device-item__main">
                 <strong>${escapeHtml(device.name)}</strong>
-                <div class="secondary-line">${escapeHtml(getDeviceTypeLabel(device.type))}</div>
+                <div class="secondary-line">${escapeHtml(getDeviceTypeLabel(device.type) || t("no_data"))}</div>
               </div>
-              <span class="mono">${escapeHtml(device.ip)}</span>
-              <div>${pingVisible ? pingBadge : ""}</div>
+              <span class="mono group-device-item__ip">${escapeHtml(device.ip)}</span>
+              <div class="group-device-item__ping">${pingVisible ? pingBadge : ""}</div>
               <span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span>
+              <div class="group-device-item__actions">
+                <button type="button" class="row-button" data-edit-device="${escapeHtml(device.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              </div>
             </li>
           `;
         }).join("")
@@ -2911,11 +3568,12 @@ function renderGroupsTable() {
 }
 
 function renderAccessGroupsTable() {
+  const canManage = Boolean(state.auth?.capabilities?.canManageAccessGroups);
   const accessGroups = state.admin?.accessGroups || [];
   if (accessGroups.length === 0) {
     elements.accessGroupsTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="2">${escapeHtml(t("empty_access_groups"))}</td>
+        <td colspan="3">${escapeHtml(t("empty_access_groups"))}</td>
       </tr>
     `;
     return;
@@ -2928,17 +3586,25 @@ function renderAccessGroupsTable() {
       <tr>
         <td><strong>${escapeHtml(group.name)}</strong></td>
         <td>${escapeHtml(group.description || t("no_data"))}</td>
+        <td>
+          <div class="table-actions">
+            <button type="button" class="row-button" data-edit-access-group="${escapeHtml(group.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+            <button type="button" class="row-button row-button--danger" data-delete-access-group="${escapeHtml(group.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+          </div>
+        </td>
       </tr>
     `)
     .join("");
 }
 
 function renderUsersTable() {
+  const canManage = Boolean(state.auth?.capabilities?.canManageUsers);
+  const currentUserId = String(state.auth?.user?.id || "");
   const users = state.admin?.users || [];
   if (users.length === 0) {
     elements.usersTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="5">${escapeHtml(t("empty_users"))}</td>
+        <td colspan="6">${escapeHtml(t("empty_users"))}</td>
       </tr>
     `;
     return;
@@ -2951,6 +3617,17 @@ function renderUsersTable() {
       const accessGroupNames = (state.admin?.accessGroups || [])
         .filter((group) => user.accessGroupIds.includes(group.id))
         .map((group) => group.name);
+      const statusBadges = [
+        `<span class="status-badge status-badge--${user.isActive ? "ok" : "warn"}">${escapeHtml(user.isActive ? t("user_status_active") : t("user_status_disabled"))}</span>`,
+      ];
+      if (user.mustChangePassword) {
+        statusBadges.push(`<span class="status-badge status-badge--warn">${escapeHtml(t("must_change_password_short"))}</span>`);
+      }
+      if (user.isSystemAdmin) {
+        statusBadges.push(`<span class="status-badge status-badge--info">${escapeHtml(t("user_status_system_admin"))}</span>`);
+      }
+      const canToggleActive = canManage && !user.isSystemAdmin && user.id !== currentUserId;
+      const canDeleteUser = canManage && !user.isSystemAdmin && user.id !== currentUserId;
       return `
         <tr>
           <td><strong>${escapeHtml(user.username)}</strong></td>
@@ -2958,9 +3635,27 @@ function renderUsersTable() {
           <td>${escapeHtml(t(`role_${user.role}`))}</td>
           <td>${escapeHtml(accessGroupNames.join(", ") || t("access_group_public_short"))}</td>
           <td>
-            <span class="status-badge status-badge--${user.mustChangePassword ? "warn" : "ok"}">
-              ${escapeHtml(user.mustChangePassword ? t("must_change_password_short") : t("status_ok"))}
-            </span>
+            <div class="table-status-stack">
+              ${statusBadges.join("")}
+            </div>
+          </td>
+          <td>
+            <div class="table-actions">
+              <button type="button" class="row-button" data-edit-user="${escapeHtml(user.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button" data-reset-user-password="${escapeHtml(user.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("reset_password_button"))}</button>
+              <button
+                type="button"
+                class="row-button ${user.isActive ? "row-button--danger" : ""}"
+                data-toggle-user-active="${escapeHtml(user.id)}"
+                ${canToggleActive ? "" : "disabled"}
+              >${escapeHtml(user.isActive ? t("disable_user_button") : t("enable_user_button"))}</button>
+              <button
+                type="button"
+                class="row-button row-button--danger"
+                data-delete-user="${escapeHtml(user.id)}"
+                ${canDeleteUser ? "" : "disabled"}
+              >${escapeHtml(t("delete_row"))}</button>
+            </div>
           </td>
         </tr>
       `;
@@ -2968,7 +3663,7 @@ function renderUsersTable() {
     .join("");
 }
 
-function renderUserAccessGroupOptions() {
+function renderUserAccessGroupOptions(selectedIds = []) {
   const accessGroups = state.admin?.accessGroups || [];
   if (accessGroups.length === 0) {
     elements.userAccessGroupOptions.innerHTML = `<div class="secondary-line">${escapeHtml(t("empty_access_groups"))}</div>`;
@@ -2980,7 +3675,7 @@ function renderUserAccessGroupOptions() {
     .sort((left, right) => left.name.localeCompare(right.name, "ru"))
     .map((group) => `
       <label class="checkbox-card">
-        <input type="checkbox" value="${escapeHtml(group.id)}">
+        <input type="checkbox" value="${escapeHtml(group.id)}" ${selectedIds.includes(group.id) ? "checked" : ""}>
         <span>${escapeHtml(group.name)}</span>
       </label>
     `)
@@ -2992,6 +3687,7 @@ function renderDevicesTable() {
   const searchTerm = normalizeSearch(elements.searchInput.value);
   const quickFilter = elements.deviceFilterSelect?.value || "all";
   const groupFilter = elements.deviceGroupFilterSelect?.value || "";
+  const hasActiveFilter = Boolean(searchTerm || quickFilter !== "all" || groupFilter);
   const filteredDevices = state.devices.filter((device) => matchesSearch(device, searchTerm, quickFilter, groupFilter));
 
   if (filteredDevices.length === 0) {
@@ -3003,7 +3699,7 @@ function renderDevicesTable() {
         <td colspan="9">${escapeHtml(message)}</td>
       </tr>
     `;
-    elements.devicesCounter.textContent = searchTerm
+    elements.devicesCounter.textContent = hasActiveFilter
       ? formatFilteredCount(0, state.devices.length)
       : formatRecordsCount(0);
     return;
@@ -3012,7 +3708,7 @@ function renderDevicesTable() {
   const sortedDevices = filteredDevices
     .slice()
     .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip));
-  const visibleDevices = searchTerm || showAllDevicesInRegistry
+  const visibleDevices = hasActiveFilter || showAllDevicesInRegistry
     ? sortedDevices
     : sortedDevices.slice(0, 5);
 
@@ -3034,7 +3730,7 @@ function renderDevicesTable() {
           </td>
           <td class="mono">${escapeHtml(device.ip)}</td>
           <td class="mono">${escapeHtml(device.mac || t("no_data"))}</td>
-          <td>${escapeHtml(getDeviceTypeLabel(device.type))}</td>
+          <td>${escapeHtml(getDeviceTypeLabel(device.type) || t("no_data"))}</td>
           <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : escapeHtml(t("no_data"))}</td>
           <td>${groupCell}</td>
           <td>${pingVisible ? pingBadge : ""}</td>
@@ -3050,7 +3746,7 @@ function renderDevicesTable() {
       `;
     });
 
-  if (!searchTerm && filteredDevices.length > 5) {
+  if (!hasActiveFilter && filteredDevices.length > 5) {
     rows.push(`
       <tr class="table-expand-row">
         <td colspan="9">
@@ -3065,7 +3761,7 @@ function renderDevicesTable() {
   }
 
   elements.devicesTableBody.innerHTML = rows.join("");
-  elements.devicesCounter.textContent = searchTerm
+  elements.devicesCounter.textContent = hasActiveFilter
     ? formatFilteredCount(filteredDevices.length, state.devices.length)
     : formatRecordsCount(filteredDevices.length);
 }
@@ -3176,6 +3872,103 @@ function renderDashboardAttentionDetails(lines, emptyLabel) {
   `;
 }
 
+function getDevicesMissingType() {
+  return state.devices.filter((device) => !device.type);
+}
+
+function openMissingTypeModal() {
+  if (!elements.missingTypeModal) {
+    return;
+  }
+
+  const missingDevices = getDevicesMissingType()
+    .slice()
+    .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip));
+
+  elements.missingTypeTargetSelect.innerHTML = buildDeviceTypeOptionMarkup({ includeUnset: true });
+  elements.missingTypeTargetSelect.value = "";
+  elements.missingTypeStatus.className = "result-card result-card--muted form-grid__full";
+  elements.missingTypeStatus.textContent = t("missing_type_modal_idle");
+
+  if (!missingDevices.length) {
+    elements.missingTypeDeviceList.innerHTML = `<div class="result-card result-card--muted">${escapeHtml(t("missing_type_empty"))}</div>`;
+  } else {
+    elements.missingTypeDeviceList.innerHTML = missingDevices.map((device) => `
+      <label class="checkbox-card automation-subnet-card">
+        <input type="checkbox" data-missing-type-device-id="${escapeHtml(device.id)}" checked>
+        <span>
+          <strong>${escapeHtml(device.name)}</strong>
+          <span class="automation-subnet-meta">${escapeHtml(device.ip)}${device.unknownType ? ` · ${escapeHtml(t("missing_type_raw_value", { value: device.unknownType }))}` : ""}</span>
+        </span>
+      </label>
+    `).join("");
+  }
+
+  openModal("missing-type-modal");
+}
+
+function handleDashboardAttentionClick(event) {
+  const button = event.target.closest("[data-open-missing-type-modal]");
+  if (!button) {
+    return;
+  }
+
+  openMissingTypeModal();
+}
+
+async function handleMissingTypeSubmit(event) {
+  event.preventDefault();
+  const targetType = elements.missingTypeTargetSelect.value;
+  const selectedIds = [...elements.missingTypeDeviceList.querySelectorAll("[data-missing-type-device-id]:checked")]
+    .map((input) => input.dataset.missingTypeDeviceId)
+    .filter(Boolean);
+
+  if (!targetType) {
+    elements.missingTypeStatus.className = "result-card result-card--danger form-grid__full";
+    elements.missingTypeStatus.textContent = t("missing_type_select_required");
+    return;
+  }
+
+  if (!selectedIds.length) {
+    elements.missingTypeStatus.className = "result-card result-card--danger form-grid__full";
+    elements.missingTypeStatus.textContent = t("missing_type_devices_required");
+    return;
+  }
+
+  try {
+    elements.missingTypeStatus.className = "result-card result-card--muted form-grid__full";
+    elements.missingTypeStatus.textContent = t("missing_type_bulk_applying", { count: selectedIds.length });
+
+    for (const deviceId of selectedIds) {
+      const device = state.devices.find((entry) => entry.id === deviceId);
+      if (!device) {
+        continue;
+      }
+
+      await apiRequest(`/devices/${encodeURIComponent(deviceId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          id: device.id,
+          name: device.name,
+          ip: device.ip,
+          mac: device.mac || "",
+          type: targetType,
+          subnetId: device.subnetId || "",
+          note: device.note || "",
+          createdAt: device.createdAt,
+        }),
+      });
+    }
+
+    await refreshState(true);
+    closeModal("missing-type-modal");
+    showToast(t("missing_type_bulk_done", { count: selectedIds.length, type: getDeviceTypeLabel(targetType) }));
+  } catch (error) {
+    elements.missingTypeStatus.className = "result-card result-card--danger form-grid__full";
+    elements.missingTypeStatus.textContent = error.message || t("server_data_load_failed");
+  }
+}
+
 function renderDashboardAttention() {
   const conflictMap = new Map();
   state.devices.forEach((device) => {
@@ -3209,6 +4002,9 @@ function renderDashboardAttention() {
     .filter((subnet) => !subnet.scanEnabled)
     .map((subnet) => `${subnet.name} · ${subnet.cidr}`);
 
+  const missingTypeDevices = getDevicesMissingType()
+    .map((device) => `${device.name} · ${device.ip}${device.unknownType ? ` · ${t("missing_type_raw_value", { value: device.unknownType })}` : ""}`);
+
   const items = [
     {
       value: conflictEntries.length,
@@ -3239,6 +4035,16 @@ function renderDashboardAttention() {
       details: lowCapacityGroups,
     },
     {
+      value: missingTypeDevices.length,
+      title: t("dashboard_attention_missing_type_title"),
+      note: t("dashboard_attention_missing_type_note"),
+      tone: missingTypeDevices.length > 0 ? "warn" : "ok",
+      details: missingTypeDevices,
+      action: missingTypeDevices.length > 0 && state.auth?.capabilities?.canWrite
+        ? `<button type="button" class="action-button action-button--ghost" data-open-missing-type-modal>${escapeHtml(t("missing_type_bulk_button"))}</button>`
+        : "",
+    },
+    {
       value: automationExcluded.length,
       title: t("dashboard_attention_automation_title"),
       note: t("dashboard_attention_automation_note"),
@@ -3258,6 +4064,7 @@ function renderDashboardAttention() {
           </summary>
           <div class="mini-item__details">
             ${renderDashboardAttentionDetails(item.details, t("dashboard_attention_details_empty"))}
+            ${item.action || ""}
           </div>
         </details>
       </li>
@@ -3314,12 +4121,13 @@ function renderPingBadge(ip, subnet = null) {
 }
 
 function normalizeState(rawState, baseGroups = []) {
+  const preferences = normalizeUserPreferences(rawState?.preferences || {});
   const rawSubnets = Array.isArray(rawState?.subnets) ? rawState.subnets : [];
   const subnets = rawSubnets.map((entry) => normalizeSubnet(entry));
   const rawGroups = Array.isArray(rawState?.groups) ? rawState.groups : [];
   const groups = normalizeGroupsList(rawGroups, subnets, baseGroups);
   const rawDevices = Array.isArray(rawState?.devices) ? rawState.devices : [];
-  const devices = rawDevices.map((entry) => normalizeDevice(entry, subnets));
+  const devices = rawDevices.map((entry) => normalizeDevice(entry, subnets, groups, preferences.customDeviceTypes));
   const scanResults = Array.isArray(rawState?.scanResults)
     ? rawState.scanResults.map(normalizeScanResult)
     : [];
@@ -3338,7 +4146,6 @@ function normalizeState(rawState, baseGroups = []) {
     : [];
   const auth = normalizeAuthState(rawState?.auth);
   const admin = normalizeAdminState(rawState?.admin);
-  const preferences = normalizeUserPreferences(rawState?.preferences || {});
 
   return { subnets, groups, devices, scanResults, history, meta, settings, accessGroups, auth, admin, preferences };
 }
@@ -3408,6 +4215,7 @@ function normalizeAdminState(rawAdmin = null) {
         role: String(entry?.role || "").trim(),
         mustChangePassword: Boolean(entry?.mustChangePassword),
         isActive: Boolean(entry?.isActive),
+        isSystemAdmin: Boolean(entry?.isSystemAdmin),
         accessGroupIds: Array.isArray(entry?.accessGroupIds) ? entry.accessGroupIds.map((id) => String(id)) : [],
       }))
       : [],
@@ -3588,12 +4396,12 @@ function normalizeRangeGroup(rawGroup, subnets, existingGroups = state.groups) {
   };
 }
 
-function normalizeDevice(rawDevice, subnets, groups = state.groups) {
+function normalizeDevice(rawDevice, subnets, groups = state.groups, customDeviceTypes = preferences.customDeviceTypes) {
   const name = String(rawDevice?.name || "").trim();
   const ip = normalizeIp(String(rawDevice?.ip || "").trim());
   const rawMac = String(rawDevice?.mac || "").trim();
   const mac = rawMac ? normalizeMac(rawMac) : "";
-  const type = normalizeDeviceTypeValue(rawDevice?.type);
+  const normalizedRawType = normalizeDeviceTypeValue(rawDevice?.type);
   const note = String(rawDevice?.note || "").trim();
   let subnetId = String(rawDevice?.subnetId || "").trim();
   const groupId = String(rawDevice?.groupId || "").trim();
@@ -3608,9 +4416,13 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups) {
     throw new Error(t("error_device_mac_invalid", { name }));
   }
 
-  if (!DEVICE_TYPES[type]) {
-    throw new Error(t("error_device_type_invalid", { name }));
-  }
+  const allowedDeviceTypes = new Set([
+    ...BUILTIN_DEVICE_TYPES.map((item) => item.id),
+    ...normalizeCustomDeviceTypes(customDeviceTypes).map((item) => item.id),
+  ]);
+
+  const type = allowedDeviceTypes.has(normalizedRawType) ? normalizedRawType : "";
+  const unknownType = type ? "" : normalizedRawType;
 
   if (subnetId) {
     const selectedSubnet = subnets.find((subnet) => subnet.id === subnetId);
@@ -3653,9 +4465,29 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups) {
     ip,
     mac,
     type,
+    unknownType,
     subnetId,
     note,
     createdAt: rawDevice?.createdAt || new Date().toISOString(),
+  };
+}
+
+function serializeDevice(device) {
+  return {
+    ...device,
+    type: device.type || device.unknownType || "",
+  };
+}
+
+function serializeSnapshotPayload(sourceState = state) {
+  return {
+    exportedAt: new Date().toISOString(),
+    version: "0.2",
+    subnets: sourceState.subnets,
+    groups: sourceState.groups,
+    devices: sourceState.devices.map(serializeDevice),
+    scanResults: sourceState.scanResults,
+    history: sourceState.history,
   };
 }
 
@@ -3919,6 +4751,30 @@ function handleDeviceSubnetChange() {
   updateSuggestedIp();
 }
 
+function buildDeviceTypeOptionMarkup({ includeUnset = true } = {}) {
+  const options = [];
+  if (includeUnset) {
+    options.push(`<option value="">${escapeHtml(t("device_type_unset_option"))}</option>`);
+  }
+
+  getAvailableDeviceTypes().forEach((type) => {
+    options.push(`<option value="${escapeHtml(type.id)}">${escapeHtml(type.label)}</option>`);
+  });
+
+  return options.join("");
+}
+
+function renderDeviceTypeOptions(preferredType = elements.deviceTypeSelect?.value || "") {
+  if (!elements.deviceTypeSelect) {
+    return;
+  }
+
+  elements.deviceTypeSelect.innerHTML = buildDeviceTypeOptionMarkup();
+
+  const resolvedType = isKnownDeviceType(preferredType) ? preferredType : "";
+  elements.deviceTypeSelect.value = resolvedType;
+}
+
 function renderDeviceGroupOptions(preferredGroupId = elements.deviceGroupSelect.value) {
   const subnetId = elements.subnetSelect.value;
   const options = [`<option value="">${escapeHtml(t("any_free_ip"))}</option>`];
@@ -4062,6 +4918,7 @@ function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = ""
     device.ip,
     device.mac,
     device.type,
+    device.unknownType || "",
     getDeviceTypeLabel(device.type),
     device.note,
     subnet?.name || "",
@@ -4211,6 +5068,44 @@ function findSubnetByReference(row, subnets) {
   });
 }
 
+function findExistingSubnetForCsv(row, subnets) {
+  return subnets.find((subnet) => {
+    if (row.id && subnet.id === row.id) {
+      return true;
+    }
+    if (row.cidr && subnet.cidr === row.cidr) {
+      return true;
+    }
+    return Boolean(row.name && row.cidr && subnet.name === row.name && subnet.cidr === row.cidr);
+  });
+}
+
+function findExistingGroupForCsv(row, subnetId, groups) {
+  const rowRangeStart = row.range_start || row.rangeStart;
+  const rowRangeEnd = row.range_end || row.rangeEnd;
+  return groups.find((group) => {
+    if (row.id && group.id === row.id) {
+      return true;
+    }
+    if (group.subnetId !== subnetId) {
+      return false;
+    }
+    if (rowRangeStart && rowRangeEnd && group.rangeStart === rowRangeStart && group.rangeEnd === rowRangeEnd) {
+      return true;
+    }
+    return Boolean(row.name && group.name === row.name && group.rangeStart === rowRangeStart && group.rangeEnd === rowRangeEnd);
+  });
+}
+
+function findExistingDeviceForCsv(row, devices) {
+  return devices.find((device) => {
+    if (row.id && device.id === row.id) {
+      return true;
+    }
+    return Boolean(row.ip && device.ip === normalizeIpSafe(row.ip));
+  });
+}
+
 function parseCsv(text) {
   const rows = [];
   const sanitizedText = text.startsWith("\uFEFF") ? text.slice(1) : text;
@@ -4341,7 +5236,7 @@ function normalizeDeviceTypeValue(value) {
     iot: "iot",
   };
 
-  return aliases[normalized] || normalized;
+  return aliases[normalized] || normalized.replace(/[^a-z0-9_-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
 function toCsv(rows, options = {}) {

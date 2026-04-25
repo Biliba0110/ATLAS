@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL,
     must_change_password INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
+    is_system_admin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -338,9 +339,23 @@ def normalize_mac_address(value: object) -> str:
 
 
 def normalize_device_type(value: object) -> str:
-    device_type = str(value or "").strip().lower()
-    if device_type not in {"server", "container", "iot"}:
-        raise ValueError("Поддерживаются типы server, container и iot.")
+    raw_value = str(value or "").strip().lower()
+    aliases = {
+        "server": "server",
+        "servers": "server",
+        "сервер": "server",
+        "серверы": "server",
+        "сервери": "server",
+        "container": "container",
+        "containers": "container",
+        "контейнер": "container",
+        "контейнеры": "container",
+        "контейнери": "container",
+        "iot": "iot",
+    }
+    device_type = aliases.get(raw_value, raw_value.replace(" ", "-"))
+    if not device_type or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in device_type):
+        raise ValueError("Тип устройства должен содержать только латинские буквы, цифры, дефис или подчёркивание.")
     return device_type
 
 
@@ -481,6 +496,23 @@ def ensure_column(connection: sqlite3.Connection, table: str, column: str, defin
 def ensure_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "subnets", "access_group_id", "TEXT")
     ensure_column(connection, "subnets", "scan_enabled", "INTEGER NOT NULL DEFAULT 1")
+    ensure_column(connection, "users", "is_system_admin", "INTEGER NOT NULL DEFAULT 0")
+
+
+def ensure_system_admin_marker(connection: sqlite3.Connection) -> None:
+    existing_system_admin = connection.execute(
+        "SELECT id FROM users WHERE is_system_admin = 1 LIMIT 1"
+    ).fetchone()
+    if existing_system_admin is not None:
+        return
+    connection.execute(
+        """
+        UPDATE users
+        SET is_system_admin = 1
+        WHERE username = ? COLLATE NOCASE
+        """,
+        (DEFAULT_BOOTSTRAP_USERNAME,),
+    )
 
 
 def create_bootstrap_admin(connection: sqlite3.Connection) -> None:
@@ -493,8 +525,8 @@ def create_bootstrap_admin(connection: sqlite3.Connection) -> None:
         """
         INSERT INTO users (
             id, username, display_name, password_hash, role, must_change_password,
-            is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            is_active, is_system_admin, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             create_id(),
@@ -502,6 +534,7 @@ def create_bootstrap_admin(connection: sqlite3.Connection) -> None:
             DEFAULT_BOOTSTRAP_USERNAME,
             hash_password(DEFAULT_BOOTSTRAP_PASSWORD),
             ROLE_ADMIN,
+            1,
             1,
             1,
             now,
@@ -608,6 +641,7 @@ def ensure_db() -> None:
             ("default_subnet_scan_enabled", "1", utc_now_iso()),
         )
         create_bootstrap_admin(connection)
+        ensure_system_admin_marker(connection)
         connection.commit()
 
 
@@ -707,6 +741,7 @@ def user_from_row(row: sqlite3.Row) -> dict:
         "role": row["role"],
         "mustChangePassword": bool(row["must_change_password"]),
         "isActive": bool(row["is_active"]),
+        "isSystemAdmin": bool(row["is_system_admin"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -741,6 +776,268 @@ def list_users(connection: sqlite3.Connection) -> list[dict]:
     for user in users:
         user["accessGroupIds"] = get_user_access_group_ids(connection, user["id"])
     return users
+
+
+def list_user_access_group_rows(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        {
+            "userId": row["user_id"],
+            "accessGroupId": row["access_group_id"],
+            "createdAt": row["created_at"],
+        }
+        for row in connection.execute(
+            "SELECT user_id, access_group_id, created_at FROM user_access_groups ORDER BY user_id ASC, access_group_id ASC"
+        )
+    ]
+
+
+def list_user_settings_rows(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        {
+            "userId": row["user_id"],
+            "key": row["key"],
+            "value": row["value"],
+            "updatedAt": row["updated_at"],
+        }
+        for row in connection.execute(
+            "SELECT user_id, key, value, updated_at FROM user_settings ORDER BY user_id ASC, key ASC"
+        )
+    ]
+
+
+def list_app_settings_rows(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        {
+            "key": row["key"],
+            "value": row["value"],
+            "updatedAt": row["updated_at"],
+        }
+        for row in connection.execute(
+            "SELECT key, value, updated_at FROM app_settings ORDER BY key ASC"
+        )
+    ]
+
+
+def export_backup(connection: sqlite3.Connection, include: dict | None = None) -> dict:
+    include = include or {}
+    include_inventory = bool(include.get("inventory", True))
+    include_activity = bool(include.get("activity", True))
+    include_system = bool(include.get("system", True))
+    include_access = bool(include.get("access", True))
+    include_preferences = bool(include.get("preferences", True))
+
+    payload = {
+        "kind": "atlas-backup",
+        "version": "0.2.5",
+        "exportedAt": utc_now_iso(),
+        "sections": {},
+    }
+
+    if include_inventory:
+        payload["sections"]["inventory"] = {
+            "subnets": [
+                enrich_subnet(subnet_from_db_row_with_access(row), {})
+                for row in connection.execute("SELECT * FROM subnets ORDER BY created_at DESC, rowid DESC")
+            ],
+            "groups": [
+                group_from_row(row)
+                for row in connection.execute("SELECT * FROM range_groups ORDER BY created_at DESC, rowid DESC")
+            ],
+            "devices": [
+                device_from_row(row)
+                for row in connection.execute("SELECT * FROM devices ORDER BY created_at DESC, rowid DESC")
+            ],
+        }
+
+    if include_activity:
+        payload["sections"]["activity"] = {
+            "scanResults": [
+                scan_result_from_row(row)
+                for row in connection.execute("SELECT * FROM ip_scan_results ORDER BY checked_at DESC, ip ASC")
+            ],
+            "history": [
+                history_from_row(row)
+                for row in connection.execute("SELECT * FROM ip_history ORDER BY changed_at DESC, id DESC")
+            ],
+        }
+
+    if include_system:
+        payload["sections"]["system"] = {
+            "appSettings": list_app_settings_rows(connection),
+        }
+
+    if include_access:
+        payload["sections"]["access"] = {
+            "users": [
+                {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "displayName": row["display_name"],
+                    "passwordHash": row["password_hash"],
+                    "role": row["role"],
+                    "mustChangePassword": bool(row["must_change_password"]),
+                    "isActive": bool(row["is_active"]),
+                    "isSystemAdmin": bool(row["is_system_admin"]),
+                    "createdAt": row["created_at"],
+                    "updatedAt": row["updated_at"],
+                }
+                for row in connection.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE ASC, created_at ASC")
+            ],
+            "accessGroups": list_access_groups(connection),
+            "userAccessGroups": list_user_access_group_rows(connection),
+        }
+
+    if include_preferences:
+        payload["sections"]["preferences"] = {
+            "userSettings": list_user_settings_rows(connection),
+        }
+
+    return payload
+
+
+def import_backup(connection: sqlite3.Connection, backup: dict, actor: str) -> dict:
+    if str(backup.get("kind") or "").strip() != "atlas-backup":
+        raise ValueError("Файл не похож на backup ATLAS.")
+
+    sections = backup.get("sections")
+    if not isinstance(sections, dict) or not sections:
+        raise ValueError("В backup отсутствуют секции для восстановления.")
+
+    replaced_access = False
+
+    with connection:
+        if "inventory" in sections:
+            inventory = sections.get("inventory") or {}
+            connection.execute("DELETE FROM devices")
+            connection.execute("DELETE FROM range_groups")
+            connection.execute("DELETE FROM subnets")
+
+            for subnet in inventory.get("subnets", []):
+                insert_subnet_without_commit(connection, subnet)
+            for group in inventory.get("groups", []):
+                insert_group_without_commit(connection, group)
+            for device in inventory.get("devices", []):
+                insert_device_without_commit(connection, device)
+
+        if "activity" in sections:
+            activity = sections.get("activity") or {}
+            connection.execute("DELETE FROM ip_scan_results")
+            connection.execute("DELETE FROM ip_history")
+
+            for history in activity.get("history", []):
+                insert_history_without_commit(connection, history)
+            for scan_result in activity.get("scanResults", []):
+                insert_scan_result_without_commit(connection, scan_result)
+
+        if "system" in sections:
+            system = sections.get("system") or {}
+            connection.execute("DELETE FROM app_settings")
+            for item in system.get("appSettings", []):
+                connection.execute(
+                    """
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        str(item.get("key") or "").strip(),
+                        str(item.get("value") or ""),
+                        str(item.get("updatedAt") or utc_now_iso()),
+                    ),
+                )
+
+        if "access" in sections:
+            access = sections.get("access") or {}
+            replaced_access = True
+            connection.execute("DELETE FROM sessions")
+            connection.execute("DELETE FROM user_access_groups")
+            connection.execute("DELETE FROM access_groups")
+            connection.execute("DELETE FROM users")
+
+            for group in access.get("accessGroups", []):
+                connection.execute(
+                    """
+                    INSERT INTO access_groups (id, name, description, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(group.get("id") or create_id()),
+                        str(group.get("name") or "").strip(),
+                        str(group.get("description") or "").strip(),
+                        str(group.get("createdAt") or utc_now_iso()),
+                        str(group.get("updatedAt") or group.get("createdAt") or utc_now_iso()),
+                    ),
+                )
+
+            for user in access.get("users", []):
+                connection.execute(
+                    """
+                    INSERT INTO users (
+                        id, username, display_name, password_hash, role,
+                        must_change_password, is_active, is_system_admin, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(user.get("id") or create_id()),
+                        sanitize_username(user.get("username")),
+                        str(user.get("displayName") or "").strip() or sanitize_username(user.get("username")),
+                        str(user.get("passwordHash") or "").strip(),
+                        str(user.get("role") or ROLE_VIEWER).strip().lower(),
+                        1 if bool(user.get("mustChangePassword")) else 0,
+                        1 if bool(user.get("isActive", True)) else 0,
+                        1 if bool(user.get("isSystemAdmin")) else 0,
+                        str(user.get("createdAt") or utc_now_iso()),
+                        str(user.get("updatedAt") or user.get("createdAt") or utc_now_iso()),
+                    ),
+                )
+
+            for row in access.get("userAccessGroups", []):
+                connection.execute(
+                    """
+                    INSERT INTO user_access_groups (user_id, access_group_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        str(row.get("userId") or "").strip(),
+                        str(row.get("accessGroupId") or "").strip(),
+                        str(row.get("createdAt") or utc_now_iso()),
+                    ),
+                )
+            ensure_system_admin_marker(connection)
+
+        if "preferences" in sections:
+            preferences_section = sections.get("preferences") or {}
+            existing_user_ids = {
+                row["id"]
+                for row in connection.execute("SELECT id FROM users")
+            }
+            if "access" in sections:
+                connection.execute("DELETE FROM user_settings")
+            for row in preferences_section.get("userSettings", []):
+                user_id = str(row.get("userId") or "").strip()
+                if not user_id or user_id not in existing_user_ids:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO user_settings (user_id, key, value, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id, key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        user_id,
+                        str(row.get("key") or "").strip(),
+                        str(row.get("value") or ""),
+                        str(row.get("updatedAt") or utc_now_iso()),
+                    ),
+                )
+
+    bump_revision("backup-imported", {"entity": "backup"})
+    signal_background_scanner(run_scan=True)
+    return {
+        "status": "ok",
+        "requiresReauth": replaced_access,
+    }
 
 
 def get_session_user(connection: sqlite3.Connection, token: str | None) -> dict | None:
@@ -861,6 +1158,7 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
         "language": "ru",
         "customSignature": "",
         "customGroupTemplates": [],
+        "customDeviceTypes": [],
     }
     rows = connection.execute(
         "SELECT key, value FROM user_settings WHERE user_id = ?",
@@ -871,7 +1169,7 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
         raw_value = row["value"]
         if key in {"autoRescanAfterDeviceSave"}:
             defaults[key] = raw_value == "1"
-        elif key == "customGroupTemplates":
+        elif key in {"customGroupTemplates", "customDeviceTypes"}:
             try:
                 defaults[key] = json.loads(raw_value)
             except json.JSONDecodeError:
@@ -890,6 +1188,7 @@ def save_user_preferences(connection: sqlite3.Connection, user_id: str, payload:
         "language",
         "customSignature",
         "customGroupTemplates",
+        "customDeviceTypes",
     }
     now = utc_now_iso()
     changed = False
@@ -901,7 +1200,7 @@ def save_user_preferences(connection: sqlite3.Connection, user_id: str, payload:
         value = payload[key]
         if key == "autoRescanAfterDeviceSave":
             stored_value = "1" if bool(value) else "0"
-        elif key == "customGroupTemplates":
+        elif key in {"customGroupTemplates", "customDeviceTypes"}:
             stored_value = json.dumps(value if isinstance(value, list) else [], ensure_ascii=False)
         else:
             stored_value = str(value or "").strip()
@@ -1348,6 +1647,17 @@ def update_current_user_profile(connection: sqlite3.Connection, user: dict, payl
     return updated_user
 
 
+def map_integrity_error(error: sqlite3.IntegrityError) -> str:
+    message = str(error).lower()
+    if "users.username" in message:
+        return "Пользователь с таким именем уже существует."
+    if "access_groups.name" in message:
+        return "Группа доступа с таким именем уже существует."
+    if "devices.ip" in message:
+        return "Устройство с таким IP уже существует."
+    return "Операция нарушает ограничения данных. Проверьте уникальные поля и связи."
+
+
 def create_access_group(connection: sqlite3.Connection, payload: dict) -> dict:
     name = str(payload.get("name", "")).strip()
     description = str(payload.get("description", "")).strip()
@@ -1378,6 +1688,44 @@ def create_access_group(connection: sqlite3.Connection, payload: dict) -> dict:
     connection.commit()
     bump_revision("access-group-created", {"accessGroupId": access_group["id"]})
     return access_group
+
+
+def update_access_group(connection: sqlite3.Connection, access_group_id: str, payload: dict) -> dict:
+    existing = connection.execute("SELECT * FROM access_groups WHERE id = ?", (access_group_id,)).fetchone()
+    if existing is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Группа доступа не найдена.")
+
+    name = str(payload.get("name") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    if not name:
+        raise ValueError("Название группы доступа обязательно.")
+
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE access_groups
+        SET name = ?, description = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (name, description, now, access_group_id),
+    )
+    connection.commit()
+    bump_revision("access-group-updated", {"accessGroupId": access_group_id})
+    updated = connection.execute("SELECT * FROM access_groups WHERE id = ?", (access_group_id,)).fetchone()
+    return access_group_from_row(updated)
+
+
+def delete_access_group(connection: sqlite3.Connection, access_group_id: str) -> None:
+    existing = connection.execute("SELECT id FROM access_groups WHERE id = ?", (access_group_id,)).fetchone()
+    if existing is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Группа доступа не найдена.")
+
+    with connection:
+        connection.execute("UPDATE subnets SET access_group_id = NULL WHERE access_group_id = ?", (access_group_id,))
+        connection.execute("DELETE FROM user_access_groups WHERE access_group_id = ?", (access_group_id,))
+        connection.execute("DELETE FROM access_groups WHERE id = ?", (access_group_id,))
+
+    bump_revision("access-group-deleted", {"accessGroupId": access_group_id})
 
 
 def set_user_access_groups(connection: sqlite3.Connection, user_id: str, access_group_ids: list[str]) -> None:
@@ -1442,6 +1790,89 @@ def create_user(connection: sqlite3.Connection, payload: dict) -> dict:
     user = user_from_row(created_user)
     user["accessGroupIds"] = get_user_access_group_ids(connection, user_id)
     return user
+
+
+def update_user_by_admin(connection: sqlite3.Connection, acting_user: dict, user_id: str, payload: dict) -> dict:
+    row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Пользователь не найден.")
+
+    existing_user = user_from_row(row)
+    username = sanitize_username(payload.get("username"))
+    display_name = sanitize_display_name(payload.get("displayName"), fallback=username)
+    role = normalize_role(payload.get("role"))
+    access_group_ids = payload.get("accessGroupIds") if isinstance(payload.get("accessGroupIds"), list) else []
+    is_active = bool(payload.get("isActive", existing_user["isActive"]))
+    now = utc_now_iso()
+
+    if existing_user["isSystemAdmin"]:
+        if not is_active:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "Главного администратора нельзя отключить.")
+        if role != ROLE_ADMIN:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "Главный администратор должен сохранять роль Admin.")
+
+    if str(acting_user.get("id") or "") == user_id and not is_active:
+        raise RequestError(HTTPStatus.BAD_REQUEST, "Нельзя отключить текущего пользователя.")
+
+    connection.execute(
+        """
+        UPDATE users
+        SET username = ?, display_name = ?, role = ?, is_active = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (username, display_name, role, 1 if is_active else 0, now, user_id),
+    )
+    set_user_access_groups(connection, user_id, access_group_ids)
+    if not is_active:
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    connection.commit()
+    bump_revision("user-updated", {"userId": user_id})
+    updated_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = user_from_row(updated_row)
+    user["accessGroupIds"] = get_user_access_group_ids(connection, user_id)
+    return user
+
+
+def reset_user_password_by_admin(connection: sqlite3.Connection, user_id: str, new_password: object) -> dict:
+    row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Пользователь не найден.")
+
+    password = require_non_empty_password(new_password)
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE users
+        SET password_hash = ?, must_change_password = 1, updated_at = ?
+        WHERE id = ?
+        """,
+        (hash_password(password), now, user_id),
+    )
+    connection.commit()
+    bump_revision("user-password-reset", {"userId": user_id})
+    updated_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = user_from_row(updated_row)
+    user["accessGroupIds"] = get_user_access_group_ids(connection, user_id)
+    return user
+
+
+def delete_user_by_admin(connection: sqlite3.Connection, acting_user: dict, user_id: str) -> None:
+    row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Пользователь не найден.")
+    target_user = user_from_row(row)
+    if str(acting_user.get("id") or "") == user_id:
+        raise RequestError(HTTPStatus.BAD_REQUEST, "Нельзя удалить текущего пользователя.")
+    if target_user["isSystemAdmin"]:
+        raise RequestError(HTTPStatus.BAD_REQUEST, "Главного администратора нельзя удалить.")
+
+    with connection:
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM user_access_groups WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    bump_revision("user-deleted", {"userId": user_id})
 
 
 def record_history(
@@ -2184,6 +2615,27 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     require_admin_user(connection, self)
                     self.send_json(HTTPStatus.CREATED, create_user(connection, payload))
                     return
+                if (
+                    len([part for part in parsed.path.split("/") if part]) == 5
+                    and parsed.path.startswith("/api/admin/users/")
+                    and parsed.path.endswith("/reset-password")
+                ):
+                    require_admin_user(connection, self)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    self.send_json(
+                        HTTPStatus.OK,
+                        reset_user_password_by_admin(connection, parts[3], payload.get("newPassword")),
+                    )
+                    return
+                if parsed.path == "/api/admin/backup/export":
+                    require_admin_user(connection, self)
+                    self.send_json(HTTPStatus.OK, export_backup(connection, payload.get("include")))
+                    return
+                if parsed.path == "/api/admin/backup/import":
+                    require_admin_user(connection, self)
+                    actor = resolve_actor(self, payload, require_authenticated_user(connection, self))
+                    self.send_json(HTTPStatus.OK, import_backup(connection, payload.get("backup") or {}, actor))
+                    return
 
                 user = require_write_user(connection, self)
                 actor = resolve_actor(self, payload, user)
@@ -2239,7 +2691,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except sqlite3.IntegrityError as error:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ошибка базы данных: {error}"})
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": map_integrity_error(error)})
         except FileNotFoundError:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Команда ping не найдена на сервере."})
         except subprocess.TimeoutExpired:
@@ -2269,6 +2721,16 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     updated_user = update_current_user_profile(connection, user, payload)
                     self.send_json(HTTPStatus.OK, build_session_payload(connection, updated_user))
                     return
+                if len([part for part in parsed.path.split("/") if part]) == 4 and parsed.path.startswith("/api/admin/"):
+                    admin_user = require_admin_user(connection, self)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    entity_id = parts[3]
+                    if parts[2] == "access-groups":
+                        self.send_json(HTTPStatus.OK, update_access_group(connection, entity_id, payload))
+                        return
+                    if parts[2] == "users":
+                        self.send_json(HTTPStatus.OK, update_user_by_admin(connection, admin_user, entity_id, payload))
+                        return
                 if len([part for part in parsed.path.split("/") if part]) == 3 and parsed.path.startswith("/api/"):
                     user = require_write_user(connection, self)
                     actor = resolve_actor(self, payload, user)
@@ -2327,7 +2789,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except sqlite3.IntegrityError as error:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ошибка базы данных: {error}"})
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": map_integrity_error(error)})
         except Exception as error:  # noqa: BLE001
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
@@ -2350,7 +2812,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except sqlite3.IntegrityError as error:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ошибка базы данных: {error}"})
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": map_integrity_error(error)})
         except Exception as error:  # noqa: BLE001
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
@@ -2430,11 +2892,22 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                         self.send_json(HTTPStatus.OK, {"status": "deleted"})
                         return
 
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "admin":
+                    user = require_admin_user(connection, self)
+                    if parts[2] == "access-groups":
+                        delete_access_group(connection, parts[3])
+                        self.send_json(HTTPStatus.OK, {"status": "deleted"})
+                        return
+                    if parts[2] == "users":
+                        delete_user_by_admin(connection, user, parts[3])
+                        self.send_json(HTTPStatus.OK, {"status": "deleted"})
+                        return
+
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
         except RequestError as error:
             self.send_json(error.status, {"error": error.message})
         except sqlite3.IntegrityError as error:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ошибка базы данных: {error}"})
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": map_integrity_error(error)})
         except Exception as error:  # noqa: BLE001
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
