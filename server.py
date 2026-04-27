@@ -266,6 +266,10 @@ def normalize_ip_address(value: object) -> str:
         raise ValueError("Указан некорректный IP-адрес.") from error
 
 
+def is_ip_inside_network_bounds(ip_value: ipaddress._BaseAddress, network: ipaddress.IPv4Network) -> bool:
+    return int(network.network_address) <= int(ip_value) <= int(network.broadcast_address)
+
+
 def normalize_subnet_payload(payload: dict) -> dict:
     name = str(payload.get("name") or "").strip()
     if not name:
@@ -299,7 +303,7 @@ def normalize_subnet_payload(payload: dict) -> dict:
     if int(range_start_ip) > int(range_end_ip):
         raise ValueError(f"Для подсети {name} начало диапазона должно быть меньше или равно концу.")
 
-    if int(range_start_ip) < int(network.network_address) or int(range_end_ip) > int(network.broadcast_address):
+    if not is_ip_inside_network_bounds(range_start_ip, network) or not is_ip_inside_network_bounds(range_end_ip, network):
         raise ValueError(f"Диапазон подсети {name} должен находиться внутри {network.with_prefixlen}.")
 
     return {
@@ -1155,7 +1159,7 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
         "accentTheme": "atlas",
         "autoRescanAfterDeviceSave": True,
         "suggestionMode": "compact",
-        "language": "ru",
+        "language": "en",
         "customSignature": "",
         "customGroupTemplates": [],
         "customDeviceTypes": [],

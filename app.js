@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS = {
   accentTheme: "atlas",
   autoRescanAfterDeviceSave: true,
   suggestionMode: "compact",
-  language: "ru",
+  language: "en",
   customSignature: "",
 };
 
@@ -4311,7 +4311,7 @@ function normalizeSubnet(rawSubnet) {
     throw new Error(t("error_subnet_range_order", { name }));
   }
 
-  if (rangeStartInt < parsed.networkInt || rangeEndInt > parsed.broadcastInt) {
+  if (!isRangeInsideParsedSubnet(rangeStartInt, rangeEndInt, parsed)) {
     throw new Error(t("error_subnet_range_outside", { name, cidr: parsed.cidr }));
   }
 
@@ -4706,6 +4706,15 @@ function getPingState(ip) {
 
 function isIpInsidePool(ipInt, subnet) {
   return ipInt >= subnet.rangeStartInt && ipInt <= subnet.rangeEndInt;
+}
+
+function isRangeInsideParsedSubnet(rangeStartInt, rangeEndInt, parsedSubnet) {
+  return (
+    rangeStartInt >= parsedSubnet.networkInt &&
+    rangeStartInt <= parsedSubnet.broadcastInt &&
+    rangeEndInt >= parsedSubnet.networkInt &&
+    rangeEndInt <= parsedSubnet.broadcastInt
+  );
 }
 
 function isIpInsideNetwork(ipInt, subnet) {
