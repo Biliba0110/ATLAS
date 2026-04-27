@@ -490,6 +490,10 @@ body::before {
 
 body.modal-open {
   overflow: hidden;
+  position: fixed;
+  left: 0;
+  right: 0;
+  width: 100%;
 }
 
 body.auth-open {
@@ -1339,6 +1343,16 @@ textarea {
     var(--table-wrap-base);
 }
 
+.table-wrap--capped {
+  min-height: 520px;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.table-wrap--capped tbody .empty-row td {
+  height: 424px;
+}
+
 table {
   width: 100%;
   min-width: 760px;
@@ -2078,7 +2092,12 @@ tbody tr:last-child td {
   display: grid;
   place-items: center;
   padding: 16px 18px;
-  background: rgba(3, 5, 10, 0.72);
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.035), transparent 42%),
+    rgba(3, 5, 10, 0.82);
+}
+
+body[data-modal-blur="on"] .modal-backdrop {
   backdrop-filter: blur(18px);
 }
 

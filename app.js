@@ -15,6 +15,7 @@ const BUILTIN_DEVICE_TYPE_IDS = new Set(BUILTIN_DEVICE_TYPES.map((item) => item.
 const DEFAULT_SETTINGS = {
   accentTheme: "atlas",
   autoRescanAfterDeviceSave: true,
+  modalBlurEnabled: true,
   suggestionMode: "compact",
   language: "en",
   customSignature: "",
@@ -222,6 +223,7 @@ const elements = {
   settingsLanguageSelect: document.getElementById("settings-language-select"),
   settingsSignatureInput: document.getElementById("settings-signature-input"),
   settingsAutoRescan: document.getElementById("settings-auto-rescan"),
+  settingsModalBlur: document.getElementById("settings-modal-blur"),
   settingsSuggestionMode: document.getElementById("settings-suggestion-mode"),
   settingsDefaultSubnetScan: document.getElementById("settings-default-subnet-scan"),
   settingsScanInterval: document.getElementById("settings-scan-interval"),
@@ -254,6 +256,9 @@ const elements = {
   userAccessGroupOptions: document.getElementById("user-access-group-options"),
   adminPanels: [...document.querySelectorAll(".admin-only")],
   passwordToggleButtons: [...document.querySelectorAll("[data-password-toggle]")],
+  subnetsTableWrap: document.getElementById("subnets-table-wrap"),
+  groupsTableWrap: document.getElementById("groups-table-wrap"),
+  devicesTableWrap: document.getElementById("devices-table-wrap"),
   subnetsTableBody: document.getElementById("subnets-table-body"),
   groupsTableBody: document.getElementById("groups-table-body"),
   devicesTableBody: document.getElementById("devices-table-body"),
@@ -302,10 +307,12 @@ let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 let activeView = "dashboard";
 let activeSettingsSection = "profile";
 let activeTemplateSection = "device-types";
+let showAllSubnetsInRegistry = false;
 let showAllDevicesInRegistry = false;
 const expandedGroupIds = new Set();
 let isAuthReady = false;
 let interfaceSettingsBaseline = null;
+let modalScrollY = 0;
 let editingSubnetId = "";
 let editingGroupId = "";
 let editingDeviceId = "";
@@ -446,6 +453,10 @@ function normalizeSettings(rawSettings) {
       typeof rawSettings?.autoRescanAfterDeviceSave === "boolean"
         ? rawSettings.autoRescanAfterDeviceSave
         : DEFAULT_SETTINGS.autoRescanAfterDeviceSave,
+    modalBlurEnabled:
+      typeof rawSettings?.modalBlurEnabled === "boolean"
+        ? rawSettings.modalBlurEnabled
+        : DEFAULT_SETTINGS.modalBlurEnabled,
     suggestionMode: normalizedSuggestionMode,
     language: normalizedLanguage,
     customSignature: String(rawSettings?.customSignature || "").trim(),
@@ -572,6 +583,7 @@ function bindEvents() {
   elements.settingsThemeSelect.addEventListener("change", handleInterfaceSettingsPreview);
   elements.settingsSuggestionMode.addEventListener("change", handleInterfaceSettingsPreview);
   elements.settingsAutoRescan.addEventListener("change", handleInterfaceSettingsPreview);
+  elements.settingsModalBlur.addEventListener("change", handleInterfaceSettingsPreview);
   elements.settingsSignatureInput.addEventListener("input", handleInterfaceSettingsPreview);
   elements.userMenuPasswordButton?.addEventListener("click", () => {
     closeUserMenu();
@@ -726,6 +738,7 @@ function syncSettingsForm() {
   elements.settingsSignatureInput.value = preferences.settings.customSignature;
   elements.settingsThemeSelect.value = preferences.settings.accentTheme;
   elements.settingsAutoRescan.checked = preferences.settings.autoRescanAfterDeviceSave;
+  elements.settingsModalBlur.checked = preferences.settings.modalBlurEnabled;
   elements.settingsSuggestionMode.value = preferences.settings.suggestionMode;
   const currentUser = state.auth?.user;
   elements.currentUserBadge.textContent = currentUser?.displayName || "ATLAS";
@@ -762,6 +775,7 @@ function isSettingsModalOpen() {
 
 function applyVisualSettings() {
   document.body.dataset.accentTheme = preferences.settings.accentTheme;
+  document.body.dataset.modalBlur = preferences.settings.modalBlurEnabled ? "on" : "off";
 }
 
 function renderSubnetScanSettings() {
@@ -1225,6 +1239,7 @@ function collectInterfaceSettingsDraft() {
     customSignature: elements.settingsSignatureInput.value,
     accentTheme: elements.settingsThemeSelect.value,
     autoRescanAfterDeviceSave: elements.settingsAutoRescan.checked,
+    modalBlurEnabled: elements.settingsModalBlur.checked,
     suggestionMode: elements.settingsSuggestionMode.value,
   });
 }
@@ -1535,6 +1550,11 @@ function openModal(modalId) {
     currentModal.hidden = true;
   }
 
+  if (!currentModal) {
+    modalScrollY = window.scrollY || window.pageYOffset || 0;
+    document.body.style.top = `-${modalScrollY}px`;
+  }
+
   modal.hidden = false;
   document.body.classList.add("modal-open");
   if (modalId === "device-modal") {
@@ -1576,6 +1596,8 @@ function closeModal(modalId) {
   }
   if (!getOpenModal()) {
     document.body.classList.remove("modal-open");
+    document.body.style.top = "";
+    window.scrollTo(0, modalScrollY);
   }
 }
 
@@ -1913,11 +1935,12 @@ function setActiveView(viewName) {
   });
 }
 
-async function refreshState(silent = false) {
+async function refreshState(silent = false, forceRender = false) {
   try {
     const snapshot = await apiRequest("/state");
     const normalizedSnapshot = normalizeState(snapshot);
     const shouldSkipFullRender =
+      !forceRender &&
       isAuthReady &&
       normalizedSnapshot.meta.revision === state.meta.revision &&
       normalizedSnapshot.auth?.authenticated === state.auth?.authenticated &&
@@ -2108,12 +2131,6 @@ function handleStatNavigation(target) {
 
 function handleRegistryDeviceFiltersChange() {
   renderDevicesTable();
-  const searchTerm = normalizeSearch(elements.searchInput?.value || "");
-  const quickFilter = elements.deviceFilterSelect?.value || "all";
-  const groupFilter = elements.deviceGroupFilterSelect?.value || "";
-  if (searchTerm || quickFilter !== "all" || groupFilter) {
-    document.getElementById("registry-panel-devices")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
 }
 
 async function handleGroupSubmit(event) {
@@ -3071,6 +3088,13 @@ async function clearAllData() {
 }
 
 async function handleSubnetTableActions(event) {
+  const toggleButton = event.target.closest("[data-toggle-subnets-list]");
+  if (toggleButton) {
+    showAllSubnetsInRegistry = !showAllSubnetsInRegistry;
+    renderSubnetsTable();
+    return;
+  }
+
   const editButton = event.target.closest("[data-edit-subnet]");
   if (editButton) {
     const subnet = state.subnets.find((entry) => entry.id === editButton.dataset.editSubnet);
@@ -3142,7 +3166,7 @@ async function handleSubnetTableActions(event) {
     await apiRequest(`/subnets/${encodeURIComponent(subnetId)}`, {
       method: "DELETE",
     });
-    await refreshState(true);
+    await refreshState(true, true);
     showToast(t("subnet_deleted", { name: subnet.name }));
   } catch (error) {
     showToast(error.message, true);
@@ -3238,7 +3262,7 @@ async function handleGroupTableActions(event) {
     await apiRequest(`/groups/${encodeURIComponent(groupId)}`, {
       method: "DELETE",
     });
-    await refreshState(true);
+    await refreshState(true, true);
     showToast(t("group_deleted", { name: group.name }));
   } catch (error) {
     showToast(error.message, true);
@@ -3307,7 +3331,7 @@ async function handleDeviceTableActions(event) {
     await apiRequest(`/devices/${encodeURIComponent(deviceId)}`, {
       method: "DELETE",
     });
-    await refreshState(true);
+    await refreshState(true, true);
     showToast(t("device_deleted", { name: device.name }));
   } catch (error) {
     showToast(error.message, true);
@@ -3394,6 +3418,7 @@ function renderSubnetOptions() {
 function renderSubnetsTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   const canManageAutomation = Boolean(state.auth?.capabilities?.canManageServerSettings);
+  elements.subnetsTableWrap?.classList.toggle("table-wrap--capped", state.subnets.length > 5);
   if (state.subnets.length === 0) {
     elements.subnetsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -3405,9 +3430,13 @@ function renderSubnetsTable() {
   }
 
   const reachableScanIps = getReachableScanIps();
-  const rows = state.subnets
+  const sortedSubnets = state.subnets
     .slice()
-    .sort((left, right) => left.rangeStartInt - right.rangeStartInt)
+    .sort((left, right) => left.rangeStartInt - right.rangeStartInt);
+  const visibleSubnets = showAllSubnetsInRegistry
+    ? sortedSubnets
+    : sortedSubnets.slice(0, 5);
+  const rows = visibleSubnets
     .map((subnet) => {
       const pingVisible = isSubnetPingVisible(subnet);
       const assignedCount = countAssignedInSubnet(subnet);
@@ -3460,12 +3489,27 @@ function renderSubnetsTable() {
       `;
     });
 
+  if (sortedSubnets.length > 5) {
+    rows.push(`
+      <tr class="table-expand-row">
+        <td colspan="8">
+          <button type="button" class="link-button table-expand-button" data-toggle-subnets-list>
+            ${escapeHtml(showAllSubnetsInRegistry
+              ? t("show_less_subnets")
+              : t("show_all_subnets", { count: sortedSubnets.length }))}
+          </button>
+        </td>
+      </tr>
+    `);
+  }
+
   elements.subnetsTableBody.innerHTML = rows.join("");
-  elements.subnetsCounter.textContent = formatRecordsCount(state.subnets.length);
+  elements.subnetsCounter.textContent = formatRecordsCount(sortedSubnets.length);
 }
 
 function renderGroupsTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
+  elements.groupsTableWrap?.classList.toggle("table-wrap--capped", state.groups.length > 5);
   if (state.groups.length === 0) {
     elements.groupsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -3689,6 +3733,7 @@ function renderDevicesTable() {
   const groupFilter = elements.deviceGroupFilterSelect?.value || "";
   const hasActiveFilter = Boolean(searchTerm || quickFilter !== "all" || groupFilter);
   const filteredDevices = state.devices.filter((device) => matchesSearch(device, searchTerm, quickFilter, groupFilter));
+  elements.devicesTableWrap?.classList.toggle("table-wrap--capped", hasActiveFilter || filteredDevices.length > 5);
 
   if (filteredDevices.length === 0) {
     const message = searchTerm
@@ -3768,6 +3813,7 @@ function renderDevicesTable() {
 
 function renderHistoryTable() {
   const searchTerm = normalizeSearch(elements.historySearchInput?.value || "");
+  const exactIpTerm = normalizeIpSafe(searchTerm);
   const eventType = elements.historyEventFilter?.value || "all";
   const scopeFilter = elements.historyScopeFilter?.value || "all";
   const filteredHistory = state.history.filter((entry) => {
@@ -3777,6 +3823,10 @@ function renderHistoryTable() {
     }
     if (!searchTerm) {
       return true;
+    }
+
+    if (exactIpTerm && (scopeFilter === "all" || scopeFilter === "ip")) {
+      return entry.ip === exactIpTerm || entry.previousIp === exactIpTerm;
     }
 
     const haystackSource = (() => {
@@ -4904,6 +4954,7 @@ function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = ""
   const group = resolveDeviceGroup(device, subnet);
   const pingState = getVisiblePingState(device.ip, subnet);
   const sameIpCount = state.devices.filter((entry) => entry.ip === device.ip).length;
+  const exactIpTerm = normalizeIpSafe(searchTerm);
 
   if (quickFilter === "conflicts" && sameIpCount <= 1) {
     return false;
@@ -4920,6 +4971,10 @@ function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = ""
 
   if (!searchTerm) {
     return true;
+  }
+
+  if (exactIpTerm) {
+    return device.ip === exactIpTerm;
   }
 
   const haystack = [

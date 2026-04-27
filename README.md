@@ -71,7 +71,7 @@ Use it for:
 
 Recommended practice:
 
-- enable auto-scan only for subnets reachable from the ATLAS server
+- enable auto-ping only for subnets reachable from the ATLAS server
 - disable it for remote or isolated networks where `ping` is not reliable
 
 ## Import, export, and backup

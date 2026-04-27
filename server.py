@@ -2471,6 +2471,13 @@ def perform_scan(
                 )
 
             with connect_db() as connection:
+                subnet_exists = connection.execute(
+                    "SELECT 1 FROM subnets WHERE id = ?",
+                    (target["subnetId"],),
+                ).fetchone()
+                if subnet_exists is None:
+                    continue
+
                 if target["scope"] == "subnet":
                     connection.execute("DELETE FROM ip_scan_results WHERE subnet_id = ?", (target["subnetId"],))
 

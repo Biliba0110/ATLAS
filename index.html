@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0a0d14">
   <title>ATLAS</title>
-  <link rel="icon" type="image/svg+xml" href="/atlas-logo.svg?v=0.2.6-ui28">
-  <link rel="stylesheet" href="styles.css?v=0.2.6-ui28">
-  <script src="i18n.js?v=0.2.6-ui28" defer></script>
-  <script src="app.js?v=0.2.6-ui28" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/atlas-logo.svg?v=0.2.6-ui37">
+  <link rel="stylesheet" href="styles.css?v=0.2.6-ui37">
+  <script src="i18n.js?v=0.2.6-ui37" defer></script>
+  <script src="app.js?v=0.2.6-ui37" defer></script>
 </head>
 <body>
   <div class="auth-screen" id="auth-screen" hidden>
@@ -202,7 +202,7 @@
             <span class="table-counter" id="subnets-counter">0</span>
           </div>
 
-          <div class="table-wrap">
+          <div class="table-wrap" id="subnets-table-wrap">
             <table>
               <thead>
                 <tr>
@@ -212,7 +212,7 @@
                   <th data-i18n="table_usage">Использование</th>
                   <th data-i18n="table_groups">Группы</th>
                   <th data-i18n="table_comment">Комментарий</th>
-                  <th data-i18n="table_auto_scan">Авто-скан</th>
+                  <th data-i18n="table_auto_scan">Авто-ping</th>
                   <th></th>
                 </tr>
               </thead>
@@ -234,7 +234,7 @@
             <span class="table-counter" id="groups-counter">0</span>
           </div>
 
-          <div class="table-wrap">
+          <div class="table-wrap" id="groups-table-wrap">
             <table>
               <thead>
                 <tr>
@@ -264,7 +264,7 @@
             <span class="table-counter" id="devices-counter">0</span>
           </div>
 
-          <div class="table-wrap">
+          <div class="table-wrap" id="devices-table-wrap">
             <table>
               <thead>
                 <tr>
@@ -421,9 +421,9 @@
           </select>
         </label>
         <label class="setting-card setting-card--toggle form-grid__full">
-          <span class="setting-title" data-i18n="subnet_scan_enabled_label">Доступен для ping и авто-скана</span>
+          <span class="setting-title" data-i18n="subnet_scan_enabled_label">Доступен для ping и auto-ping</span>
           <input type="checkbox" name="scanEnabled" checked>
-          <span class="setting-note" data-i18n="subnet_scan_enabled_note">Если выключено, подсеть не участвует в ping, авто-скане и связанных подсказках.</span>
+          <span class="setting-note" data-i18n="subnet_scan_enabled_note">Если выключено, подсеть не участвует в ping, auto-ping и связанных подсказках.</span>
         </label>
         <label class="form-grid__full">
           <span data-i18n="field_comment">Комментарий</span>
@@ -602,11 +602,11 @@
             <div class="export-csv-table__row" role="row">
               <div class="export-csv-table__dataset" role="cell">
                 <span class="export-csv-table__title" data-i18n="export_subnets_csv">Подсети CSV</span>
-                <span class="export-csv-table__note" data-i18n="csv_subnets_note">Подсети, пул, использование, авто-скан и комментарии.</span>
+                <span class="export-csv-table__note" data-i18n="csv_subnets_note">Подсети, пул, использование, auto-ping и комментарии.</span>
               </div>
               <div class="export-csv-table__contents" role="cell">
                 <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
-                <span class="export-csv-table__fields" data-i18n="csv_subnets_fields">CIDR, IP-пул, занятость, авто-скан, описание.</span>
+                <span class="export-csv-table__fields" data-i18n="csv_subnets_fields">CIDR, IP-пул, занятость, auto-ping, описание.</span>
               </div>
               <div class="export-csv-table__action" role="cell">
                 <button type="button" class="action-button" id="export-subnets-csv-button" data-i18n="export_subnets_csv">Подсети CSV</button>
@@ -902,6 +902,12 @@
               <span class="setting-note" data-i18n="rescan_after_save_note">Обновлять ping для группы или подсети после добавления устройства.</span>
             </label>
 
+            <label class="setting-card setting-card--toggle">
+              <span class="setting-title" data-i18n="modal_blur_label">Blur под модальным окном</span>
+              <input type="checkbox" id="settings-modal-blur">
+              <span class="setting-note" data-i18n="modal_blur_note">Размывает фон при открытии окна поверх интерфейса.</span>
+            </label>
+
             <label class="setting-card">
               <span class="setting-title" data-i18n="suggestion_mode_label">Формат подсказки IP</span>
               <select id="settings-suggestion-mode">
@@ -927,9 +933,9 @@
 
           <div class="settings-grid settings-grid--single">
             <label class="setting-card setting-card--toggle">
-              <span class="setting-title" data-i18n="default_subnet_scan_label">Сканировать новые подсети по умолчанию</span>
+              <span class="setting-title" data-i18n="default_subnet_scan_label">Включать auto-ping для новых подсетей</span>
               <input type="checkbox" id="settings-default-subnet-scan">
-              <span class="setting-note" data-i18n="default_subnet_scan_note">Определяет, будет ли новая подсеть автоматически участвовать в фоне после добавления.</span>
+              <span class="setting-note" data-i18n="default_subnet_scan_note">Определяет, будет ли новая подсеть автоматически участвовать в background ping после добавления.</span>
             </label>
 
             <label class="setting-card">
@@ -942,7 +948,7 @@
           <div class="template-editor-card template-editor-card--modal automation-subnets-card">
             <div class="template-editor-heading">
               <div>
-                <p class="helper-title" data-i18n="automation_subnets_title">Подсети для фонового скана</p>
+                <p class="helper-title" data-i18n="automation_subnets_title">Подсети для background ping</p>
                 <p class="helper-text helper-text--tight" data-i18n="automation_subnets_note">
                   Включай только те сети, которые реально достижимы с сервера ATLAS.
                 </p>
