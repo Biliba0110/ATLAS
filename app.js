@@ -4507,8 +4507,8 @@ function parseCidr(cidr) {
 
   const ipInt = ipToInt(normalizedIp);
   const mask = maskBits === 0 ? 0 : (0xffffffff << (32 - maskBits)) >>> 0;
-  const networkInt = ipInt & mask;
-  const broadcastInt = networkInt | (~mask >>> 0);
+  const networkInt = (ipInt & mask) >>> 0;
+  const broadcastInt = (networkInt | (~mask >>> 0)) >>> 0;
   const totalAddresses = broadcastInt - networkInt + 1;
   const usableHosts = maskBits >= 31 ? totalAddresses : Math.max(totalAddresses - 2, 0);
   const firstUsable = maskBits >= 31 ? networkInt : Math.min(networkInt + 1, broadcastInt);
