@@ -102,10 +102,6 @@
         <span class="stat-label" data-i18n="stat_subnets">Подсети</span>
         <strong class="stat-value" id="stat-subnets">0</strong>
       </button>
-      <button type="button" class="stat-card stat-card--link" data-stat-target="devices">
-        <span class="stat-label" data-i18n="stat_devices">Устройства</span>
-        <strong class="stat-value" id="stat-devices">0</strong>
-      </button>
       <button type="button" class="stat-card stat-card--link" data-stat-target="occupied">
         <span class="stat-label" data-i18n="stat_occupied">Занято IP</span>
         <strong class="stat-value" id="stat-occupied">0</strong>
@@ -113,6 +109,14 @@
       <button type="button" class="stat-card stat-card--link" data-stat-target="available">
         <span class="stat-label" data-i18n="stat_available">Свободно в пулах</span>
         <strong class="stat-value" id="stat-available">0</strong>
+      </button>
+      <button type="button" class="stat-card stat-card--link" data-stat-target="devices">
+        <span class="stat-label" data-i18n="stat_devices">Устройства</span>
+        <strong class="stat-value" id="stat-devices">0</strong>
+      </button>
+      <button type="button" class="stat-card stat-card--link" data-stat-target="services">
+        <span class="stat-label" data-i18n="stat_services">Сервисы</span>
+        <strong class="stat-value" id="stat-services">0</strong>
       </button>
     </section>
 
@@ -178,10 +182,19 @@
             <label class="setting-card registry-filter-card">
               <span class="setting-title" data-i18n="device_filter_label">Быстрый фильтр</span>
               <select id="device-filter-select">
-                <option value="all" data-i18n="device_filter_all">Все устройства</option>
+                <option value="all" data-i18n="device_filter_all">Все записи</option>
+                <option value="devices" data-i18n="device_filter_devices">Все устройства</option>
+                <option value="services" data-i18n="device_filter_services">Все сервисы</option>
                 <option value="conflicts" data-i18n="device_filter_conflicts">Только конфликты</option>
                 <option value="no-subnet" data-i18n="device_filter_no_subnet">Без подсети</option>
                 <option value="outside-pool" data-i18n="device_filter_outside_pool">Вне пула</option>
+                <option value="orphan-host" data-i18n="device_filter_orphan_host">Потерянный хост</option>
+                <option value="status-running" data-i18n="device_filter_status_running">Активные сервисы</option>
+                <option value="status-offline" data-i18n="device_filter_status_offline">Недоступные</option>
+                <option value="status-stale" data-i18n="device_filter_status_stale">Stale discovery</option>
+                <option value="source-docker" data-i18n="device_filter_source_docker">Источник Docker</option>
+                <option value="source-proxmox" data-i18n="device_filter_source_proxmox">Источник Proxmox</option>
+                <option value="source-iot" data-i18n="device_filter_source_iot">Источник IoT</option>
               </select>
             </label>
             <label class="setting-card registry-filter-card">
@@ -191,9 +204,16 @@
               </select>
             </label>
           </div>
+
+          <div class="registry-section-tabs" role="tablist" aria-label="Registry sections">
+            <button type="button" class="registry-section-tab is-active" data-registry-section-tab="subnets" data-i18n="subnets_title">Подсети</button>
+            <button type="button" class="registry-section-tab" data-registry-section-tab="groups" data-i18n="groups_title">Группы диапазонов</button>
+            <button type="button" class="registry-section-tab" data-registry-section-tab="devices" data-i18n="devices_title">Устройства</button>
+            <button type="button" class="registry-section-tab" data-registry-section-tab="services" data-i18n="services_title">Сервисы</button>
+          </div>
         </section>
 
-        <section class="panel" id="registry-panel-subnets">
+        <section class="panel" id="registry-panel-subnets" data-registry-section="subnets">
           <div class="panel-heading panel-heading--split">
             <div>
               <p class="panel-kicker" data-i18n="registry_kicker">Реестр</p>
@@ -225,7 +245,7 @@
           </div>
         </section>
 
-        <section class="panel" id="registry-panel-groups">
+        <section class="panel" id="registry-panel-groups" data-registry-section="groups" hidden>
           <div class="panel-heading panel-heading--split">
             <div>
               <p class="panel-kicker" data-i18n="registry_kicker">Реестр</p>
@@ -255,7 +275,7 @@
           </div>
         </section>
 
-        <section class="panel" id="registry-panel-devices">
+        <section class="panel" id="registry-panel-devices" data-registry-section="devices" hidden>
           <div class="panel-heading panel-heading--split">
             <div>
               <p class="panel-kicker" data-i18n="registry_kicker">Реестр</p>
@@ -287,6 +307,40 @@
             </table>
           </div>
         </section>
+
+        <section class="panel" id="registry-panel-services" data-registry-section="services" hidden>
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker" data-i18n="registry_kicker">Реестр</p>
+              <h2 data-i18n="services_title">Сервисы</h2>
+            </div>
+            <span class="table-counter" id="services-counter">0</span>
+          </div>
+
+          <div class="table-wrap" id="services-table-wrap">
+            <table class="services-table">
+              <thead>
+                <tr>
+                  <th data-i18n="table_name">Имя</th>
+                  <th data-i18n="device_host_label">Хост</th>
+                  <th data-i18n="service_access_label">Доступ</th>
+                  <th data-i18n="service_protocol_label">Протокол</th>
+                  <th data-i18n="service_access_port_label">Порт доступа</th>
+                  <th data-i18n="service_ports_label">Порты сервиса</th>
+                  <th data-i18n="service_status_label">Статус сервиса</th>
+                  <th data-i18n="device_last_seen_label">Последняя активность</th>
+                  <th data-i18n="table_comment">Комментарий</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="services-table-body">
+                <tr class="empty-row">
+                  <td colspan="10" data-i18n="empty_services">Сервисы еще не добавлены.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -312,6 +366,7 @@
                 <option value="ip_changed" data-i18n="action_ip_changed">IP изменен</option>
                 <option value="imported" data-i18n="action_imported">Импорт</option>
                 <option value="released" data-i18n="action_released">Освобожден</option>
+                <option value="history_cleared" data-i18n="action_history_cleared">История очищена</option>
               </select>
             </label>
             <label class="setting-card">
@@ -371,17 +426,21 @@
       </div>
 
       <div class="settings-grid settings-grid--single">
-        <button type="button" class="setting-card setting-card--action" data-open-modal="device-modal">
-          <span class="setting-title" data-i18n="add_device">Добавить устройство</span>
-          <span class="setting-note" data-i18n="add_device_note">Назначить IP, подсеть, группу и тип устройства.</span>
+        <button type="button" class="setting-card setting-card--action" data-open-modal="subnet-modal">
+          <span class="setting-title" data-i18n="add_subnet">Добавить подсеть</span>
+          <span class="setting-note" data-i18n="add_subnet_note">Добавить подсеть, пул адресов и комментарий.</span>
         </button>
         <button type="button" class="setting-card setting-card--action" data-open-modal="group-modal">
           <span class="setting-title" data-i18n="add_group">Добавить группу</span>
           <span class="setting-note" data-i18n="add_group_note">Создать именованный диапазон внутри подсети.</span>
         </button>
-        <button type="button" class="setting-card setting-card--action" data-open-modal="subnet-modal">
-          <span class="setting-title" data-i18n="add_subnet">Добавить подсеть</span>
-          <span class="setting-note" data-i18n="add_subnet_note">Добавить подсеть, пул адресов и комментарий.</span>
+        <button type="button" class="setting-card setting-card--action" data-open-modal="device-modal">
+          <span class="setting-title" data-i18n="add_device">Добавить устройство</span>
+          <span class="setting-note" data-i18n="add_device_note">Назначить IP, подсеть, группу и тип устройства.</span>
+        </button>
+        <button type="button" class="setting-card setting-card--action" data-open-modal="service-modal">
+          <span class="setting-title" data-i18n="add_service">Добавить сервис</span>
+          <span class="setting-note" data-i18n="add_service_note">Привязать сервис или контейнер к хосту, IP и портам.</span>
         </button>
       </div>
     </div>
@@ -427,7 +486,7 @@
         </label>
         <label class="form-grid__full">
           <span data-i18n="field_comment">Комментарий</span>
-          <textarea name="note" rows="3" data-i18n-placeholder="subnet_note_placeholder" placeholder="Например: основная домашняя сеть"></textarea>
+          <textarea name="note" rows="3" maxlength="30" data-i18n-placeholder="subnet_note_placeholder" placeholder="Например: основная домашняя сеть"></textarea>
         </label>
         <button type="submit" class="submit-button" id="subnet-submit-button" data-i18n="save_subnet">Сохранить подсеть</button>
       </form>
@@ -493,9 +552,87 @@
         </div>
         <label class="form-grid__full">
           <span data-i18n="field_comment">Комментарий</span>
-          <textarea name="note" rows="3" data-i18n-placeholder="device_note_placeholder" placeholder="Например: proxmox node"></textarea>
+          <textarea name="note" rows="3" maxlength="30" data-i18n-placeholder="device_note_placeholder" placeholder="Например: proxmox node"></textarea>
         </label>
         <button type="submit" class="submit-button" id="device-submit-button" data-i18n="save_device">Сохранить устройство</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="service-modal" hidden>
+    <div class="modal-panel modal-panel--form" role="dialog" aria-modal="true" aria-labelledby="service-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="panel-kicker" data-i18n="services_title">Сервисы</p>
+          <h2 id="service-modal-title" data-i18n="add_service">Добавить сервис</h2>
+        </div>
+        <button type="button" class="action-button action-button--ghost" data-close-modal="service-modal" data-i18n="close_button">Закрыть</button>
+      </div>
+
+      <form id="service-form" class="form-grid">
+        <label>
+          <span data-i18n="field_name">Имя</span>
+          <input type="text" name="name" data-i18n-placeholder="service_name_placeholder" placeholder="nginx-web" required>
+        </label>
+        <label>
+          <span data-i18n="device_host_label">Хост</span>
+          <select name="hostDeviceId" id="service-host-select" required>
+            <option value="" data-i18n="select_service_host">Выберите хост</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="service_protocol_label">Протокол</span>
+          <select name="protocol">
+            <option value="http" data-i18n="service_protocol_http">HTTP</option>
+            <option value="https" data-i18n="service_protocol_https">HTTPS</option>
+            <option value="api" data-i18n="service_protocol_api">API</option>
+            <option value="tcp" data-i18n="service_protocol_tcp">TCP</option>
+            <option value="udp" data-i18n="service_protocol_udp">UDP</option>
+            <option value="ssh" data-i18n="service_protocol_ssh">SSH</option>
+            <option value="rdp" data-i18n="service_protocol_rdp">RDP</option>
+            <option value="mqtt" data-i18n="service_protocol_mqtt">MQTT</option>
+            <option value="mqtts" data-i18n="service_protocol_mqtts">MQTTS</option>
+            <option value="grpc" data-i18n="service_protocol_grpc">gRPC</option>
+            <option value="ws" data-i18n="service_protocol_ws">WebSocket</option>
+            <option value="wss" data-i18n="service_protocol_wss">WebSocket TLS</option>
+            <option value="dns" data-i18n="service_protocol_dns">DNS</option>
+            <option value="snmp" data-i18n="service_protocol_snmp">SNMP</option>
+            <option value="smtp" data-i18n="service_protocol_smtp">SMTP</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="service_access_port_label">Порт доступа</span>
+          <input type="text" name="accessPort" data-i18n-placeholder="service_access_port_placeholder" placeholder="80/tcp">
+        </label>
+        <label>
+          <span data-i18n="service_ports_label">Порты сервиса</span>
+          <input type="text" name="ports" data-i18n-placeholder="service_ports_placeholder" placeholder="53/tcp, 53/udp">
+        </label>
+        <label>
+          <span data-i18n="service_public_url_label">Публичный URL</span>
+          <input type="url" name="serviceUrl" data-i18n-placeholder="service_url_placeholder" placeholder="https://service.example.com">
+        </label>
+        <label>
+          <span data-i18n="service_status_label">Статус сервиса</span>
+          <select name="integrationStatus">
+            <option value="" data-i18n="device_integration_status_empty">Не задан</option>
+            <option value="running" data-i18n="device_integration_status_running">Работает</option>
+            <option value="stopped" data-i18n="device_integration_status_stopped">Остановлен</option>
+            <option value="offline" data-i18n="device_integration_status_offline">Недоступен</option>
+            <option value="stale" data-i18n="device_integration_status_stale">Stale</option>
+            <option value="unknown" data-i18n="device_integration_status_unknown">Неизвестно</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="device_source_label">Источник</span>
+          <select name="source"></select>
+        </label>
+        <label class="form-grid__full">
+          <span data-i18n="field_comment">Комментарий</span>
+          <textarea name="note" rows="3" maxlength="30" data-i18n-placeholder="service_note_placeholder" placeholder="Например: web UI или контейнер Docker"></textarea>
+        </label>
+        <div id="service-form-status" class="result-card result-card--muted form-grid__full" hidden></div>
+        <button type="submit" class="submit-button" id="service-submit-button" data-i18n="save_service">Сохранить сервис</button>
       </form>
     </div>
   </div>
@@ -523,7 +660,7 @@
         </label>
         <label>
           <span data-i18n="field_comment">Комментарий</span>
-          <input type="text" name="note" data-i18n-placeholder="group_note_placeholder" placeholder="Кластер, сервис или класс устройств">
+          <input type="text" name="note" maxlength="30" data-i18n-placeholder="group_note_placeholder" placeholder="Кластер, сервис или класс устройств">
         </label>
         <label>
           <span data-i18n="field_range_start">Начало диапазона</span>
@@ -708,7 +845,7 @@
   </div>
 
   <div class="modal-backdrop" id="settings-modal" hidden>
-    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="modal-panel modal-panel--settings" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
       <div class="modal-header">
         <div>
           <p class="panel-kicker" data-i18n="settings_button">Настройки</p>
@@ -726,6 +863,7 @@
           <button type="button" class="settings-nav-button" data-settings-tab="interface" data-i18n="settings_section_interface">Интерфейс</button>
           <button type="button" class="settings-nav-button" data-settings-tab="automation" data-i18n="settings_section_automation">Автоматизация</button>
           <button type="button" class="settings-nav-button" data-settings-tab="templates" data-i18n="settings_section_templates">Шаблоны</button>
+          <button type="button" class="settings-nav-button admin-only" data-settings-tab="discovery" data-i18n="settings_section_discovery" hidden>Discovery</button>
           <button type="button" class="settings-nav-button admin-only" data-settings-tab="administration" data-i18n="settings_section_admin" hidden>Администрирование</button>
         </aside>
 
@@ -769,7 +907,7 @@
             </label>
             <label>
               <span data-i18n="field_comment">Комментарий</span>
-              <input type="text" name="description" data-i18n-placeholder="access_group_description_placeholder" placeholder="Например: отдельная зона ответственности">
+              <input type="text" name="description" maxlength="30" data-i18n-placeholder="access_group_description_placeholder" placeholder="Например: отдельная зона ответственности">
             </label>
             <button type="submit" class="submit-button" data-i18n="save_access_group">Сохранить группу доступа</button>
           </form>
@@ -928,14 +1066,14 @@
         <section class="panel panel--modal settings-panel settings-panel--half" data-settings-section="automation" hidden>
           <div class="panel-heading">
             <p class="panel-kicker">Ping</p>
-            <h2 data-i18n="background_scan_title">Фоновое сканирование</h2>
+            <h2 data-i18n="background_scan_title">Фоновый auto-ping</h2>
           </div>
 
           <div class="settings-grid settings-grid--single">
             <label class="setting-card setting-card--toggle">
               <span class="setting-title" data-i18n="default_subnet_scan_label">Включать auto-ping для новых подсетей</span>
               <input type="checkbox" id="settings-default-subnet-scan">
-              <span class="setting-note" data-i18n="default_subnet_scan_note">Определяет, будет ли новая подсеть автоматически участвовать в background ping после добавления.</span>
+              <span class="setting-note" data-i18n="default_subnet_scan_note">Определяет, будет ли новая подсеть автоматически участвовать в auto-ping после добавления.</span>
             </label>
 
             <label class="setting-card">
@@ -948,7 +1086,7 @@
           <div class="template-editor-card template-editor-card--modal automation-subnets-card">
             <div class="template-editor-heading">
               <div>
-                <p class="helper-title" data-i18n="automation_subnets_title">Подсети для background ping</p>
+                <p class="helper-title" data-i18n="automation_subnets_title">Подсети для auto-ping</p>
                 <p class="helper-text helper-text--tight" data-i18n="automation_subnets_note">
                   Включай только те сети, которые реально достижимы с сервера ATLAS.
                 </p>
@@ -965,6 +1103,198 @@
           <div id="server-settings-status" class="result-card result-card--muted"></div>
         </section>
 
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" data-settings-section="discovery" hidden>
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker" data-i18n="discovery_kicker">Discovery</p>
+              <h2 data-i18n="discovery_preview_title">Предпросмотр discovery</h2>
+              <p class="helper-text helper-text--tight" data-i18n="discovery_preview_note">
+                ATLAS принимает snapshots от агентов и показывает найденное здесь. По умолчанию записи не создаются автоматически.
+              </p>
+            </div>
+            <span class="table-counter" id="discovery-results-counter">0</span>
+          </div>
+
+          <div class="discovery-summary-grid" id="discovery-summary-grid"></div>
+
+          <div class="template-editor-card template-editor-card--modal discovery-agent-manager">
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="discovery_agents_title">Агенты</p>
+                <p class="helper-text helper-text--tight" data-i18n="discovery_agents_note">
+                  Создавайте push-агентов, ограничивайте IP/CIDR и выбирайте режим создания записей.
+                </p>
+              </div>
+              <button type="button" class="action-button action-button--ghost" id="reset-discovery-agent-form-button" data-i18n="discovery_agent_new_button">Новый агент</button>
+            </div>
+
+            <form id="discovery-agent-form" class="discovery-agent-form">
+              <div class="discovery-agent-form__section">
+                <label>
+                  <span data-i18n="table_name">Имя</span>
+                  <input type="text" name="name" maxlength="80" placeholder="server-room-agent" required>
+                </label>
+                <label>
+                  <span data-i18n="discovery_agent_kind_label">Тип агента</span>
+                  <select name="kind">
+                    <option value="host" data-i18n="discovery_agent_kind_host">Host</option>
+                    <option value="local" data-i18n="discovery_agent_kind_local">Local</option>
+                    <option value="hypervisor" data-i18n="discovery_agent_kind_hypervisor">Hypervisor</option>
+                    <option value="network" data-i18n="discovery_agent_kind_network">Network</option>
+                    <option value="external" data-i18n="discovery_agent_kind_external">External</option>
+                  </select>
+                </label>
+                <label>
+                  <span data-i18n="discovery_agent_create_mode_label">Create mode</span>
+                  <select name="createMode">
+                    <option value="preview_only" data-i18n="discovery_create_mode_preview_only">Preview only</option>
+                    <option value="auto_create_services" data-i18n="discovery_create_mode_auto_services">Auto-create services</option>
+                    <option value="auto_create_devices_and_services" data-i18n="discovery_create_mode_auto_all">Auto-create devices and services</option>
+                  </select>
+                </label>
+                <label>
+                  <span data-i18n="discovery_agent_linked_host_label">Связанный хост</span>
+                  <select name="linkedHostDeviceId" id="discovery-agent-host-select">
+                    <option value="" data-i18n="no_binding">Нет связи</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="discovery-agent-form__section discovery-agent-form__section--security">
+                <label class="discovery-agent-form__cidrs">
+                  <span data-i18n="discovery_agent_allowed_cidrs_label">Allowed CIDR</span>
+                  <textarea name="allowedCidrs" rows="1" placeholder="10.10.10.0/24, 127.0.0.1/32"></textarea>
+                </label>
+                <label id="discovery-agent-shared-token-label">
+                  <span data-i18n="discovery_agent_shared_token_label">Общий токен</span>
+                  <select name="sharedTokenAgentId" id="discovery-agent-shared-token-select">
+                    <option value="" data-i18n="discovery_agent_new_token">Новый токен</option>
+                  </select>
+                </label>
+                <label class="discovery-compact-toggle discovery-agent-enabled">
+                  <input type="checkbox" name="enabled" checked>
+                  <span>
+                    <span class="setting-title" data-i18n="discovery_agent_enabled_label">Агент включен</span>
+                    <span class="setting-note" data-i18n="discovery_agent_enabled_note">Выключенный агент не сможет отправлять snapshots.</span>
+                  </span>
+                </label>
+                <div class="template-editor-actions discovery-agent-form__actions">
+                  <button type="submit" class="action-button" id="save-discovery-agent-button" data-i18n="discovery_agent_save_button">Сохранить агента</button>
+                </div>
+              </div>
+            </form>
+
+            <div id="discovery-agent-token-card" class="result-card result-card--muted discovery-agent-token-card" hidden>
+              <strong data-i18n="discovery_agent_token_once_title">Token shown once</strong>
+              <p class="helper-text helper-text--tight" data-i18n="discovery_agent_token_once_note">
+                Сохраните config сейчас. ATLAS хранит только hash и не сможет показать token повторно.
+              </p>
+              <textarea id="discovery-agent-config-snippet" readonly rows="10"></textarea>
+              <div class="template-editor-actions">
+                <button type="button" class="action-button action-button--ghost" id="copy-discovery-agent-config-button" data-i18n="discovery_agent_copy_config">Копировать config</button>
+              </div>
+            </div>
+
+            <div class="table-wrap discovery-agents-wrap">
+              <table class="discovery-agents-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="table_name">Имя</th>
+                    <th data-i18n="table_status">Статус</th>
+                    <th data-i18n="discovery_agent_acl_short">ACL</th>
+                    <th data-i18n="discovery_agent_create_mode_label">Create mode</th>
+                    <th data-i18n="device_last_seen_label">Последняя активность</th>
+                    <th data-i18n="table_actions">Действия</th>
+                  </tr>
+                </thead>
+                <tbody id="discovery-agents-table-body">
+                  <tr class="empty-row">
+                    <td colspan="6" data-i18n="empty_discovery_agents">Агентов пока нет.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div id="discovery-agent-status" class="result-card result-card--muted"></div>
+          </div>
+
+          <div class="template-editor-card template-editor-card--modal discovery-data-policy-card">
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="discovery_data_policy_title">Data Policy</p>
+                <p class="helper-text helper-text--tight" data-i18n="discovery_data_policy_note">
+                  Received показывает, что агент прислал; Accepted сохраняется в БД; Visible разрешено показывать в UI.
+                </p>
+              </div>
+            </div>
+
+            <div class="discovery-policy-grid">
+              <label class="discovery-policy-option">
+                <input type="checkbox" id="discovery-policy-store-runtime">
+                <span>
+                  <span class="setting-title" data-i18n="discovery_policy_runtime_title">Runtime metadata</span>
+                  <span class="setting-note" data-i18n="discovery_policy_runtime_note">Image, timestamps, phase/status text and resource counters.</span>
+                </span>
+              </label>
+              <label class="discovery-policy-option">
+                <input type="checkbox" id="discovery-policy-store-labels">
+                <span>
+                  <span class="setting-title" data-i18n="discovery_policy_labels_title">Labels and tags</span>
+                  <span class="setting-note" data-i18n="discovery_policy_labels_note">Docker/Kubernetes labels, selectors, owners and tags.</span>
+                </span>
+              </label>
+              <label class="discovery-policy-option">
+                <input type="checkbox" id="discovery-policy-store-network">
+                <span>
+                  <span class="setting-title" data-i18n="discovery_policy_network_title">Network details</span>
+                  <span class="setting-note" data-i18n="discovery_policy_network_note">Internal IPs, networks, pod IPs, cluster IPs and related data.</span>
+                </span>
+              </label>
+              <label class="discovery-policy-option">
+                <input type="checkbox" id="discovery-policy-store-raw">
+                <span>
+                  <span class="setting-title" data-i18n="discovery_policy_raw_title">Store all raw metadata</span>
+                  <span class="setting-note" data-i18n="discovery_policy_raw_note">For debugging only. May store sensitive or noisy metadata.</span>
+                </span>
+              </label>
+              <label class="discovery-policy-option">
+                <input type="checkbox" id="discovery-policy-show-preview">
+                <span>
+                  <span class="setting-title" data-i18n="discovery_policy_visible_title">Visible in preview</span>
+                  <span class="setting-note" data-i18n="discovery_policy_visible_note">Show accepted metadata summary in the discovery preview.</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="template-editor-actions">
+              <button type="button" class="action-button" id="save-discovery-policy-button" data-i18n="discovery_policy_save_button">Сохранить policy</button>
+            </div>
+
+            <div id="discovery-policy-status" class="result-card result-card--muted"></div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="discovery-preview-table">
+              <thead>
+                <tr>
+                  <th data-i18n="table_status">Статус</th>
+                  <th data-i18n="table_name">Имя</th>
+                  <th data-i18n="device_source_label">Источник</th>
+                  <th data-i18n="device_host_label">Хост</th>
+                  <th data-i18n="service_ports_label">Порты</th>
+                  <th data-i18n="device_last_seen_label">Последняя активность</th>
+                  <th data-i18n="table_actions">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="discovery-results-table-body">
+                <tr class="empty-row">
+                  <td colspan="7" data-i18n="empty_discovery_results">Найденных объектов пока нет.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="panel panel--modal settings-panel settings-panel--full" data-settings-section="templates" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="templates_kicker">Шаблоны</p>
@@ -973,6 +1303,7 @@
 
           <div class="template-section-tabs" role="tablist" aria-label="Template settings sections">
             <button type="button" class="template-section-tab is-active" data-template-tab="device-types" data-i18n="device_types_title">Типы устройств</button>
+            <button type="button" class="template-section-tab" data-template-tab="device-sources" data-i18n="device_sources_title">Источники</button>
             <button type="button" class="template-section-tab" data-template-tab="group-suggestions" data-i18n="group_templates_title">Автоподстановка групп</button>
           </div>
 
@@ -990,6 +1321,7 @@
             <div class="device-types-builtin">
               <span class="pill" data-i18n="device_type_server">Server</span>
               <span class="pill" data-i18n="device_type_container">Container</span>
+              <span class="pill" data-i18n="device_type_service">Service</span>
               <span class="pill" data-i18n="device_type_iot">IoT</span>
             </div>
 
@@ -1001,6 +1333,41 @@
             </div>
 
             <div id="device-type-settings-status" class="result-card result-card--muted"></div>
+          </div>
+
+          <div class="template-editor-card template-editor-card--modal" data-template-panel="device-sources" hidden>
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="device_sources_title">Источники</p>
+                <p class="helper-text helper-text--tight" data-i18n="device_sources_note">
+                  Комплектные источники остаются доступными, а свои добавляются как бейджи для сервисов и будущих интеграций.
+                </p>
+              </div>
+              <button type="button" class="action-button action-button--ghost" id="add-custom-device-source-button" data-i18n="add_device_source">Добавить источник</button>
+            </div>
+
+            <details class="template-settings-group" open>
+              <summary class="template-settings-group__summary" data-i18n="bundled_device_sources_title">Комплектные источники</summary>
+              <p class="helper-text helper-text--tight" data-i18n="bundled_device_sources_note">
+                Эти источники встроены в ATLAS и используются для ручных записей, Docker, Proxmox, IoT и API.
+              </p>
+              <div id="bundled-device-sources-list" class="template-rules-list"></div>
+            </details>
+
+            <details class="template-settings-group" open>
+              <summary class="template-settings-group__summary" data-i18n="custom_device_sources_title">Пользовательские источники</summary>
+              <p class="helper-text helper-text--tight" data-i18n="custom_device_sources_note">
+                Добавляйте свои источники для сервисов и будущего discovery. В форме сервиса будет только выбор из списка.
+              </p>
+              <div id="custom-device-sources-list" class="template-rules-list"></div>
+            </details>
+
+            <div class="template-editor-actions">
+              <button type="button" class="action-button" id="save-device-source-settings-button" data-i18n="save_device_sources">Сохранить источники</button>
+              <button type="button" class="action-button action-button--ghost" id="reset-device-source-settings-button" data-i18n="reset_device_sources">Сбросить источники</button>
+            </div>
+
+            <div id="device-source-settings-status" class="result-card result-card--muted"></div>
           </div>
 
           <div class="template-editor-card template-editor-card--modal" data-template-panel="group-suggestions" hidden>
@@ -1066,6 +1433,7 @@
 
           <div class="template-editor-actions">
             <button type="button" class="action-button action-button--ghost" data-open-modal="about-modal" data-i18n="about_button">О программе</button>
+            <button type="button" class="action-button action-button--danger" id="clear-history-button" data-i18n="clear_history_button">Очистить историю</button>
             <button type="button" class="action-button action-button--danger" id="clear-data-button" data-i18n="clear_button">Очистить</button>
           </div>
         </section>

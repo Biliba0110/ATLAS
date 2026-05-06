@@ -8,9 +8,20 @@ const SUPPORTED_THEMES = ["atlas", "ember", "aurora", "fuchsia", "mono", "solari
 const BUILTIN_DEVICE_TYPES = [
   { id: "server", labelKey: "device_type_server" },
   { id: "container", labelKey: "device_type_container" },
+  { id: "service", labelKey: "device_type_service" },
   { id: "iot", labelKey: "device_type_iot" },
 ];
 const BUILTIN_DEVICE_TYPE_IDS = new Set(BUILTIN_DEVICE_TYPES.map((item) => item.id));
+const BUILTIN_DEVICE_SOURCES = [
+  { id: "docker", labelKey: "device_source_docker", badge: "D" },
+  { id: "proxmox", labelKey: "device_source_proxmox", badge: "PVE" },
+  { id: "iot", labelKey: "device_source_iot", badge: "IoT" },
+  { id: "api", labelKey: "device_source_api", badge: "API" },
+];
+const BUILTIN_DEVICE_SOURCE_IDS = new Set([
+  ...BUILTIN_DEVICE_SOURCES.map((item) => item.id),
+  "import",
+]);
 
 const DEFAULT_SETTINGS = {
   accentTheme: "atlas",
@@ -19,6 +30,15 @@ const DEFAULT_SETTINGS = {
   suggestionMode: "compact",
   language: "en",
   customSignature: "",
+};
+
+const DEFAULT_DISCOVERY_DATA_POLICY = {
+  storeRuntime: true,
+  storeLabels: false,
+  storeNetworkDetails: false,
+  storeInternalIps: false,
+  storeRawMetadata: false,
+  showMetadataInPreview: false,
 };
 
 const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
@@ -108,6 +128,69 @@ const ACTION_LABELS = {
   imported: "action_imported",
   ip_changed: "action_ip_changed",
   released: "action_released",
+  history_cleared: "action_history_cleared",
+};
+
+const FIELD_HELP_CONFIG = {
+  "subnet-form": [
+    { selector: '[name="name"]', key: "help_subnet_name" },
+    { selector: '[name="cidr"]', key: "help_subnet_cidr" },
+    { selector: '[name="rangeStart"]', key: "help_subnet_range_start" },
+    { selector: '[name="rangeEnd"]', key: "help_subnet_range_end" },
+    { selector: '[name="accessGroupId"]', key: "help_subnet_access_group" },
+    { selector: '[name="scanEnabled"]', key: "help_subnet_scan_enabled" },
+    { selector: '[name="note"]', key: "help_subnet_note" },
+  ],
+  "device-form": [
+    { selector: '[name="name"]', key: "help_device_name" },
+    { selector: '[name="ip"]', key: "help_device_ip" },
+    { selector: '[name="mac"]', key: "help_device_mac" },
+    { selector: '[name="type"]', key: "help_device_type" },
+    { selector: '[name="subnetId"]', key: "help_device_subnet" },
+    { selector: '[name="groupId"]', key: "help_device_group" },
+    { selector: '[name="note"]', key: "help_device_note" },
+  ],
+  "service-form": [
+    { selector: '[name="name"]', key: "help_service_name" },
+    { selector: '[name="hostDeviceId"]', key: "help_service_host" },
+    { selector: '[name="protocol"]', key: "help_service_protocol" },
+    { selector: '[name="accessPort"]', key: "help_service_access_port" },
+    { selector: '[name="ports"]', key: "help_service_ports" },
+    { selector: '[name="serviceUrl"]', key: "help_service_public_url" },
+    { selector: '[name="integrationStatus"]', key: "help_service_status" },
+    { selector: '[name="source"]', key: "help_service_source" },
+    { selector: '[name="note"]', key: "help_service_note" },
+  ],
+  "group-form": [
+    { selector: '[name="subnetId"]', key: "help_group_subnet" },
+    { selector: '[name="name"]', key: "help_group_name" },
+    { selector: '[name="note"]', key: "help_group_note" },
+    { selector: '[name="rangeStart"]', key: "help_group_range_start" },
+    { selector: '[name="rangeEnd"]', key: "help_group_range_end" },
+  ],
+  "access-group-form": [
+    { selector: '[name="name"]', key: "help_access_group_name" },
+    { selector: '[name="description"]', key: "help_access_group_description" },
+  ],
+  "user-form": [
+    { selector: '[name="username"]', key: "help_user_username" },
+    { selector: '[name="displayName"]', key: "help_user_display_name" },
+    { selector: '[name="role"]', key: "help_user_role" },
+    { selector: '[name="password"]', key: "help_user_password" },
+    { selector: "#user-access-group-options", key: "help_user_access_groups" },
+  ],
+  "discovery-agent-form": [
+    { selector: '[name="name"]', key: "help_discovery_agent_name" },
+    { selector: '[name="kind"]', key: "help_discovery_agent_kind" },
+    { selector: '[name="createMode"]', key: "help_discovery_agent_create_mode" },
+    { selector: '[name="linkedHostDeviceId"]', key: "help_discovery_agent_linked_host" },
+    { selector: '[name="allowedCidrs"]', key: "help_discovery_agent_allowed_cidrs" },
+    { selector: '[name="sharedTokenAgentId"]', key: "help_discovery_agent_shared_token" },
+    { selector: '[name="enabled"]', key: "help_discovery_agent_enabled" },
+  ],
+  "missing-type-form": [
+    { selector: "#missing-type-target-select", key: "help_missing_type_target" },
+  ],
 };
 
 const TRANSLATIONS = window.ATLAS_TRANSLATIONS || {};
@@ -158,6 +241,7 @@ const preferences = {
   settings: { ...DEFAULT_SETTINGS },
   customGroupTemplates: [],
   customDeviceTypes: [],
+  customDeviceSources: [],
 };
 
 const elements = {
@@ -168,6 +252,7 @@ const elements = {
   heroSignature: document.getElementById("hero-signature"),
   subnetForm: document.getElementById("subnet-form"),
   deviceForm: document.getElementById("device-form"),
+  serviceForm: document.getElementById("service-form"),
   groupForm: document.getElementById("group-form"),
   accessGroupForm: document.getElementById("access-group-form"),
   userForm: document.getElementById("user-form"),
@@ -175,6 +260,10 @@ const elements = {
   subnetSelect: document.getElementById("device-subnet-select"),
   subnetAccessGroupSelect: document.getElementById("subnet-access-group-select"),
   deviceGroupSelect: document.getElementById("device-group-select"),
+  serviceHostSelect: document.getElementById("service-host-select"),
+  serviceProtocolSelect: document.querySelector('#service-form select[name="protocol"]'),
+  serviceStatusSelect: document.querySelector('#service-form select[name="integrationStatus"]'),
+  serviceSourceSelect: document.querySelector('#service-form select[name="source"]'),
   groupSubnetSelect: document.getElementById("group-subnet-select"),
   searchInput: document.getElementById("device-search-input"),
   deviceFilterSelect: document.getElementById("device-filter-select"),
@@ -205,6 +294,8 @@ const elements = {
   passwordStatus: document.getElementById("password-status"),
   viewTabs: [...document.querySelectorAll("[data-view-tab]")],
   pageViews: [...document.querySelectorAll("[data-view]")],
+  registrySectionTabs: [...document.querySelectorAll("[data-registry-section-tab]")],
+  registrySections: [...document.querySelectorAll("[data-registry-section]")],
   statCards: [...document.querySelectorAll("[data-stat-target]")],
   modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
   openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
@@ -239,26 +330,54 @@ const elements = {
   bundledTemplateRulesList: document.getElementById("bundled-template-rules-list"),
   templateRulesList: document.getElementById("custom-template-rules-list"),
   customDeviceTypesList: document.getElementById("custom-device-types-list"),
+  bundledDeviceSourcesList: document.getElementById("bundled-device-sources-list"),
+  customDeviceSourcesList: document.getElementById("custom-device-sources-list"),
   addCustomDeviceTypeButton: document.getElementById("add-custom-device-type-button"),
+  addCustomDeviceSourceButton: document.getElementById("add-custom-device-source-button"),
   addTemplateRuleButton: document.getElementById("add-template-rule-button"),
   templateEditor: document.getElementById("template-editor"),
   applyTemplateJsonButton: document.getElementById("apply-template-json-button"),
   deviceTypeSettingsStatus: document.getElementById("device-type-settings-status"),
+  deviceSourceSettingsStatus: document.getElementById("device-source-settings-status"),
   templateSettingsStatus: document.getElementById("template-settings-status"),
   saveDeviceTypeSettingsButton: document.getElementById("save-device-type-settings-button"),
   resetDeviceTypeSettingsButton: document.getElementById("reset-device-type-settings-button"),
+  saveDeviceSourceSettingsButton: document.getElementById("save-device-source-settings-button"),
+  resetDeviceSourceSettingsButton: document.getElementById("reset-device-source-settings-button"),
   saveTemplateSettingsButton: document.getElementById("save-template-settings-button"),
   resetTemplateSettingsButton: document.getElementById("reset-template-settings-button"),
   accessGroupStatus: document.getElementById("access-group-status"),
   userStatus: document.getElementById("user-status"),
   accessGroupsTableBody: document.getElementById("access-groups-table-body"),
   usersTableBody: document.getElementById("users-table-body"),
+  discoveryAgentForm: document.getElementById("discovery-agent-form"),
+  discoveryAgentHostSelect: document.getElementById("discovery-agent-host-select"),
+  discoveryAgentSharedTokenSelect: document.getElementById("discovery-agent-shared-token-select"),
+  discoveryAgentSharedTokenLabel: document.getElementById("discovery-agent-shared-token-label"),
+  discoveryAgentsTableBody: document.getElementById("discovery-agents-table-body"),
+  discoveryAgentStatus: document.getElementById("discovery-agent-status"),
+  resetDiscoveryAgentFormButton: document.getElementById("reset-discovery-agent-form-button"),
+  discoveryAgentTokenCard: document.getElementById("discovery-agent-token-card"),
+  discoveryAgentConfigSnippet: document.getElementById("discovery-agent-config-snippet"),
+  copyDiscoveryAgentConfigButton: document.getElementById("copy-discovery-agent-config-button"),
+  discoveryPolicyStoreRuntime: document.getElementById("discovery-policy-store-runtime"),
+  discoveryPolicyStoreLabels: document.getElementById("discovery-policy-store-labels"),
+  discoveryPolicyStoreNetwork: document.getElementById("discovery-policy-store-network"),
+  discoveryPolicyStoreRaw: document.getElementById("discovery-policy-store-raw"),
+  discoveryPolicyShowPreview: document.getElementById("discovery-policy-show-preview"),
+  saveDiscoveryPolicyButton: document.getElementById("save-discovery-policy-button"),
+  discoveryPolicyStatus: document.getElementById("discovery-policy-status"),
+  discoverySummaryGrid: document.getElementById("discovery-summary-grid"),
+  discoveryResultsTableBody: document.getElementById("discovery-results-table-body"),
+  discoveryResultsCounter: document.getElementById("discovery-results-counter"),
   userAccessGroupOptions: document.getElementById("user-access-group-options"),
   adminPanels: [...document.querySelectorAll(".admin-only")],
   passwordToggleButtons: [...document.querySelectorAll("[data-password-toggle]")],
   subnetsTableWrap: document.getElementById("subnets-table-wrap"),
   groupsTableWrap: document.getElementById("groups-table-wrap"),
   devicesTableWrap: document.getElementById("devices-table-wrap"),
+  servicesTableWrap: document.getElementById("services-table-wrap"),
+  servicesTableBody: document.getElementById("services-table-body"),
   subnetsTableBody: document.getElementById("subnets-table-body"),
   groupsTableBody: document.getElementById("groups-table-body"),
   devicesTableBody: document.getElementById("devices-table-body"),
@@ -269,9 +388,11 @@ const elements = {
   subnetsCounter: document.getElementById("subnets-counter"),
   groupsCounter: document.getElementById("groups-counter"),
   devicesCounter: document.getElementById("devices-counter"),
+  servicesCounter: document.getElementById("services-counter"),
   historyCounter: document.getElementById("history-counter"),
   statSubnets: document.getElementById("stat-subnets"),
   statDevices: document.getElementById("stat-devices"),
+  statServices: document.getElementById("stat-services"),
   statOccupied: document.getElementById("stat-occupied"),
   statAvailable: document.getElementById("stat-available"),
   exportJsonButton: document.getElementById("export-json-button"),
@@ -287,11 +408,15 @@ const elements = {
   importButton: document.getElementById("import-button"),
   importFileInput: document.getElementById("import-file-input"),
   clearDataButton: document.getElementById("clear-data-button"),
+  clearHistoryButton: document.getElementById("clear-history-button"),
   toast: document.getElementById("toast"),
   subnetModalTitle: document.getElementById("subnet-modal-title"),
   subnetSubmitButton: document.getElementById("subnet-submit-button"),
   deviceModalTitle: document.getElementById("device-modal-title"),
   deviceSubmitButton: document.getElementById("device-submit-button"),
+  serviceModalTitle: document.getElementById("service-modal-title"),
+  serviceSubmitButton: document.getElementById("service-submit-button"),
+  serviceFormStatus: document.getElementById("service-form-status"),
   groupModalTitle: document.getElementById("group-modal-title"),
   groupSubmitButton: document.getElementById("group-submit-button"),
 };
@@ -305,19 +430,26 @@ let deviceGroupSelectionMode = "auto";
 let bundledGroupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 let activeView = "dashboard";
+let activeRegistrySection = "subnets";
 let activeSettingsSection = "profile";
 let activeTemplateSection = "device-types";
 let showAllSubnetsInRegistry = false;
+let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
 const expandedGroupIds = new Set();
 let isAuthReady = false;
 let interfaceSettingsBaseline = null;
 let modalScrollY = 0;
+let activeFieldHelpButton = null;
+let isFieldHelpPinned = false;
 let editingSubnetId = "";
 let editingGroupId = "";
 let editingDeviceId = "";
+let editingServiceId = "";
 let editingAccessGroupId = "";
 let editingUserId = "";
+let editingDiscoveryAgentId = "";
+let lastDiscoveryAgentConfig = "";
 
 initialize().catch((error) => {
   console.error(error);
@@ -386,6 +518,125 @@ function getDeviceTypeLabel(type) {
   return customType?.label || humanizeDeviceType(normalizedType) || type;
 }
 
+function getAvailableDeviceSources() {
+  return [
+    ...BUILTIN_DEVICE_SOURCES.map((item) => ({
+      id: item.id,
+      label: t(item.labelKey),
+      badge: item.badge,
+      builtIn: true,
+    })),
+    ...normalizeCustomDeviceSources(preferences.customDeviceSources).map((item) => ({
+      ...item,
+      builtIn: false,
+    })),
+  ];
+}
+
+function getDeviceSourceLabel(source) {
+  const normalizedSource = normalizeMetadataToken(source, "");
+  if (!normalizedSource) {
+    return t("device_integration_status_empty");
+  }
+  const sourceRecord = getAvailableDeviceSources().find((item) => item.id === normalizedSource);
+  if (sourceRecord) {
+    return sourceRecord.label;
+  }
+
+  if (normalizedSource === "import") {
+    return t("device_source_import");
+  }
+
+  return humanizeDeviceType(normalizedSource);
+}
+
+function getDeviceSourceLogoText(source) {
+  const normalizedSource = normalizeMetadataToken(source, "");
+  if (!normalizedSource) {
+    return "";
+  }
+  const sourceRecord = getAvailableDeviceSources().find((item) => item.id === normalizedSource);
+  if (sourceRecord?.badge) {
+    return sourceRecord.badge;
+  }
+  if (normalizedSource === "import") {
+    return "CSV";
+  }
+  return normalizedSource.slice(0, 3).toUpperCase();
+}
+
+function getDeviceSourceLogoClass(source) {
+  const normalizedSource = normalizeMetadataToken(source, "");
+  if (!normalizedSource) {
+    return "";
+  }
+  if (BUILTIN_DEVICE_SOURCES.some((item) => item.id === normalizedSource) || normalizedSource === "import") {
+    return `source-logo--${normalizedSource}`;
+  }
+  return `source-logo--custom source-logo--tone-${hashSourceTone(normalizedSource)}`;
+}
+
+function hashSourceTone(value) {
+  const source = String(value || "custom");
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    hash = (hash * 31 + source.charCodeAt(index)) >>> 0;
+  }
+  return (hash % 8) + 1;
+}
+
+function getDeviceSourceKindLabel(sourceKind) {
+  const normalizedKind = normalizeMetadataToken(sourceKind, "");
+  const key = `device_source_kind_${normalizedKind}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedKind);
+}
+
+function getIntegrationStatusLabel(status) {
+  const normalizedStatus = normalizeMetadataToken(status, "");
+  if (!normalizedStatus) {
+    return "";
+  }
+  const key = `device_integration_status_${normalizedStatus}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedStatus);
+}
+
+function getServiceProtocolLabel(protocol) {
+  const normalizedProtocol = normalizeMetadataToken(protocol, "http");
+  const key = `service_protocol_${normalizedProtocol}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || normalizedProtocol.toUpperCase();
+}
+
+function extractServicePort(ports) {
+  const match = String(ports || "").match(/\b([1-9][0-9]{0,4})\b/);
+  if (!match) {
+    return "";
+  }
+  const port = Number(match[1]);
+  return port > 0 && port <= 65535 ? String(port) : "";
+}
+
+function getServiceAccessPort(service) {
+  return String(service?.accessPort || "").trim();
+}
+
+function getPublicServiceUrl(service) {
+  return String(service?.serviceUrl || "").trim();
+}
+
+function buildPrivateServiceUrl(service, host = resolveDeviceHost(service)) {
+  const ip = host?.ip || service?.ip || "";
+  if (!ip) {
+    return "";
+  }
+  const protocol = normalizeMetadataToken(service?.protocol, "http");
+  const port = extractServicePort(getServiceAccessPort(service));
+  return `${protocol}://${ip}${port ? `:${port}` : ""}`;
+}
+
+function buildServiceUrl(service, host = resolveDeviceHost(service)) {
+  return getPublicServiceUrl(service) || buildPrivateServiceUrl(service, host);
+}
+
 function getActionLabel(action) {
   const key = ACTION_LABELS[action];
   return key ? t(key) : action;
@@ -418,6 +669,20 @@ function applyLocalizedUi() {
     node.placeholder = t(node.dataset.i18nPlaceholder);
   });
 
+  document.querySelectorAll(".field-help-button").forEach((button) => {
+    button.setAttribute("aria-label", t("field_help_button_label"));
+  });
+
+  renderDiscoveryAgentFormOptions();
+
+  if (activeFieldHelpButton) {
+    const popover = document.querySelector(".field-help-popover");
+    if (popover && !popover.hidden) {
+      popover.textContent = t(activeFieldHelpButton.dataset.fieldHelp);
+      positionFieldHelpPopover(activeFieldHelpButton, popover);
+    }
+  }
+
   elements.heroSignature.textContent = preferences.settings.customSignature || t("default_signature");
   syncPasswordToggleButtons();
   syncCrudModalCaptions();
@@ -425,6 +690,25 @@ function applyLocalizedUi() {
 
 function formatRecordsCount(count) {
   return t("records_count", { count });
+}
+
+function truncateText(value, maxLength = 30) {
+  const text = String(value || "").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function renderRegistryComment(value) {
+  const text = String(value || "").trim();
+  const displayText = truncateText(text || t("no_data"), 30);
+  return `
+    <div class="registry-table__comment" title="${escapeHtml(text)}">
+      ${escapeHtml(displayText)}
+    </div>
+  `;
 }
 
 function formatFilteredCount(count, total) {
@@ -478,11 +762,17 @@ function normalizeUserPreferences(rawPreferences = {}) {
     : Array.isArray(rawSettings?.customDeviceTypes)
       ? rawSettings.customDeviceTypes
       : [];
+  const rawCustomDeviceSources = Array.isArray(rawPreferences?.customDeviceSources)
+    ? rawPreferences.customDeviceSources
+    : Array.isArray(rawSettings?.customDeviceSources)
+      ? rawSettings.customDeviceSources
+      : [];
 
   return {
     settings: normalizeSettings(rawSettings),
     customGroupTemplates: rawCustomGroupTemplates,
     customDeviceTypes: normalizeCustomDeviceTypes(rawCustomDeviceTypes),
+    customDeviceSources: normalizeCustomDeviceSources(rawCustomDeviceSources),
   };
 }
 
@@ -531,9 +821,11 @@ function bindEvents() {
   elements.loginForm.addEventListener("submit", handleLoginSubmit);
   elements.subnetForm.addEventListener("submit", handleSubnetSubmit);
   elements.deviceForm.addEventListener("submit", handleDeviceSubmit);
+  elements.serviceForm?.addEventListener("submit", handleServiceSubmit);
   elements.groupForm.addEventListener("submit", handleGroupSubmit);
   elements.accessGroupForm.addEventListener("submit", handleAccessGroupSubmit);
   elements.userForm.addEventListener("submit", handleUserSubmit);
+  elements.discoveryAgentForm?.addEventListener("submit", handleDiscoveryAgentSubmit);
   elements.passwordForm.addEventListener("submit", handlePasswordSubmit);
   elements.searchInput.addEventListener("input", handleRegistryDeviceFiltersChange);
   elements.deviceFilterSelect?.addEventListener("change", handleRegistryDeviceFiltersChange);
@@ -550,6 +842,11 @@ function bindEvents() {
       setActiveView(button.dataset.viewTab);
     });
   });
+  elements.registrySectionTabs.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveRegistrySection(button.dataset.registrySectionTab);
+    });
+  });
   elements.statCards.forEach((button) => {
     button.addEventListener("click", () => {
       handleStatNavigation(button.dataset.statTarget);
@@ -557,7 +854,7 @@ function bindEvents() {
   });
   elements.openModalButtons.forEach((button) => {
     button.addEventListener("click", () => {
-      handleOpenModalRequest(button.dataset.openModal);
+      handleOpenModalRequest(button.dataset.openModal, button);
     });
   });
   elements.closeModalButtons.forEach((button) => {
@@ -573,6 +870,9 @@ function bindEvents() {
     });
   });
   elements.subnetSelect.addEventListener("change", handleDeviceSubnetChange);
+  elements.serviceHostSelect?.addEventListener("change", handleServiceHostChange);
+  bindUnifiedAddFormSelects();
+  initializeFieldHelp();
   elements.deviceGroupSelect.addEventListener("change", handleDeviceGroupChange);
   elements.deviceForm.elements.type.addEventListener("change", handleDeviceTypeChange);
   elements.deviceForm.elements.ip.addEventListener("input", updateSuggestedIp);
@@ -613,9 +913,15 @@ function bindEvents() {
   elements.addCustomDeviceTypeButton?.addEventListener("click", handleAddCustomDeviceType);
   elements.customDeviceTypesList?.addEventListener("click", handleCustomDeviceTypeListClick);
   elements.customDeviceTypesList?.addEventListener("input", handleCustomDeviceTypeListInput);
+  elements.addCustomDeviceSourceButton?.addEventListener("click", handleAddCustomDeviceSource);
+  elements.customDeviceSourcesList?.addEventListener("click", handleCustomDeviceSourceListClick);
+  elements.customDeviceSourcesList?.addEventListener("input", handleCustomDeviceSourceListInput);
+  elements.customDeviceSourcesList?.addEventListener("change", handleCustomDeviceSourceListInput);
   elements.applyTemplateJsonButton.addEventListener("click", handleTemplateJsonApply);
   elements.saveDeviceTypeSettingsButton?.addEventListener("click", handleDeviceTypeSettingsSave);
   elements.resetDeviceTypeSettingsButton?.addEventListener("click", handleDeviceTypeSettingsReset);
+  elements.saveDeviceSourceSettingsButton?.addEventListener("click", handleDeviceSourceSettingsSave);
+  elements.resetDeviceSourceSettingsButton?.addEventListener("click", handleDeviceSourceSettingsReset);
   elements.saveTemplateSettingsButton.addEventListener("click", handleTemplateSettingsSave);
   elements.resetTemplateSettingsButton.addEventListener("click", handleTemplateSettingsReset);
   elements.exportJsonButton.addEventListener("click", exportJson);
@@ -626,12 +932,21 @@ function bindEvents() {
   elements.importButton.addEventListener("click", () => elements.importFileInput.click());
   elements.importFileInput.addEventListener("change", handleImportFile);
   elements.clearDataButton.addEventListener("click", clearAllData);
+  elements.clearHistoryButton?.addEventListener("click", clearHistory);
   elements.subnetsTableBody.addEventListener("click", handleSubnetTableActions);
   elements.subnetsTableBody.addEventListener("change", handleSubnetScanToggle);
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
+  elements.servicesTableBody?.addEventListener("click", handleServiceListActions);
   elements.accessGroupsTableBody?.addEventListener("click", handleAccessGroupTableActions);
   elements.usersTableBody?.addEventListener("click", handleUserAdminTableActions);
+  elements.discoveryAgentsTableBody?.addEventListener("click", handleDiscoveryAgentTableActions);
+  elements.resetDiscoveryAgentFormButton?.addEventListener("click", () => prepareDiscoveryAgentForm());
+  elements.discoveryAgentForm?.elements.allowedCidrs?.addEventListener("input", autosizeDiscoveryAllowedCidrs);
+  elements.copyDiscoveryAgentConfigButton?.addEventListener("click", copyDiscoveryAgentConfig);
+  elements.saveDiscoveryPolicyButton?.addEventListener("click", handleDiscoveryPolicySave);
+  elements.discoveryPolicyStoreRaw?.addEventListener("change", syncDiscoveryPolicyControls);
+  elements.discoveryResultsTableBody?.addEventListener("click", handleDiscoveryPreviewActions);
   elements.historySearchInput?.addEventListener("input", renderHistoryTable);
   elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
   elements.historyScopeFilter?.addEventListener("change", renderHistoryTable);
@@ -774,6 +1089,7 @@ function isSettingsModalOpen() {
 }
 
 function applyVisualSettings() {
+  document.documentElement.dataset.accentTheme = preferences.settings.accentTheme;
   document.body.dataset.accentTheme = preferences.settings.accentTheme;
   document.body.dataset.modalBlur = preferences.settings.modalBlurEnabled ? "on" : "off";
 }
@@ -835,10 +1151,49 @@ function normalizeCustomDeviceTypes(rawTypes) {
     .filter(Boolean);
 }
 
+function normalizeCustomDeviceSources(rawSources) {
+  if (!Array.isArray(rawSources)) {
+    return [];
+  }
+
+  const seenIds = new Set();
+
+  return rawSources
+    .map((entry, index) => {
+      const label = String(entry?.label || "").trim();
+      const suggestedId = String(entry?.id || "").trim() || slugifyDeviceSourceId(label, index);
+      const normalizedId = normalizeMetadataToken(suggestedId, "");
+      const badge = String(entry?.badge || "")
+        .trim()
+        .replace(/\s+/g, "")
+        .slice(0, 4);
+
+      if (!label || !normalizedId || BUILTIN_DEVICE_SOURCE_IDS.has(normalizedId) || seenIds.has(normalizedId)) {
+        return null;
+      }
+
+      seenIds.add(normalizedId);
+      return {
+        id: normalizedId,
+        label,
+        badge: badge || normalizedId.slice(0, 3).toUpperCase(),
+      };
+    })
+    .filter(Boolean);
+}
+
 function createBlankCustomDeviceType() {
   return {
     id: "",
     label: "",
+  };
+}
+
+function createBlankCustomDeviceSource() {
+  return {
+    id: "",
+    label: "",
+    badge: "",
   };
 }
 
@@ -848,6 +1203,14 @@ function slugifyDeviceTypeId(value, fallbackIndex = 0) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   return normalized || `device-type-${fallbackIndex + 1}`;
+}
+
+function slugifyDeviceSourceId(value, fallbackIndex = 0) {
+  const normalized = normalizeSearchableText(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return normalized || `source-${fallbackIndex + 1}`;
 }
 
 function createBlankTemplateRule() {
@@ -1012,6 +1375,83 @@ function renderCustomDeviceTypeCards(deviceTypes) {
   }).join("");
 }
 
+function renderBundledDeviceSourceCards() {
+  if (!elements.bundledDeviceSourcesList) {
+    return;
+  }
+
+  elements.bundledDeviceSourcesList.innerHTML = BUILTIN_DEVICE_SOURCES.map((source) => {
+    const label = t(source.labelKey);
+    return `
+      <div class="template-rule-card template-rule-card--static">
+        <div class="template-rule-summary template-rule-summary--static">
+          <span class="source-logo ${escapeHtml(getDeviceSourceLogoClass(source.id))}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${escapeHtml(source.badge)}</span>
+          <div class="template-rule-summary__main">
+            <strong class="template-rule-summary__title">${escapeHtml(label)}</strong>
+            <span class="template-rule-summary__meta">${escapeHtml(t("device_source_id_meta", { id: source.id }))}</span>
+          </div>
+          <span class="pill template-rule-summary__hint">${escapeHtml(t("template_bundled_badge"))}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderCustomDeviceSourceCards(deviceSources) {
+  if (!elements.customDeviceSourcesList) {
+    return;
+  }
+
+  const effectiveSources = deviceSources.length > 0 ? deviceSources : [createBlankCustomDeviceSource()];
+
+  elements.customDeviceSourcesList.innerHTML = effectiveSources.map((source, index) => {
+    const title = source.label || t("device_source_custom_fallback", { index: index + 1 });
+    const sourceId = source.id || slugifyDeviceSourceId(source.label, index);
+    const badge = source.badge || sourceId.slice(0, 3).toUpperCase();
+    const logoClass = getDeviceSourceLogoClass(sourceId);
+    const summaryMeta = sourceId ? t("device_source_id_meta", { id: sourceId }) : t("device_source_id_pending");
+
+    return `
+      <details class="template-rule-card" data-custom-device-source-id="${escapeHtml(source.id || "")}">
+        <summary class="template-rule-summary">
+          <span class="source-logo ${escapeHtml(logoClass)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(badge)}</span>
+          <div class="template-rule-summary__main">
+            <strong class="template-rule-summary__title">${escapeHtml(title)}</strong>
+            <span class="template-rule-summary__meta">${escapeHtml(summaryMeta)}</span>
+          </div>
+          <span class="pill template-rule-summary__hint">${escapeHtml(t("device_source_edit_rule"))}</span>
+        </summary>
+
+        <div class="template-rule-body">
+          <div class="template-rule-grid">
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("device_source_label_title"))}</span>
+              <input type="text" data-device-source-field="label" value="${escapeHtml(source.label || "")}" placeholder="${escapeHtml(t("device_source_label_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("device_source_label_note"))}</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("device_source_id_title"))}</span>
+              <input type="text" data-device-source-field="id" value="${escapeHtml(source.id || "")}" placeholder="${escapeHtml(t("device_source_id_key_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("device_source_id_note"))}</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">${escapeHtml(t("device_source_badge_title"))}</span>
+              <input type="text" data-device-source-field="badge" maxlength="4" value="${escapeHtml(source.badge || "")}" placeholder="${escapeHtml(t("device_source_badge_placeholder"))}">
+              <span class="setting-note">${escapeHtml(t("device_source_badge_note"))}</span>
+            </label>
+          </div>
+
+          <div class="template-rule-actions">
+            <button type="button" class="link-button" data-remove-custom-device-source="${index}">${escapeHtml(t("remove_device_source"))}</button>
+          </div>
+        </div>
+      </details>
+    `;
+  }).join("");
+}
+
 function collectTemplateRulesFromCards() {
   const rows = [...elements.templateRulesList.querySelectorAll(".template-rule-card")];
   const draftRules = rows.map((row, index) => {
@@ -1068,6 +1508,32 @@ function collectCustomDeviceTypesFromCards() {
   return normalizedTypes;
 }
 
+function collectCustomDeviceSourcesFromCards() {
+  const rows = [...(elements.customDeviceSourcesList?.querySelectorAll(".template-rule-card") || [])];
+  const draftSources = rows.map((row, index) => {
+    const label = String(row.querySelector('[data-device-source-field="label"]')?.value || "").trim();
+    const idValue = String(row.querySelector('[data-device-source-field="id"]')?.value || "").trim();
+    const badge = String(row.querySelector('[data-device-source-field="badge"]')?.value || "").trim();
+
+    if (!label && !idValue && !badge) {
+      return null;
+    }
+
+    return {
+      id: idValue || slugifyDeviceSourceId(label, index),
+      label,
+      badge,
+    };
+  }).filter(Boolean);
+
+  const normalizedSources = normalizeCustomDeviceSources(draftSources);
+  if (normalizedSources.length !== draftSources.length) {
+    throw new Error(t("device_sources_invalid_form"));
+  }
+
+  return normalizedSources;
+}
+
 function syncTemplateJsonFromCards() {
   try {
     const normalizedTemplates = collectTemplateRulesFromCards();
@@ -1076,6 +1542,16 @@ function syncTemplateJsonFromCards() {
     }
   } catch {
     // Keep the JSON editor intact until the form becomes valid again.
+  }
+}
+
+function handleCustomDeviceSourceListInput() {
+  try {
+    preferences.customDeviceSources = collectCustomDeviceSourcesFromCards();
+    renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
+    renderServicesList();
+  } catch {
+    // Keep local input intact until the form becomes valid.
   }
 }
 
@@ -1102,19 +1578,25 @@ function renderTemplateEditor() {
   const bundledTemplates = normalizeGroupSuggestionTemplates(bundledGroupSuggestionTemplates);
   const customTemplates = normalizeGroupSuggestionTemplates(preferences.customGroupTemplates);
   const customDeviceTypes = normalizeCustomDeviceTypes(preferences.customDeviceTypes);
+  const customDeviceSources = normalizeCustomDeviceSources(preferences.customDeviceSources);
 
   preferences.customDeviceTypes = customDeviceTypes;
+  preferences.customDeviceSources = customDeviceSources;
   preferences.customGroupTemplates = customTemplates;
   rebuildEffectiveGroupSuggestionTemplates();
   renderCustomDeviceTypeCards(customDeviceTypes);
+  renderBundledDeviceSourceCards();
+  renderCustomDeviceSourceCards(customDeviceSources);
   renderBundledTemplateRuleCards(bundledTemplates);
   renderTemplateRuleCards(customTemplates);
   renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+  renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
   if (document.activeElement !== elements.templateEditor) {
     elements.templateEditor.value = JSON.stringify(customTemplates, null, 2);
   }
   setTemplateSettingsStatus(t("custom_templates_note"), "muted");
   setDeviceTypeSettingsStatus(t("device_types_note"), "muted");
+  setDeviceSourceSettingsStatus(t("device_sources_note"), "muted");
 }
 
 function handleAddTemplateRule() {
@@ -1142,6 +1624,18 @@ function handleAddCustomDeviceType() {
   renderCustomDeviceTypeCards([...currentTypes, createBlankCustomDeviceType()]);
 }
 
+function handleAddCustomDeviceSource() {
+  const currentSources = (() => {
+    try {
+      return collectCustomDeviceSourcesFromCards();
+    } catch {
+      return normalizeCustomDeviceSources(preferences.customDeviceSources);
+    }
+  })();
+
+  renderCustomDeviceSourceCards([...currentSources, createBlankCustomDeviceSource()]);
+}
+
 function handleTemplateRuleListClick(event) {
   const removeButton = event.target.closest("[data-remove-template-rule]");
   if (!removeButton) {
@@ -1156,6 +1650,28 @@ function handleTemplateRuleListClick(event) {
   }
 
   syncTemplateJsonFromCards();
+}
+
+function handleCustomDeviceSourceListClick(event) {
+  const removeButton = event.target.closest("[data-remove-custom-device-source]");
+  if (!removeButton) {
+    return;
+  }
+
+  const row = removeButton.closest(".template-rule-card");
+  row?.remove();
+
+  if (!elements.customDeviceSourcesList.children.length) {
+    renderCustomDeviceSourceCards([createBlankCustomDeviceSource()]);
+  }
+
+  try {
+    preferences.customDeviceSources = collectCustomDeviceSourcesFromCards();
+  } catch {
+    preferences.customDeviceSources = normalizeCustomDeviceSources(preferences.customDeviceSources);
+  }
+  renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
+  renderServicesList();
 }
 
 function handleCustomDeviceTypeListClick(event) {
@@ -1198,6 +1714,14 @@ function setDeviceTypeSettingsStatus(message, tone = "muted") {
   elements.deviceTypeSettingsStatus.textContent = message;
 }
 
+function setDeviceSourceSettingsStatus(message, tone = "muted") {
+  if (!elements.deviceSourceSettingsStatus) {
+    return;
+  }
+  elements.deviceSourceSettingsStatus.className = `result-card result-card--${tone}`;
+  elements.deviceSourceSettingsStatus.textContent = message;
+}
+
 function setDeviceFormStatus(message, tone = "muted", visible = true) {
   elements.deviceFormStatus.className = `result-card result-card--${tone} form-grid__full`;
   elements.deviceFormStatus.textContent = message;
@@ -1212,7 +1736,9 @@ function setDeviceFormPending(isPending) {
   const submitButton = elements.deviceForm.querySelector('[type="submit"]');
   if (submitButton) {
     submitButton.disabled = isPending;
-    submitButton.textContent = isPending ? t("device_form_saving") : t("save_device");
+    submitButton.textContent = isPending
+      ? t("device_form_saving")
+      : t(editingDeviceId ? "update_device" : "save_device");
   }
 
   elements.applySuggestionButton.disabled = isPending || !elements.applySuggestionButton.dataset.suggestedIp;
@@ -1231,6 +1757,22 @@ function setAccessGroupStatus(message, tone = "muted") {
 function setUserStatus(message, tone = "muted") {
   elements.userStatus.className = `result-card result-card--${tone}`;
   elements.userStatus.textContent = message;
+}
+
+function setDiscoveryAgentStatus(message, tone = "muted") {
+  if (!elements.discoveryAgentStatus) {
+    return;
+  }
+  elements.discoveryAgentStatus.className = `result-card result-card--${tone}`;
+  elements.discoveryAgentStatus.textContent = message;
+}
+
+function setDiscoveryPolicyStatus(message, tone = "muted") {
+  if (!elements.discoveryPolicyStatus) {
+    return;
+  }
+  elements.discoveryPolicyStatus.className = `result-card result-card--${tone}`;
+  elements.discoveryPolicyStatus.textContent = message;
 }
 
 function collectInterfaceSettingsDraft() {
@@ -1381,6 +1923,29 @@ async function handleDeviceTypeSettingsReset() {
   setDeviceTypeSettingsStatus(t("device_types_reset_done"), "warn");
 }
 
+async function handleDeviceSourceSettingsSave() {
+  try {
+    const normalizedSources = collectCustomDeviceSourcesFromCards();
+    preferences.customDeviceSources = normalizedSources;
+    await savePreferences({ customDeviceSources: normalizedSources });
+    renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
+    renderServicesList();
+    renderTemplateEditor();
+    setDeviceSourceSettingsStatus(t("device_sources_saved"), "ok");
+  } catch (error) {
+    setDeviceSourceSettingsStatus(error.message || t("device_sources_invalid_form"), "danger");
+  }
+}
+
+async function handleDeviceSourceSettingsReset() {
+  preferences.customDeviceSources = [];
+  await savePreferences({ customDeviceSources: [] });
+  renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
+  renderServicesList();
+  renderTemplateEditor();
+  setDeviceSourceSettingsStatus(t("device_sources_reset_done"), "warn");
+}
+
 async function handleTemplateSettingsSave() {
   try {
     const normalizedTemplates = collectTemplateRulesFromCards();
@@ -1474,6 +2039,156 @@ function prepareUserForm(user = null) {
   syncPasswordToggleButtons(elements.userForm);
 }
 
+function renderDiscoveryAgentFormOptions() {
+  if (!elements.discoveryAgentForm) {
+    return;
+  }
+
+  const currentHostValue = elements.discoveryAgentHostSelect?.value || "";
+  const currentSharedTokenValue = elements.discoveryAgentSharedTokenSelect?.value || "";
+  const hostOptions = (state.devices || [])
+    .filter((device) => device.type !== "service")
+    .slice()
+    .sort((left, right) => {
+      const leftIp = normalizeIpSafe(left.ip);
+      const rightIp = normalizeIpSafe(right.ip);
+      if (leftIp && rightIp) {
+        return ipToInt(leftIp) - ipToInt(rightIp);
+      }
+      if (leftIp || rightIp) {
+        return leftIp ? -1 : 1;
+      }
+      return left.name.localeCompare(right.name, "ru");
+    })
+    .map((device) => `
+      <option value="${escapeHtml(device.id)}">
+        ${escapeHtml(`${device.ip || t("no_data")} · ${device.name}`)}
+      </option>
+    `);
+
+  if (elements.discoveryAgentHostSelect) {
+    elements.discoveryAgentHostSelect.innerHTML = `
+      <option value="">${escapeHtml(t("no_binding"))}</option>
+      ${hostOptions.join("")}
+    `;
+    elements.discoveryAgentHostSelect.value = currentHostValue;
+  }
+
+  const agentOptions = (state.admin?.discoveryAgents || [])
+    .filter((agent) => agent.id !== editingDiscoveryAgentId)
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name, "ru"))
+    .map((agent) => `
+      <option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>
+    `);
+
+  if (elements.discoveryAgentSharedTokenSelect) {
+    elements.discoveryAgentSharedTokenSelect.innerHTML = `
+      <option value="">${escapeHtml(t("discovery_agent_new_token"))}</option>
+      ${agentOptions.join("")}
+    `;
+    elements.discoveryAgentSharedTokenSelect.value = currentSharedTokenValue;
+  }
+
+  if (elements.discoveryAgentSharedTokenLabel) {
+    elements.discoveryAgentSharedTokenLabel.hidden = Boolean(editingDiscoveryAgentId);
+  }
+}
+
+function autosizeDiscoveryAllowedCidrs() {
+  const textarea = elements.discoveryAgentForm?.elements.allowedCidrs;
+  if (!textarea) {
+    return;
+  }
+
+  textarea.style.height = "50px";
+  const nextHeight = Math.min(Math.max(textarea.scrollHeight, 50), 132);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > nextHeight ? "auto" : "hidden";
+}
+
+function prepareDiscoveryAgentForm(agent = null) {
+  if (!elements.discoveryAgentForm) {
+    return;
+  }
+
+  editingDiscoveryAgentId = agent?.id || "";
+  elements.discoveryAgentForm.reset();
+  renderDiscoveryAgentFormOptions();
+  elements.discoveryAgentForm.elements.enabled.checked = agent ? Boolean(agent.enabled) : true;
+  elements.discoveryAgentForm.elements.kind.value = agent?.kind || "host";
+  elements.discoveryAgentForm.elements.createMode.value = agent?.createMode || "preview_only";
+  elements.discoveryAgentForm.elements.linkedHostDeviceId.value = agent?.linkedHostDeviceId || "";
+  elements.discoveryAgentForm.elements.name.value = agent?.name || "";
+  elements.discoveryAgentForm.elements.allowedCidrs.value = (agent?.allowedCidrs || []).join("\n");
+  autosizeDiscoveryAllowedCidrs();
+  const submitButton = elements.discoveryAgentForm.querySelector('[type="submit"]');
+  if (submitButton) {
+    submitButton.textContent = agent ? t("discovery_agent_update_button") : t("discovery_agent_save_button");
+  }
+}
+
+function normalizeDiscoveryDataPolicy(rawPolicy = {}) {
+  return {
+    ...DEFAULT_DISCOVERY_DATA_POLICY,
+    ...Object.fromEntries(
+      Object.keys(DEFAULT_DISCOVERY_DATA_POLICY).map((key) => [
+        key,
+        typeof rawPolicy?.[key] === "boolean" ? rawPolicy[key] : DEFAULT_DISCOVERY_DATA_POLICY[key],
+      ]),
+    ),
+  };
+}
+
+function getDiscoveryDataPolicyDraft() {
+  const storeRawMetadata = Boolean(elements.discoveryPolicyStoreRaw?.checked);
+  return normalizeDiscoveryDataPolicy({
+    storeRuntime: storeRawMetadata || Boolean(elements.discoveryPolicyStoreRuntime?.checked),
+    storeLabels: storeRawMetadata || Boolean(elements.discoveryPolicyStoreLabels?.checked),
+    storeNetworkDetails: storeRawMetadata || Boolean(elements.discoveryPolicyStoreNetwork?.checked),
+    storeInternalIps: storeRawMetadata || Boolean(elements.discoveryPolicyStoreNetwork?.checked),
+    storeRawMetadata,
+    showMetadataInPreview: Boolean(elements.discoveryPolicyShowPreview?.checked),
+  });
+}
+
+function syncDiscoveryPolicyControls() {
+  const storeRawMetadata = Boolean(elements.discoveryPolicyStoreRaw?.checked);
+  [
+    elements.discoveryPolicyStoreRuntime,
+    elements.discoveryPolicyStoreLabels,
+    elements.discoveryPolicyStoreNetwork,
+  ].forEach((control) => {
+    if (!control) {
+      return;
+    }
+    if (storeRawMetadata) {
+      control.checked = true;
+    }
+    control.disabled = storeRawMetadata || !Boolean(state.auth?.capabilities?.isAdmin);
+  });
+}
+
+function renderDiscoveryDataPolicySettings() {
+  const policy = normalizeDiscoveryDataPolicy(state.settings?.discoveryDataPolicy);
+  if (elements.discoveryPolicyStoreRuntime) {
+    elements.discoveryPolicyStoreRuntime.checked = Boolean(policy.storeRuntime);
+  }
+  if (elements.discoveryPolicyStoreLabels) {
+    elements.discoveryPolicyStoreLabels.checked = Boolean(policy.storeLabels);
+  }
+  if (elements.discoveryPolicyStoreNetwork) {
+    elements.discoveryPolicyStoreNetwork.checked = Boolean(policy.storeNetworkDetails || policy.storeInternalIps);
+  }
+  if (elements.discoveryPolicyStoreRaw) {
+    elements.discoveryPolicyStoreRaw.checked = Boolean(policy.storeRawMetadata);
+  }
+  if (elements.discoveryPolicyShowPreview) {
+    elements.discoveryPolicyShowPreview.checked = Boolean(policy.showMetadataInPreview);
+  }
+  syncDiscoveryPolicyControls();
+}
+
 function prepareGroupModal(group = null) {
   editingGroupId = group?.id || "";
   elements.groupForm.reset();
@@ -1488,14 +2203,19 @@ function prepareGroupModal(group = null) {
   }
 }
 
-function prepareDeviceModal(device = null) {
+function prepareDeviceModal(device = null, options = {}) {
+  const preset = options.preset || "";
   editingDeviceId = device?.id || "";
   elements.deviceForm.reset();
   clearDeviceFormStatus();
   setDeviceFormPending(false);
-  elements.deviceModalTitle.textContent = device ? t("edit_device") : t("add_device");
+  elements.deviceModalTitle.textContent = device
+    ? t("edit_device")
+    : preset === "service"
+      ? t("add_service")
+      : t("add_device");
   elements.deviceSubmitButton.textContent = device ? t("update_device") : t("save_device");
-  renderDeviceTypeOptions(device?.type || "server");
+  renderDeviceTypeOptions(device?.type || (preset === "service" ? "service" : "server"));
   if (device) {
     const subnet = resolveDeviceSubnet(device);
     const group = resolveDeviceGroup(device, subnet);
@@ -1510,16 +2230,54 @@ function prepareDeviceModal(device = null) {
   } else {
     deviceGroupSelectionMode = "auto";
     renderDeviceGroupOptions("");
+    if (preset === "service") {
+      elements.deviceForm.elements.type.value = "service";
+    }
   }
   updateSuggestedIp();
 }
 
-function handleOpenModalRequest(modalId) {
+function setServiceFormStatus(message, tone = "muted", visible = true) {
+  elements.serviceFormStatus.className = `result-card result-card--${tone} form-grid__full`;
+  elements.serviceFormStatus.textContent = message;
+  elements.serviceFormStatus.hidden = !visible;
+}
+
+function clearServiceFormStatus() {
+  setServiceFormStatus("", "muted", false);
+}
+
+function prepareServiceModal(service = null) {
+  editingServiceId = service?.id || "";
+  elements.serviceForm.reset();
+  clearServiceFormStatus();
+  renderServiceHostOptions(service?.hostDeviceId || "");
+  renderServiceSourceOptions(service?.source || "");
+  elements.serviceModalTitle.textContent = service ? t("edit_service") : t("add_service");
+  elements.serviceSubmitButton.textContent = service ? t("update_service") : t("save_service");
+
+  if (service) {
+    elements.serviceForm.elements.name.value = service.name;
+    elements.serviceForm.elements.hostDeviceId.value = service.hostDeviceId || "";
+    elements.serviceForm.elements.source.value = service.source || "";
+    elements.serviceForm.elements.integrationStatus.value = service.integrationStatus || "";
+    elements.serviceForm.elements.protocol.value = service.protocol || "http";
+    elements.serviceForm.elements.accessPort.value = service.accessPort || "";
+    elements.serviceForm.elements.serviceUrl.value = service.serviceUrl || "";
+    elements.serviceForm.elements.ports.value = service.ports || "";
+    elements.serviceForm.elements.note.value = service.note || "";
+  } else {
+    elements.serviceForm.elements.integrationStatus.value = "running";
+    elements.serviceForm.elements.protocol.value = "http";
+  }
+}
+
+function handleOpenModalRequest(modalId, trigger = null) {
   if (!modalId) {
     return;
   }
-  const trigger = document.querySelector(`[data-open-modal="${modalId}"]`);
-  if (trigger?.disabled) {
+  const opener = trigger || document.querySelector(`[data-open-modal="${modalId}"]`);
+  if (opener?.disabled) {
     return;
   }
 
@@ -1533,7 +2291,9 @@ function handleOpenModalRequest(modalId) {
   } else if (modalId === "group-modal") {
     prepareGroupModal();
   } else if (modalId === "device-modal") {
-    prepareDeviceModal();
+    prepareDeviceModal(null, { preset: opener?.dataset.devicePreset || "" });
+  } else if (modalId === "service-modal") {
+    prepareServiceModal();
   }
 
   openModal(modalId);
@@ -1583,6 +2343,10 @@ function closeModal(modalId) {
     setDeviceFormPending(false);
     editingDeviceId = "";
   }
+  if (modal.id === "service-modal") {
+    clearServiceFormStatus();
+    editingServiceId = "";
+  }
   if (modal.id === "subnet-modal") {
     editingSubnetId = "";
   }
@@ -1594,6 +2358,7 @@ function closeModal(modalId) {
     syncSettingsForm();
     interfaceSettingsBaseline = null;
   }
+  hideFieldHelp(true);
   if (!getOpenModal()) {
     document.body.classList.remove("modal-open");
     document.body.style.top = "";
@@ -1626,11 +2391,15 @@ function closeUserMenu() {
 }
 
 function handleDocumentClick(event) {
-  if (!elements.userMenuDropdown || elements.userMenuDropdown.hidden) {
-    return;
+  if (!event.target.closest(".select-field--limited") && !event.target.closest(".select-limited-list")) {
+    closeLimitedSelect();
   }
 
-  if (!event.target.closest("#hero-account-menu")) {
+  if (!event.target.closest(".field-help-button") && !event.target.closest(".field-help-popover")) {
+    hideFieldHelp(true);
+  }
+
+  if (elements.userMenuDropdown && !elements.userMenuDropdown.hidden && !event.target.closest("#hero-account-menu")) {
     closeUserMenu();
   }
 }
@@ -1685,11 +2454,13 @@ function applyPreferences(nextPreferences) {
   preferences.settings = nextPreferences.settings;
   preferences.customGroupTemplates = nextPreferences.customGroupTemplates;
   preferences.customDeviceTypes = nextPreferences.customDeviceTypes;
+  preferences.customDeviceSources = nextPreferences.customDeviceSources;
   persistCachedInterfaceSettings(preferences.settings);
   rebuildEffectiveGroupSuggestionTemplates();
   applyVisualSettings();
   applyLocalizedUi();
   renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+  renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
 }
 
 function openAuthScreen(session = null) {
@@ -1800,6 +2571,7 @@ async function savePreferences(partial = null) {
     ...preferences.settings,
     customGroupTemplates: preferences.customGroupTemplates,
     customDeviceTypes: preferences.customDeviceTypes,
+    customDeviceSources: preferences.customDeviceSources,
   };
   const savedPreferences = await apiRequest("/preferences", {
     method: "PATCH",
@@ -1832,16 +2604,52 @@ function renderPermissionAwareUi() {
   elements.settingsDefaultSubnetScan.disabled = !Boolean(capabilities.canManageServerSettings);
   elements.settingsScanInterval.disabled = !Boolean(capabilities.canManageServerSettings);
   elements.clearDataButton.disabled = !isAdmin;
+  if (elements.clearHistoryButton) {
+    elements.clearHistoryButton.disabled = !isAdmin;
+  }
   elements.saveTemplateSettingsButton.disabled = !state.auth?.authenticated;
   elements.resetTemplateSettingsButton.disabled = !state.auth?.authenticated;
   elements.saveDeviceTypeSettingsButton.disabled = !state.auth?.authenticated;
   elements.resetDeviceTypeSettingsButton.disabled = !state.auth?.authenticated;
+  if (elements.saveDeviceSourceSettingsButton) {
+    elements.saveDeviceSourceSettingsButton.disabled = !state.auth?.authenticated;
+  }
+  if (elements.resetDeviceSourceSettingsButton) {
+    elements.resetDeviceSourceSettingsButton.disabled = !state.auth?.authenticated;
+  }
   if (elements.addCustomDeviceTypeButton) {
     elements.addCustomDeviceTypeButton.disabled = !state.auth?.authenticated;
+  }
+  if (elements.addCustomDeviceSourceButton) {
+    elements.addCustomDeviceSourceButton.disabled = !state.auth?.authenticated;
   }
   if (elements.addTemplateRuleButton) {
     elements.addTemplateRuleButton.disabled = !state.auth?.authenticated;
   }
+  if (elements.discoveryAgentForm) {
+    [...elements.discoveryAgentForm.elements].forEach((control) => {
+      control.disabled = !isAdmin;
+    });
+  }
+  if (elements.resetDiscoveryAgentFormButton) {
+    elements.resetDiscoveryAgentFormButton.disabled = !isAdmin;
+  }
+  if (elements.copyDiscoveryAgentConfigButton) {
+    elements.copyDiscoveryAgentConfigButton.disabled = !isAdmin || !lastDiscoveryAgentConfig;
+  }
+  [
+    elements.discoveryPolicyStoreRuntime,
+    elements.discoveryPolicyStoreLabels,
+    elements.discoveryPolicyStoreNetwork,
+    elements.discoveryPolicyStoreRaw,
+    elements.discoveryPolicyShowPreview,
+    elements.saveDiscoveryPolicyButton,
+  ].forEach((control) => {
+    if (control) {
+      control.disabled = !isAdmin;
+    }
+  });
+  syncDiscoveryPolicyControls();
 
   elements.adminPanels.forEach((panel) => {
     panel.hidden = !isAdmin;
@@ -1857,8 +2665,16 @@ function renderAdminPanels() {
   if (!editingUserId) {
     prepareUserForm();
   }
+  if (!editingDiscoveryAgentId) {
+    prepareDiscoveryAgentForm();
+  } else {
+    renderDiscoveryAgentFormOptions();
+  }
   renderAccessGroupsTable();
   renderUsersTable();
+  renderDiscoveryDataPolicySettings();
+  renderDiscoveryAgentsTable();
+  renderDiscoveryPreview();
   const editingUser = editingUserId
     ? (state.admin?.users || []).find((entry) => entry.id === editingUserId) || null
     : null;
@@ -1912,6 +2728,10 @@ function setActiveTemplateSection(sectionName) {
 }
 
 function handleGlobalKeydown(event) {
+  if (event.key === "Escape") {
+    closeLimitedSelect();
+    hideFieldHelp(true);
+  }
   if (event.key === "Escape" && elements.userMenuDropdown && !elements.userMenuDropdown.hidden) {
     closeUserMenu();
   }
@@ -1932,6 +2752,68 @@ function setActiveView(viewName) {
     const isActive = view.dataset.view === activeView;
     view.hidden = !isActive;
     view.classList.toggle("is-active", isActive);
+  });
+
+  syncRegistrySections();
+}
+
+function setActiveRegistrySection(sectionName) {
+  activeRegistrySection = ["subnets", "groups", "devices", "services"].includes(sectionName)
+    ? sectionName
+    : "subnets";
+  syncRegistrySections();
+}
+
+function getRegistryFilterMode() {
+  const searchTerm = normalizeSearch(elements.searchInput?.value || "");
+  const quickFilter = elements.deviceFilterSelect?.value || "all";
+  const groupFilter = elements.deviceGroupFilterSelect?.value || "";
+  return {
+    searchTerm,
+    quickFilter,
+    groupFilter,
+    isFocused: Boolean(searchTerm || quickFilter !== "all" || groupFilter),
+  };
+}
+
+function getFocusedRegistrySections({ quickFilter, groupFilter, searchTerm }) {
+  if (quickFilter === "services" || ["status-running", "status-offline"].includes(quickFilter)) {
+    return new Set(["services"]);
+  }
+  if (quickFilter === "status-stale") {
+    return new Set(["devices", "services"]);
+  }
+  if (
+    quickFilter === "devices" ||
+    groupFilter ||
+    ["conflicts", "no-subnet", "outside-pool"].includes(quickFilter)
+  ) {
+    return new Set(["devices"]);
+  }
+  if (quickFilter === "orphan-host" || quickFilter.startsWith("source-") || searchTerm) {
+    return new Set(["devices", "services"]);
+  }
+  return new Set([activeRegistrySection]);
+}
+
+function syncRegistrySections() {
+  if (!elements.registrySections.length) {
+    return;
+  }
+
+  const filterMode = getRegistryFilterMode();
+  const visibleSections = filterMode.isFocused
+    ? getFocusedRegistrySections(filterMode)
+    : new Set([activeRegistrySection]);
+
+  elements.registrySectionTabs.forEach((button) => {
+    const sectionName = button.dataset.registrySectionTab;
+    button.classList.toggle("is-active", !filterMode.isFocused && sectionName === activeRegistrySection);
+    button.setAttribute("aria-selected", !filterMode.isFocused && sectionName === activeRegistrySection ? "true" : "false");
+  });
+
+  elements.registrySections.forEach((section) => {
+    section.hidden = !visibleSections.has(section.dataset.registrySection);
   });
 }
 
@@ -2073,6 +2955,15 @@ async function handleDeviceSubmit(event) {
         type: formData.get("type"),
         subnetId: formData.get("subnetId"),
         groupId: formData.get("groupId"),
+        hostDeviceId: formData.get("hostDeviceId") || currentDevice?.hostDeviceId || "",
+        source: formData.get("source") || currentDevice?.source || "",
+        sourceKind: formData.get("sourceKind") || currentDevice?.sourceKind || "",
+        sourceId: formData.get("sourceId") || currentDevice?.sourceId || "",
+        integrationStatus: formData.get("integrationStatus") || currentDevice?.integrationStatus || "",
+        protocol: formData.get("protocol") || currentDevice?.protocol || "",
+        serviceUrl: formData.get("serviceUrl") || currentDevice?.serviceUrl || "",
+        ports: formData.get("ports") || currentDevice?.ports || "",
+        lastSeenAt: formData.get("lastSeenAt") || currentDevice?.lastSeenAt || "",
         note: formData.get("note"),
         createdAt: currentDevice?.createdAt || new Date().toISOString(),
       },
@@ -2109,19 +3000,83 @@ async function handleDeviceSubmit(event) {
   }
 }
 
+async function handleServiceSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+
+  try {
+    const formData = new FormData(form);
+    const hostId = String(formData.get("hostDeviceId") || "").trim();
+    const host = getInventoryDevices().find((entry) => entry.id === hostId);
+    if (!host) {
+      throw new Error(t("service_host_required"));
+    }
+
+    const currentService = editingServiceId
+      ? state.devices.find((entry) => entry.id === editingServiceId) || null
+      : null;
+    const service = normalizeDevice(
+      {
+        id: currentService?.id || createId(),
+        name: formData.get("name"),
+        ip: host.ip,
+        mac: "",
+        type: "service",
+        subnetId: host.subnetId || resolveDeviceSubnet(host)?.id || "",
+        hostDeviceId: host.id,
+        source: formData.get("source"),
+        sourceKind: currentService?.sourceKind || "",
+        sourceId: currentService?.sourceId || "",
+        integrationStatus: formData.get("integrationStatus"),
+        protocol: formData.get("protocol") || "http",
+        accessPort: formData.get("accessPort"),
+        serviceUrl: formData.get("serviceUrl"),
+        ports: formData.get("ports"),
+        lastSeenAt: currentService?.lastSeenAt || "",
+        note: formData.get("note"),
+        createdAt: currentService?.createdAt || new Date().toISOString(),
+      },
+      state.subnets,
+      state.groups
+    );
+
+    const isEditing = Boolean(editingServiceId);
+    await apiRequest(isEditing ? `/devices/${encodeURIComponent(editingServiceId)}` : "/devices", {
+      method: isEditing ? "PATCH" : "POST",
+      body: JSON.stringify(service),
+    });
+
+    form.reset();
+    closeModal("service-modal");
+    await refreshState(true, true);
+    showToast(t(isEditing ? "service_updated" : "service_added", { name: service.name }));
+  } catch (error) {
+    setServiceFormStatus(error.message, "danger");
+    showToast(error.message, true);
+  }
+}
+
 function handleStatNavigation(target) {
   switch (target) {
     case "subnets":
       setActiveView("registry");
+      setActiveRegistrySection("subnets");
       document.getElementById("registry-panel-subnets")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     case "devices":
     case "occupied":
       setActiveView("registry");
+      setActiveRegistrySection("devices");
       document.getElementById("registry-panel-devices")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    case "services":
+      setActiveView("registry");
+      setActiveRegistrySection("services");
+      document.getElementById("registry-panel-services")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     case "available":
       setActiveView("registry");
+      setActiveRegistrySection("groups");
       document.getElementById("registry-panel-groups")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     default:
@@ -2131,6 +3086,8 @@ function handleStatNavigation(target) {
 
 function handleRegistryDeviceFiltersChange() {
   renderDevicesTable();
+  renderServicesList();
+  syncRegistrySections();
 }
 
 async function handleGroupSubmit(event) {
@@ -2276,6 +3233,65 @@ async function handleUserSubmit(event) {
   }
 }
 
+async function handleDiscoveryAgentSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const isEditing = Boolean(editingDiscoveryAgentId);
+  const payload = {
+    name: formData.get("name"),
+    kind: formData.get("kind"),
+    enabled: Boolean(formData.get("enabled")),
+    allowedCidrs: formData.get("allowedCidrs"),
+    createMode: formData.get("createMode"),
+    linkedHostDeviceId: formData.get("linkedHostDeviceId"),
+  };
+  if (!isEditing) {
+    payload.sharedTokenAgentId = formData.get("sharedTokenAgentId");
+  }
+
+  try {
+    const response = await apiRequest(
+      isEditing ? `/admin/discovery/agents/${encodeURIComponent(editingDiscoveryAgentId)}` : "/admin/discovery/agents",
+      {
+        method: isEditing ? "PATCH" : "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    const savedAgent = response.agent || response;
+    const token = response.token || "";
+    editingDiscoveryAgentId = "";
+    prepareDiscoveryAgentForm();
+    await refreshState(true, true);
+    if (token) {
+      showDiscoveryAgentConfig(savedAgent, token);
+      setDiscoveryAgentStatus(t("discovery_agent_created_with_token"), "ok");
+    } else if (!isEditing && response.sharedTokenAgentId) {
+      setDiscoveryAgentStatus(t("discovery_agent_created_shared_token"), "ok");
+    } else {
+      setDiscoveryAgentStatus(t(isEditing ? "discovery_agent_updated" : "discovery_agent_saved"), "ok");
+    }
+  } catch (error) {
+    setDiscoveryAgentStatus(error.message, "danger");
+  }
+}
+
+async function handleDiscoveryPolicySave() {
+  try {
+    const discoveryDataPolicy = getDiscoveryDataPolicyDraft();
+    const updatedSettings = await apiRequest("/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ discoveryDataPolicy }),
+    });
+    state.settings = normalizeServerSettings(updatedSettings, state.meta);
+    renderDiscoveryDataPolicySettings();
+    renderDiscoveryPreview();
+    setDiscoveryPolicyStatus(t("discovery_policy_saved"), "ok");
+  } catch (error) {
+    setDiscoveryPolicyStatus(error.message, "danger");
+  }
+}
+
 async function handleAccessGroupTableActions(event) {
   const editButton = event.target.closest("[data-edit-access-group]");
   if (editButton) {
@@ -2414,6 +3430,90 @@ async function handleUserAdminTableActions(event) {
   }
 }
 
+async function handleDiscoveryAgentTableActions(event) {
+  const editButton = event.target.closest("[data-edit-discovery-agent]");
+  if (editButton) {
+    const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === editButton.dataset.editDiscoveryAgent);
+    if (!agent) {
+      return;
+    }
+    prepareDiscoveryAgentForm(agent);
+    elements.discoveryAgentForm?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  const toggleButton = event.target.closest("[data-toggle-discovery-agent]");
+  if (toggleButton) {
+    const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === toggleButton.dataset.toggleDiscoveryAgent);
+    if (!agent) {
+      return;
+    }
+    const nextEnabled = !agent.enabled;
+    const confirmed = window.confirm(t(nextEnabled ? "discovery_agent_enable_confirm" : "discovery_agent_disable_confirm", { name: agent.name }));
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: agent.name,
+          kind: agent.kind,
+          enabled: nextEnabled,
+          allowedCidrs: agent.allowedCidrs || [],
+          createMode: agent.createMode,
+          linkedHostDeviceId: agent.linkedHostDeviceId || "",
+        }),
+      });
+      await refreshState(true, true);
+      setDiscoveryAgentStatus(t(nextEnabled ? "discovery_agent_enabled_done" : "discovery_agent_disabled_done", { name: agent.name }), "ok");
+    } catch (error) {
+      setDiscoveryAgentStatus(error.message, "danger");
+    }
+    return;
+  }
+
+  const rotateButton = event.target.closest("[data-rotate-discovery-agent-token]");
+  if (!rotateButton) {
+    return;
+  }
+
+  const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === rotateButton.dataset.rotateDiscoveryAgentToken);
+  if (!agent) {
+    return;
+  }
+  const confirmed = window.confirm(t("discovery_agent_rotate_token_confirm", { name: agent.name }));
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const response = await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}/rotate-token`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    await refreshState(true, true);
+    showDiscoveryAgentConfig(response.agent || agent, response.token || "");
+    setDiscoveryAgentStatus(t("discovery_agent_token_rotated"), "ok");
+  } catch (error) {
+    setDiscoveryAgentStatus(error.message, "danger");
+  }
+}
+
+function copyDiscoveryAgentConfig() {
+  const configText = elements.discoveryAgentConfigSnippet?.value || lastDiscoveryAgentConfig;
+  if (!configText) {
+    showToast(t("discovery_agent_config_empty"), true);
+    return;
+  }
+  if (!navigator.clipboard?.writeText) {
+    showToast(t("discovery_agent_config_copy_failed"), true);
+    return;
+  }
+  navigator.clipboard.writeText(configText)
+    .then(() => showToast(t("discovery_agent_config_copied")))
+    .catch(() => showToast(t("discovery_agent_config_copy_failed"), true));
+}
+
 function handleIpCheck(event) {
   event.preventDefault();
   const ip = event.currentTarget.ipCheck.value.trim();
@@ -2429,7 +3529,7 @@ function handleIpCheck(event) {
   const ipInt = ipToInt(normalizedIp);
   const subnet = findSubnetForIp(ipInt);
   const group = subnet ? findRangeGroupForIp(ipInt, subnet.id) : null;
-  const device = state.devices.find((entry) => entry.ip === normalizedIp);
+  const device = getInventoryDevices().find((entry) => entry.ip === normalizedIp);
   const pingState = getVisiblePingState(normalizedIp, subnet);
 
   if (device) {
@@ -2645,7 +3745,7 @@ function formatSuggestionMessage(suggestion, subnet, group = null) {
 function suggestFreeIp(subnet, group = null) {
   const pingVisible = isSubnetPingVisible(subnet);
   const assignedIps = new Set(
-    state.devices
+    getInventoryDevices()
       .filter((device) => {
         const ipInt = ipToInt(device.ip);
         if (!isIpInsidePool(ipInt, subnet)) {
@@ -2870,12 +3970,27 @@ function exportDevicesCsv() {
     .map((device) => {
       const subnet = resolveDeviceSubnet(device);
       const group = resolveDeviceGroup(device, subnet);
+      const host = resolveDeviceHost(device);
       const pingState = getPingState(device.ip);
       return {
         [t("export_header_name")]: device.name,
         [t("export_header_ip")]: device.ip,
         [t("export_header_mac")]: device.mac || "",
         [t("export_header_type")]: device.type || device.unknownType || "",
+        [t("export_header_host")]: host?.name || "",
+        [t("export_header_source")]: getDeviceSourceLabel(device.source || ""),
+        [t("export_header_source_kind")]: device.sourceKind
+          ? getDeviceSourceKindLabel(device.sourceKind)
+          : "",
+        [t("export_header_source_id")]: device.sourceId || "",
+        [t("export_header_integration_status")]: device.integrationStatus
+          ? getIntegrationStatusLabel(device.integrationStatus)
+          : "",
+        [t("export_header_protocol")]: device.protocol ? getServiceProtocolLabel(device.protocol) : "",
+        [t("export_header_service_url")]: device.serviceUrl || "",
+        [t("export_header_access_port")]: device.accessPort || "",
+        [t("export_header_ports")]: device.ports || "",
+        [t("export_header_last_seen")]: device.lastSeenAt || "",
         [t("export_header_subnet")]: subnet?.name || "",
         [t("export_header_cidr")]: subnet?.cidr || "",
         [t("export_header_group")]: group?.name || "",
@@ -3052,6 +4167,7 @@ function importCsv(text, replace, targetState) {
     const importedDevices = rows.map((row) => {
       const subnet = findSubnetByReference(row, targetState.subnets);
       const existingDevice = findExistingDeviceForCsv(row, targetState.devices);
+      const hostDevice = findDeviceHostByReference(row, targetState.devices);
       return normalizeDevice(
         {
           id: row.id || existingDevice?.id || createId(),
@@ -3060,6 +4176,16 @@ function importCsv(text, replace, targetState) {
           mac: row.mac,
           type: row.type,
           subnetId: subnet?.id || row.subnet_id || "",
+          hostDeviceId: hostDevice?.id || row.host_device_id || row.hostDeviceId || "",
+          source: row.source,
+          sourceKind: row.source_kind || row.sourceKind,
+          sourceId: row.source_id || row.sourceId,
+          integrationStatus: row.integration_status || row.integrationStatus || row.status,
+          protocol: row.protocol,
+          serviceUrl: row.service_url || row.serviceUrl || row.url,
+          accessPort: row.access_port || row.accessPort || row.access,
+          ports: row.ports,
+          lastSeenAt: row.last_seen_at || row.lastSeenAt,
           note: row.note,
         },
         targetState.subnets
@@ -3075,6 +4201,11 @@ async function clearAllData() {
   if (!confirmed) {
     return;
   }
+  const typedConfirmation = window.prompt(t("clear_database_prompt"));
+  if (typedConfirmation !== "DELETE") {
+    showToast(t("clear_database_cancelled"), true);
+    return;
+  }
 
   try {
     await apiRequest("/state", {
@@ -3082,6 +4213,23 @@ async function clearAllData() {
     });
     await refreshState(true);
     showToast(t("clear_success"));
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function clearHistory() {
+  const confirmed = window.confirm(t("clear_history_confirm"));
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiRequest("/admin/history", {
+      method: "DELETE",
+    });
+    await refreshState(true, true);
+    showToast(t("clear_history_success"));
   } catch (error) {
     showToast(error.message, true);
   }
@@ -3150,7 +4298,7 @@ async function handleSubnetTableActions(event) {
     return;
   }
 
-  const linkedDevices = state.devices.filter((entry) => entry.subnetId === subnetId).length;
+  const linkedDevices = getInventoryDevices().filter((entry) => entry.subnetId === subnetId).length;
   const linkedGroups = state.groups.filter((entry) => entry.subnetId === subnetId).length;
   const confirmed = window.confirm(t("delete_subnet_confirm", {
     name: subnet.name,
@@ -3208,6 +4356,13 @@ async function handleSubnetScanToggle(event) {
 }
 
 async function handleGroupTableActions(event) {
+  const toggleListButton = event.target.closest("[data-toggle-groups-list]");
+  if (toggleListButton) {
+    showAllGroupsInRegistry = !showAllGroupsInRegistry;
+    renderGroupsTable();
+    return;
+  }
+
   const toggleButton = event.target.closest("[data-toggle-group-devices]");
   if (toggleButton) {
     const groupId = toggleButton.dataset.toggleGroupDevices;
@@ -3338,20 +4493,87 @@ async function handleDeviceTableActions(event) {
   }
 }
 
+async function handleServiceListActions(event) {
+  const copyPrivateUrlButton = event.target.closest("[data-copy-private-service-url]");
+  const copyPublicUrlButton = event.target.closest("[data-copy-public-service-url]");
+  if (copyPrivateUrlButton || copyPublicUrlButton) {
+    const serviceId = copyPrivateUrlButton?.dataset.copyPrivateServiceUrl || copyPublicUrlButton?.dataset.copyPublicServiceUrl;
+    const service = state.devices.find((entry) => entry.id === serviceId);
+    const url = service
+      ? copyPublicUrlButton
+        ? getPublicServiceUrl(service)
+        : buildPrivateServiceUrl(service)
+      : "";
+    if (!url) {
+      showToast(t("service_url_unavailable"), true);
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      showToast(t("copy_service_url_failed"), true);
+      return;
+    }
+    navigator.clipboard.writeText(url)
+      .then(() => showToast(t("copy_service_url_done", { url })))
+      .catch(() => showToast(t("copy_service_url_failed"), true));
+    return;
+  }
+
+  const editButton = event.target.closest("[data-edit-service]");
+  if (editButton) {
+    const service = state.devices.find((entry) => entry.id === editButton.dataset.editService);
+    if (!service) {
+      return;
+    }
+    prepareServiceModal(service);
+    openModal("service-modal");
+    return;
+  }
+
+  const deleteButton = event.target.closest("[data-delete-service]");
+  if (!deleteButton) {
+    return;
+  }
+
+  const serviceId = deleteButton.dataset.deleteService;
+  const service = state.devices.find((entry) => entry.id === serviceId);
+  if (!service) {
+    return;
+  }
+
+  const confirmed = window.confirm(t("delete_service_confirm", { name: service.name }));
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiRequest(`/devices/${encodeURIComponent(serviceId)}`, {
+      method: "DELETE",
+    });
+    await refreshState(true, true);
+    showToast(t("service_deleted", { name: service.name }));
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
 function renderAll() {
   if (!isSettingsModalOpen()) {
     syncSettingsForm();
   }
   renderSubnetOptions();
+  renderServiceHostOptions(elements.serviceHostSelect?.value || "");
+  renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
   renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
   renderDeviceGroupFilterOptions();
   renderSubnetsTable();
   renderGroupsTable();
   renderDevicesTable();
+  renderServicesList();
   renderHistoryTable();
   renderAdminPanels();
   renderStats();
   renderDashboardPanels();
+  syncRegistrySections();
   updateAutomationWidgets();
   updateSuggestedIp();
   renderPermissionAwareUi();
@@ -3415,10 +4637,264 @@ function renderSubnetOptions() {
   renderDeviceGroupOptions(previousDeviceGroup);
 }
 
+function renderServiceHostOptions(selectedId = "") {
+  if (!elements.serviceHostSelect) {
+    return;
+  }
+
+  const hosts = getInventoryDevices()
+    .slice()
+    .sort((left, right) => {
+      const ipDiff = ipToInt(left.ip) - ipToInt(right.ip);
+      if (ipDiff !== 0) {
+        return ipDiff;
+      }
+      return left.name.localeCompare(right.name, getLanguage());
+    });
+  const options = [`<option value="">${escapeHtml(t("select_service_host"))}</option>`];
+
+  hosts.forEach((device) => {
+    options.push(
+      `<option value="${escapeHtml(device.id)}">${escapeHtml(device.name)} · ${escapeHtml(device.ip)}</option>`
+    );
+  });
+  if (selectedId && !hosts.some((device) => device.id === selectedId)) {
+    options.push(`<option value="${escapeHtml(selectedId)}">${escapeHtml(t("device_host_orphan"))} · ${escapeHtml(selectedId)}</option>`);
+  }
+
+  elements.serviceHostSelect.innerHTML = options.join("");
+  elements.serviceHostSelect.value = selectedId && options.length > 1 ? selectedId : "";
+  elements.serviceHostSelect.dataset.hostCount = String(hosts.length);
+  closeLimitedSelect();
+}
+
+function renderServiceSourceOptions(selectedSource = "") {
+  const sourceSelect = elements.serviceForm?.elements.source;
+  if (!sourceSelect) {
+    return;
+  }
+
+  const normalizedSelected = normalizeMetadataToken(selectedSource, "");
+  const sources = getAvailableDeviceSources();
+  const options = [`<option value="">${escapeHtml(t("device_integration_status_empty"))}</option>`];
+  options.push(...sources.map((source) => `
+    <option value="${escapeHtml(source.id)}">${escapeHtml(source.label)} · ${escapeHtml(source.badge)}</option>
+  `));
+
+  if (normalizedSelected && !sources.some((source) => source.id === normalizedSelected)) {
+    options.push(`<option value="${escapeHtml(normalizedSelected)}">${escapeHtml(getDeviceSourceLabel(normalizedSelected))}</option>`);
+  }
+
+  sourceSelect.innerHTML = options.join("");
+  sourceSelect.value = normalizedSelected;
+  closeLimitedSelect();
+}
+
+function bindUnifiedAddFormSelects() {
+  document.querySelectorAll("#subnet-form select, #device-form select, #group-form select, #service-form select")
+    .forEach((selectElement) => {
+      selectElement.addEventListener("mousedown", (event) => openLimitedSelect(event, selectElement, getLimitedSelectVisibleCount(selectElement)));
+      selectElement.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          openLimitedSelect(event, selectElement, getLimitedSelectVisibleCount(selectElement));
+        }
+      });
+    });
+}
+
+function initializeFieldHelp() {
+  Object.entries(FIELD_HELP_CONFIG).forEach(([formId, fields]) => {
+    const form = document.getElementById(formId);
+    if (!form) {
+      return;
+    }
+
+    fields.forEach(({ selector, key }) => {
+      const control = form.querySelector(selector);
+      const label = control?.closest("label");
+      if (!label || label.querySelector(`[data-field-help="${key}"]`)) {
+        return;
+      }
+
+      const labelText = label.querySelector(".setting-title, span[data-i18n], span:not(.setting-note)");
+      if (!labelText) {
+        return;
+      }
+
+      let labelRow = labelText.closest(".field-label-row");
+      if (!labelRow) {
+        labelRow = document.createElement("span");
+        labelRow.className = "field-label-row";
+        labelText.replaceWith(labelRow);
+        labelRow.append(labelText);
+      }
+
+      const helpButton = document.createElement("button");
+      helpButton.type = "button";
+      helpButton.className = "field-help-button";
+      helpButton.dataset.fieldHelp = key;
+      helpButton.setAttribute("aria-label", t("field_help_button_label"));
+      helpButton.setAttribute("aria-haspopup", "dialog");
+      helpButton.textContent = "i";
+
+      helpButton.addEventListener("mouseenter", () => showFieldHelp(helpButton, key, false));
+      helpButton.addEventListener("mouseleave", () => {
+        if (activeFieldHelpButton === helpButton && !isFieldHelpPinned) {
+          hideFieldHelp();
+        }
+      });
+      helpButton.addEventListener("focus", () => showFieldHelp(helpButton, key, false));
+      helpButton.addEventListener("blur", () => {
+        if (activeFieldHelpButton === helpButton && !isFieldHelpPinned) {
+          hideFieldHelp();
+        }
+      });
+      helpButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (activeFieldHelpButton === helpButton && isFieldHelpPinned) {
+          hideFieldHelp(true);
+          return;
+        }
+
+        showFieldHelp(helpButton, key, true);
+      });
+
+      labelRow.append(helpButton);
+    });
+  });
+}
+
+function getFieldHelpPopover() {
+  let popover = document.querySelector(".field-help-popover");
+  if (popover) {
+    return popover;
+  }
+
+  popover = document.createElement("div");
+  popover.className = "field-help-popover";
+  popover.setAttribute("role", "tooltip");
+  document.body.append(popover);
+  return popover;
+}
+
+function showFieldHelp(button, helpKey, pinned) {
+  if (!button) {
+    return;
+  }
+
+  const popover = getFieldHelpPopover();
+  if (activeFieldHelpButton && activeFieldHelpButton !== button) {
+    activeFieldHelpButton.setAttribute("aria-expanded", "false");
+  }
+
+  popover.textContent = t(helpKey);
+  popover.hidden = false;
+  activeFieldHelpButton = button;
+  isFieldHelpPinned = pinned;
+  button.setAttribute("aria-expanded", "true");
+  positionFieldHelpPopover(button, popover);
+}
+
+function positionFieldHelpPopover(button, popover) {
+  const buttonRect = button.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const gap = 8;
+  const viewportPadding = 12;
+  const preferredTop = buttonRect.bottom + gap;
+  const top = preferredTop + popoverRect.height + viewportPadding > window.innerHeight
+    ? Math.max(viewportPadding, buttonRect.top - popoverRect.height - gap)
+    : preferredTop;
+  const left = Math.min(
+    Math.max(viewportPadding, buttonRect.left + (buttonRect.width / 2) - (popoverRect.width / 2)),
+    Math.max(viewportPadding, window.innerWidth - popoverRect.width - viewportPadding)
+  );
+
+  popover.style.top = `${top}px`;
+  popover.style.left = `${left}px`;
+}
+
+function hideFieldHelp(force = false) {
+  if (isFieldHelpPinned && !force) {
+    return;
+  }
+
+  const popover = document.querySelector(".field-help-popover");
+  if (popover) {
+    popover.hidden = true;
+  }
+
+  activeFieldHelpButton?.setAttribute("aria-expanded", "false");
+  activeFieldHelpButton = null;
+  isFieldHelpPinned = false;
+}
+
+function getLimitedSelectVisibleCount(selectElement) {
+  if (selectElement === elements.serviceSourceSelect) {
+    return 4;
+  }
+  if (selectElement === elements.serviceStatusSelect) {
+    return 5;
+  }
+  if (selectElement === elements.serviceHostSelect || selectElement === elements.serviceProtocolSelect) {
+    return 7;
+  }
+  return 7;
+}
+
+function openLimitedSelect(event, selectElement, visibleCount) {
+  if (!selectElement || selectElement.options.length === 0) {
+    return;
+  }
+
+  event.preventDefault();
+  closeLimitedSelect();
+
+  const field = selectElement.closest("label");
+  if (!field) {
+    return;
+  }
+
+  field.classList.add("select-field--limited");
+  const list = document.createElement("div");
+  list.className = "select-limited-list";
+  list.dataset.selectLimitedList = selectElement.name || selectElement.id || "select";
+  list.style.setProperty("--select-visible-count", String(visibleCount));
+  list.innerHTML = [...selectElement.options].map((option) => `
+    <button
+      type="button"
+      class="select-limited-list__option${option.value === selectElement.value ? " is-selected" : ""}"
+      data-select-limited-value="${escapeHtml(option.value)}"
+      ${option.disabled ? "disabled" : ""}
+    >
+      ${escapeHtml(option.textContent || "")}
+    </button>
+  `).join("");
+
+  list.addEventListener("click", (listEvent) => {
+    const optionButton = listEvent.target.closest("[data-select-limited-value]");
+    if (!optionButton || optionButton.disabled) {
+      return;
+    }
+
+    selectElement.value = optionButton.dataset.selectLimitedValue;
+    selectElement.dispatchEvent(new Event("change", { bubbles: true }));
+    closeLimitedSelect();
+  });
+
+  selectElement.insertAdjacentElement("afterend", list);
+}
+
+function closeLimitedSelect() {
+  document.querySelectorAll(".select-limited-list").forEach((list) => list.remove());
+  document.querySelectorAll(".select-field--limited").forEach((field) => field.classList.remove("select-field--limited"));
+}
+
 function renderSubnetsTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   const canManageAutomation = Boolean(state.auth?.capabilities?.canManageServerSettings);
-  elements.subnetsTableWrap?.classList.toggle("table-wrap--capped", state.subnets.length > 5);
+  elements.subnetsTableWrap?.classList.toggle("table-wrap--capped", showAllSubnetsInRegistry && state.subnets.length > 5);
   if (state.subnets.length === 0) {
     elements.subnetsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -3464,7 +4940,7 @@ function renderSubnetsTable() {
             <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
           <td><div class="secondary-line">${escapeHtml(groupSummary)}</div></td>
-          <td>${escapeHtml(subnet.note || t("no_data"))}</td>
+          <td>${renderRegistryComment(subnet.note)}</td>
           <td>
             <label class="table-switch" title="${escapeHtml(t("table_auto_scan_note"))}">
               <input
@@ -3509,7 +4985,7 @@ function renderSubnetsTable() {
 
 function renderGroupsTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
-  elements.groupsTableWrap?.classList.toggle("table-wrap--capped", state.groups.length > 5);
+  elements.groupsTableWrap?.classList.toggle("table-wrap--capped", showAllGroupsInRegistry && state.groups.length > 5);
   if (state.groups.length === 0) {
     elements.groupsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -3521,21 +4997,25 @@ function renderGroupsTable() {
   }
 
   const reachableSet = getReachableScanIps();
-  const rows = state.groups
+  const sortedGroups = state.groups
     .slice()
     .sort((left, right) => {
       if (left.subnetId !== right.subnetId) {
         return left.subnetId.localeCompare(right.subnetId);
       }
       return left.rangeStartInt - right.rangeStartInt;
-    })
+    });
+  const visibleGroups = showAllGroupsInRegistry
+    ? sortedGroups
+    : sortedGroups.slice(0, 5);
+  const rows = visibleGroups
     .map((group) => {
       const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
       const pingVisible = isSubnetPingVisible(subnet);
       const deviceCount = countAssignedInGroup(group);
       const pingOnlyCount = countPingOnlyInGroup(group, reachableSet);
       const freeCount = countFreeInGroup(group);
-      const groupDevices = state.devices
+      const groupDevices = getInventoryDevices()
         .filter((device) => {
           const subnetId = device.subnetId || resolveDeviceSubnet(device)?.id || "";
           if (subnetId !== group.subnetId) {
@@ -3581,7 +5061,7 @@ function renderGroupsTable() {
             ${pingVisible ? `<span class="pill">${escapeHtml(t("ping_only_short", { count: pingOnlyCount }))}</span>` : ""}
             <span class="pill">${escapeHtml(t("free_short", { count: freeCount }))}</span>
           </td>
-          <td>${escapeHtml(group.note || t("no_data"))}</td>
+          <td>${renderRegistryComment(group.note)}</td>
           <td>
             <div class="table-actions">
               <button type="button" class="row-button" data-edit-group="${escapeHtml(group.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
@@ -3607,8 +5087,22 @@ function renderGroupsTable() {
       `;
     });
 
+  if (sortedGroups.length > 5) {
+    rows.push(`
+      <tr class="table-expand-row">
+        <td colspan="6">
+          <button type="button" class="link-button table-expand-button" data-toggle-groups-list>
+            ${escapeHtml(showAllGroupsInRegistry
+              ? t("show_less_groups")
+              : t("show_all_groups", { count: sortedGroups.length }))}
+          </button>
+        </td>
+      </tr>
+    `);
+  }
+
   elements.groupsTableBody.innerHTML = rows.join("");
-  elements.groupsCounter.textContent = formatRecordsCount(state.groups.length);
+  elements.groupsCounter.textContent = formatRecordsCount(sortedGroups.length);
 }
 
 function renderAccessGroupsTable() {
@@ -3629,7 +5123,7 @@ function renderAccessGroupsTable() {
     .map((group) => `
       <tr>
         <td><strong>${escapeHtml(group.name)}</strong></td>
-        <td>${escapeHtml(group.description || t("no_data"))}</td>
+        <td>${renderRegistryComment(group.description)}</td>
         <td>
           <div class="table-actions">
             <button type="button" class="row-button" data-edit-access-group="${escapeHtml(group.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
@@ -3707,6 +5201,329 @@ function renderUsersTable() {
     .join("");
 }
 
+function getDiscoveryAgentKindLabel(kind) {
+  const normalizedKind = normalizeMetadataToken(kind, "host");
+  const key = `discovery_agent_kind_${normalizedKind}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedKind);
+}
+
+function getDiscoveryCreateModeLabel(mode) {
+  const normalizedMode = normalizeMetadataToken(mode, "preview_only");
+  const keyMap = {
+    preview_only: "discovery_create_mode_preview_only",
+    auto_create_services: "discovery_create_mode_auto_services",
+    auto_create_devices_and_services: "discovery_create_mode_auto_all",
+  };
+  const key = keyMap[normalizedMode] || `discovery_create_mode_${normalizedMode}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedMode);
+}
+
+function buildDiscoveryAgentConfig(agent, token) {
+  const atlasUrl = window.location.origin;
+  return JSON.stringify({
+    atlas_url: atlasUrl,
+    agent_id: agent.id,
+    agent_token: token || "paste-shared-token-here",
+    interval: 60,
+    source_name: "agent",
+    verify_tls: atlasUrl.startsWith("https://"),
+    allow_insecure_http: atlasUrl.startsWith("http://"),
+    timeout: 20,
+    enabled_collectors: ["host", "docker"],
+    docker_socket: "/var/run/docker.sock",
+    docker_timeout: 10,
+  }, null, 2);
+}
+
+function showDiscoveryAgentConfig(agent, token) {
+  if (!elements.discoveryAgentTokenCard || !elements.discoveryAgentConfigSnippet) {
+    return;
+  }
+  lastDiscoveryAgentConfig = buildDiscoveryAgentConfig(agent, token);
+  elements.discoveryAgentConfigSnippet.value = lastDiscoveryAgentConfig;
+  elements.discoveryAgentTokenCard.hidden = false;
+  if (elements.copyDiscoveryAgentConfigButton) {
+    elements.copyDiscoveryAgentConfigButton.disabled = false;
+  }
+}
+
+function renderDiscoveryAgentsTable() {
+  if (!elements.discoveryAgentsTableBody) {
+    return;
+  }
+
+  const agents = state.admin?.discoveryAgents || [];
+  const canManage = Boolean(state.auth?.capabilities?.isAdmin);
+  if (agents.length === 0) {
+    elements.discoveryAgentsTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="6">${escapeHtml(t("empty_discovery_agents"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.discoveryAgentsTableBody.innerHTML = agents
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name, "ru"))
+    .map((agent) => {
+      const statusBadges = [
+        `<span class="status-badge status-badge--${agent.enabled ? "ok" : "muted"}">${escapeHtml(agent.enabled ? t("discovery_agent_status_enabled") : t("discovery_agent_status_disabled"))}</span>`,
+      ];
+      if (agent.lastRejectReason) {
+        statusBadges.push(`<span class="status-badge status-badge--warn">${escapeHtml(t("discovery_agent_status_rejected"))}</span>`);
+      }
+      if (agent.lastError) {
+        statusBadges.push(`<span class="status-badge status-badge--warn">${escapeHtml(t("discovery_agent_status_error"))}</span>`);
+      }
+      const cidrs = agent.allowedCidrs?.length ? agent.allowedCidrs.join(", ") : t("discovery_agent_acl_any");
+      const lastSeen = agent.lastSeenAt
+        ? formatDateTime(agent.lastSeenAt)
+        : agent.lastRejectedAt
+          ? `${t("discovery_agent_last_rejected")}: ${formatDateTime(agent.lastRejectedAt)}`
+          : t("no_data");
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(agent.name)}</strong>
+            <div class="secondary-line mono">${escapeHtml(agent.id)}</div>
+            <div class="secondary-line">${escapeHtml(getDiscoveryAgentKindLabel(agent.kind))}</div>
+          </td>
+          <td>
+            <div class="table-status-stack">${statusBadges.join("")}</div>
+            ${agent.lastRemoteAddr ? `<div class="secondary-line mono">${escapeHtml(agent.lastRemoteAddr)}</div>` : ""}
+          </td>
+          <td><div class="discovery-agents-table__acl mono">${escapeHtml(cidrs)}</div></td>
+          <td>${escapeHtml(getDiscoveryCreateModeLabel(agent.createMode))}</td>
+          <td class="mono">${escapeHtml(lastSeen)}</td>
+          <td>
+            <div class="discovery-preview-actions discovery-agents-table__actions">
+              <button type="button" class="row-button" data-edit-discovery-agent="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button" data-toggle-discovery-agent="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(agent.enabled ? t("discovery_agent_disable_button") : t("discovery_agent_enable_button"))}</button>
+              <button type="button" class="row-button row-button--danger" data-rotate-discovery-agent-token="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("discovery_agent_rotate_token_button"))}</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function getDiscoveryStateLabel(stateName) {
+  const normalizedState = String(stateName || "new").trim().toLowerCase();
+  const key = `discovery_state_${normalizedState}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || normalizedState;
+}
+
+function getDiscoveryStateVariant(stateName) {
+  const normalizedState = String(stateName || "new").trim().toLowerCase();
+  if (normalizedState === "matched") {
+    return "ok";
+  }
+  if (normalizedState === "stale" || normalizedState === "error") {
+    return "warn";
+  }
+  if (normalizedState === "ignored") {
+    return "muted";
+  }
+  return "info";
+}
+
+function renderDiscoveryActions(result) {
+  const normalizedState = String(result.state || "new").trim().toLowerCase();
+  const actions = [];
+  if (normalizedState === "ignored") {
+    actions.push(["restore", "discovery_action_restore"]);
+  } else {
+    if (normalizedState !== "matched") {
+      actions.push(["create-service", "discovery_action_create_service"]);
+      actions.push(["create-device", "discovery_action_create_device"]);
+      actions.push(["link", "discovery_action_link"]);
+    }
+    if (normalizedState === "stale" || normalizedState === "error") {
+      actions.push(["resolve", "discovery_action_resolve"]);
+    }
+    actions.push(["ignore", "discovery_action_ignore"]);
+  }
+
+  return `
+    <div class="discovery-preview-actions">
+      ${actions
+        .map(([action, labelKey]) => `
+          <button
+            type="button"
+            class="row-button"
+            data-discovery-action="${escapeHtml(action)}"
+            data-discovery-result-id="${escapeHtml(result.id)}"
+          >
+            ${escapeHtml(t(labelKey))}
+          </button>
+        `)
+        .join("")}
+    </div>
+  `;
+}
+
+function renderDiscoveryMetadataSummary(result) {
+  const receivedCount = result.receivedFields?.length || 0;
+  const acceptedCount = result.acceptedFields?.length || 0;
+  const visibleEntries = Object.entries(result.visibleRaw || {})
+    .filter(([, value]) => value !== "" && value !== null && value !== undefined)
+    .slice(0, 3)
+    .map(([key, value]) => {
+      const textValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+      return `${key}: ${truncateText(textValue, 28)}`;
+    });
+  const summary = receivedCount || acceptedCount
+    ? t("discovery_metadata_counts", { received: receivedCount, accepted: acceptedCount })
+    : "";
+  return [
+    summary,
+    ...visibleEntries,
+  ].filter(Boolean).join(" · ");
+}
+
+function findDiscoveryLinkTarget(value) {
+  const query = String(value || "").trim().toLowerCase();
+  if (!query) {
+    return null;
+  }
+  return (state.devices || []).find((device) => {
+    return [device.id, device.name, device.ip]
+      .filter(Boolean)
+      .some((candidate) => String(candidate).trim().toLowerCase() === query);
+  }) || null;
+}
+
+async function handleDiscoveryPreviewActions(event) {
+  const button = event.target.closest("[data-discovery-action]");
+  if (!button) {
+    return;
+  }
+
+  const resultId = button.dataset.discoveryResultId;
+  const action = button.dataset.discoveryAction;
+  const result = (state.admin?.discoveryResults || []).find((item) => item.id === resultId);
+  const resultName = result?.name || t("no_data");
+
+  try {
+    button.disabled = true;
+    if (action === "create-service" || action === "create-device") {
+      const isService = action === "create-service";
+      const confirmed = window.confirm(
+        t(isService ? "discovery_create_service_confirm" : "discovery_create_device_confirm", { name: resultName }),
+      );
+      if (!confirmed) {
+        return;
+      }
+      await apiRequest(`/admin/discovery/results/${encodeURIComponent(resultId)}/create`, {
+        method: "POST",
+        body: JSON.stringify({ targetType: isService ? "service" : "device" }),
+      });
+    } else if (action === "link") {
+      const targetValue = window.prompt(t("discovery_link_prompt"));
+      const target = findDiscoveryLinkTarget(targetValue);
+      if (!target) {
+        showToast(t("discovery_link_missing"), true);
+        return;
+      }
+      await apiRequest(`/admin/discovery/results/${encodeURIComponent(resultId)}/link`, {
+        method: "POST",
+        body: JSON.stringify({
+          targetId: target.id,
+          targetType: target.type === "service" ? "service" : "device",
+        }),
+      });
+    } else {
+      await apiRequest(`/admin/discovery/results/${encodeURIComponent(resultId)}/${action}`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    }
+
+    await refreshState(true, true);
+    showToast(t("discovery_action_done"));
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderDiscoveryPreview() {
+  if (!elements.discoveryResultsTableBody) {
+    return;
+  }
+
+  const agents = state.admin?.discoveryAgents || [];
+  const results = state.admin?.discoveryResults || [];
+  const counts = results.reduce((accumulator, result) => {
+    const stateName = result.state || "new";
+    accumulator[stateName] = (accumulator[stateName] || 0) + 1;
+    return accumulator;
+  }, {});
+
+  if (elements.discoveryResultsCounter) {
+    elements.discoveryResultsCounter.textContent = formatRecordsCount(results.length);
+  }
+
+  if (elements.discoverySummaryGrid) {
+    const summaryItems = [
+      ["discovery_agents_count", agents.length],
+      ["discovery_state_new", counts.new || 0],
+      ["discovery_state_matched", counts.matched || 0],
+      ["discovery_state_stale", counts.stale || 0],
+      ["discovery_state_ignored", counts.ignored || 0],
+    ];
+    elements.discoverySummaryGrid.innerHTML = summaryItems.map(([labelKey, count]) => `
+      <div class="discovery-summary-card">
+        <span class="stat-label">${escapeHtml(t(labelKey))}</span>
+        <strong>${escapeHtml(String(count))}</strong>
+      </div>
+    `).join("");
+  }
+
+  if (results.length === 0) {
+    elements.discoveryResultsTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="7">${escapeHtml(t("empty_discovery_results"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.discoveryResultsTableBody.innerHTML = results.map((result) => {
+    const sourceLabel = getDeviceSourceLabel(result.source);
+    const sourceKindLabel = result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data");
+    const sourceId = result.sourceId ? `${t("device_source_id_meta", { id: result.sourceId })}` : "";
+    const metadataSummary = renderDiscoveryMetadataSummary(result);
+    const hostLabel = result.hostName || result.hostDeviceId || t("no_binding");
+    const ports = [result.accessPort, result.ports].filter(Boolean).join(" · ") || t("no_data");
+    return `
+      <tr>
+        <td>
+          <span class="status-badge status-badge--${getDiscoveryStateVariant(result.state)}">
+            ${escapeHtml(getDiscoveryStateLabel(result.state))}
+          </span>
+        </td>
+        <td>
+          <strong>${escapeHtml(result.name || t("no_data"))}</strong>
+          <div class="secondary-line">${escapeHtml(sourceKindLabel)}</div>
+        </td>
+        <td>
+          <span class="pill">${escapeHtml(sourceLabel)}</span>
+          <div class="secondary-line">${escapeHtml(sourceId || result.agentName || t("no_data"))}</div>
+          ${metadataSummary ? `<div class="secondary-line">${escapeHtml(metadataSummary)}</div>` : ""}
+        </td>
+        <td>${escapeHtml(hostLabel)}</td>
+        <td><div class="discovery-preview-table__ports mono">${escapeHtml(ports)}</div></td>
+        <td class="mono">${escapeHtml(formatDateTime(result.lastSeenAt || result.updatedAt))}</td>
+        <td>${renderDiscoveryActions(result)}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
 function renderUserAccessGroupOptions(selectedIds = []) {
   const accessGroups = state.admin?.accessGroups || [];
   if (accessGroups.length === 0) {
@@ -3726,14 +5543,155 @@ function renderUserAccessGroupOptions(selectedIds = []) {
     .join("");
 }
 
+function renderDeviceHostSourceCell(device) {
+  const host = resolveDeviceHost(device);
+  const source = device.source || "";
+  const status = device.integrationStatus || "";
+  const lines = [];
+
+  if (host) {
+    lines.push(`${t("device_host_short")}: ${host.name}`);
+  } else if (device.hostDeviceId) {
+    lines.push(t("device_host_orphan"));
+  }
+  if (device.sourceKind) {
+    lines.push(device.sourceKind);
+  }
+  if (device.sourceId) {
+    lines.push(device.sourceId);
+  }
+  if (device.ports) {
+    lines.push(device.ports);
+  }
+  if (device.protocol) {
+    lines.push(getServiceProtocolLabel(device.protocol));
+  }
+  if (device.lastSeenAt) {
+    lines.push(`${t("device_last_seen_short")}: ${formatDateTime(device.lastSeenAt)}`);
+  }
+
+  return `
+    <div class="device-source-cell">
+      <span class="status-badge status-badge--${status === "running" ? "ok" : status ? "warn" : "info"}">${escapeHtml(getDeviceSourceLabel(source))}</span>
+      ${status ? `<span class="status-badge status-badge--${status === "running" ? "ok" : "warn"}">${escapeHtml(getIntegrationStatusLabel(status))}</span>` : ""}
+      <div class="secondary-line">${escapeHtml(lines.join(" · ") || t("no_data"))}</div>
+    </div>
+  `;
+}
+
+function renderServicesList() {
+  if (!elements.servicesTableBody) {
+    return;
+  }
+
+  const searchTerm = normalizeSearch(elements.searchInput.value);
+  const quickFilter = elements.deviceFilterSelect?.value || "all";
+  const groupFilter = elements.deviceGroupFilterSelect?.value || "";
+  const hasActiveFilter = Boolean(searchTerm || quickFilter !== "all" || groupFilter);
+  const services = getServiceRecords()
+    .filter((service) => matchesSearch(service, searchTerm, quickFilter, groupFilter))
+    .slice()
+    .sort((left, right) => {
+      const leftHost = resolveDeviceHost(left)?.name || "";
+      const rightHost = resolveDeviceHost(right)?.name || "";
+      const hostDiff = leftHost.localeCompare(rightHost, getLanguage());
+      if (hostDiff !== 0) {
+        return hostDiff;
+      }
+      return left.name.localeCompare(right.name, getLanguage());
+    });
+
+  elements.servicesCounter.textContent = hasActiveFilter
+    ? formatFilteredCount(services.length, getServiceRecords().length)
+    : formatRecordsCount(services.length);
+  elements.servicesTableWrap?.classList.toggle("table-wrap--capped", hasActiveFilter || services.length > 5);
+
+  if (services.length === 0) {
+    elements.servicesTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="10">${escapeHtml(searchTerm || quickFilter !== "all" ? t("no_results") : t("empty_services"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  const canWrite = Boolean(state.auth?.capabilities?.canWrite);
+  elements.servicesTableBody.innerHTML = services.map((service) => {
+    const host = resolveDeviceHost(service);
+    const status = service.integrationStatus || "";
+    const source = service.source || "";
+    const hostLabel = host
+      ? `${host.name} · ${host.ip}`
+      : `${t("device_host_orphan")} · ${service.hostDeviceId || t("no_data")}`;
+    const isOrphan = hasMissingHost(service);
+    const protocolLabel = getServiceProtocolLabel(service.protocol || "http");
+    const accessPort = getServiceAccessPort(service);
+    const privateUrl = buildPrivateServiceUrl(service, host);
+    const publicUrl = getPublicServiceUrl(service);
+    const sourceLabel = getDeviceSourceLabel(source);
+    const sourceLogoText = getDeviceSourceLogoText(source);
+    const sourceLogoClass = getDeviceSourceLogoClass(source);
+    const sourceLogo = sourceLogoText
+      ? `<span class="source-logo ${escapeHtml(sourceLogoClass)}" title="${escapeHtml(sourceLabel)}" aria-label="${escapeHtml(sourceLabel)}">${escapeHtml(sourceLogoText)}</span>`
+      : "";
+    const sourceDetails = [
+      service.sourceKind && service.sourceKind !== "service" ? getDeviceSourceKindLabel(service.sourceKind) : "",
+      service.sourceId,
+    ].filter(Boolean);
+
+    return `
+      <tr>
+        <td>
+          <div class="service-table__name${sourceLogo ? "" : " service-table__name--plain"}">
+            ${sourceLogo}
+            <strong>${escapeHtml(service.name)}</strong>
+            ${sourceDetails.length ? `<div class="secondary-line">${escapeHtml(sourceDetails.join(" · "))}</div>` : ""}
+          </div>
+        </td>
+        <td>
+          <div>${escapeHtml(hostLabel)}</div>
+          ${isOrphan ? `<span class="status-badge status-badge--warn">${escapeHtml(t("status_orphan"))}</span>` : ""}
+        </td>
+        <td>
+          <div class="service-url-stack">
+            ${publicUrl ? `<div><span class="secondary-line">${escapeHtml(t("service_public_url_label"))}</span><span class="mono service-table__url">${escapeHtml(publicUrl)}</span></div>` : ""}
+            <div><span class="secondary-line">${escapeHtml(t("service_private_url_label"))}</span><span class="mono service-table__url">${escapeHtml(privateUrl || t("no_data"))}</span></div>
+          </div>
+        </td>
+        <td><span class="pill service-table__protocol">${escapeHtml(protocolLabel)}</span></td>
+        <td class="mono service-table__ports">${escapeHtml(accessPort || t("no_data"))}</td>
+        <td class="mono service-table__ports">${escapeHtml(service.ports || t("no_data"))}</td>
+        <td>
+          <span class="status-badge status-badge--${status === "running" ? "ok" : status ? "warn" : "info"}">${escapeHtml(status ? getIntegrationStatusLabel(status) : getDeviceSourceLabel(source))}</span>
+        </td>
+        <td class="service-table__last-seen">${escapeHtml(service.lastSeenAt ? formatDateTime(service.lastSeenAt) : t("no_data"))}</td>
+        <td>${renderRegistryComment(service.note)}</td>
+        <td>
+          <div class="service-row-actions">
+            <div class="service-row-actions__urls${publicUrl ? "" : " service-row-actions__urls--single"}">
+              ${publicUrl ? `<button type="button" class="row-button" data-copy-public-service-url="${escapeHtml(service.id)}">${escapeHtml(t("copy_public_url_button"))}</button>` : ""}
+              <button type="button" class="row-button" data-copy-private-service-url="${escapeHtml(service.id)}" ${privateUrl ? "" : "disabled"}>${escapeHtml(t("copy_private_url_button"))}</button>
+            </div>
+            <div class="service-row-actions__manage">
+              <button type="button" class="row-button" data-edit-service="${escapeHtml(service.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button row-button--danger" data-delete-service="${escapeHtml(service.id)}" ${canWrite ? "" : "disabled"}>${escapeHtml(t("delete_row"))}</button>
+            </div>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
 function renderDevicesTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   const searchTerm = normalizeSearch(elements.searchInput.value);
   const quickFilter = elements.deviceFilterSelect?.value || "all";
   const groupFilter = elements.deviceGroupFilterSelect?.value || "";
   const hasActiveFilter = Boolean(searchTerm || quickFilter !== "all" || groupFilter);
-  const filteredDevices = state.devices.filter((device) => matchesSearch(device, searchTerm, quickFilter, groupFilter));
-  elements.devicesTableWrap?.classList.toggle("table-wrap--capped", hasActiveFilter || filteredDevices.length > 5);
+  const allDevices = getInventoryDevices();
+  const filteredDevices = allDevices.filter((device) => matchesSearch(device, searchTerm, quickFilter, groupFilter));
+  elements.devicesTableWrap?.classList.toggle("table-wrap--capped", hasActiveFilter || (showAllDevicesInRegistry && filteredDevices.length > 5));
 
   if (filteredDevices.length === 0) {
     const message = searchTerm
@@ -3745,7 +5703,7 @@ function renderDevicesTable() {
       </tr>
     `;
     elements.devicesCounter.textContent = hasActiveFilter
-      ? formatFilteredCount(0, state.devices.length)
+      ? formatFilteredCount(0, allDevices.length)
       : formatRecordsCount(0);
     return;
   }
@@ -3771,7 +5729,7 @@ function renderDevicesTable() {
         <tr>
           <td>
             <strong>${escapeHtml(device.name)}</strong>
-            <div class="secondary-line">${escapeHtml(device.note || "")}</div>
+            ${device.note ? renderRegistryComment(device.note) : ""}
           </td>
           <td class="mono">${escapeHtml(device.ip)}</td>
           <td class="mono">${escapeHtml(device.mac || t("no_data"))}</td>
@@ -3807,7 +5765,7 @@ function renderDevicesTable() {
 
   elements.devicesTableBody.innerHTML = rows.join("");
   elements.devicesCounter.textContent = hasActiveFilter
-    ? formatFilteredCount(filteredDevices.length, state.devices.length)
+    ? formatFilteredCount(filteredDevices.length, allDevices.length)
     : formatRecordsCount(filteredDevices.length);
 }
 
@@ -3872,9 +5830,7 @@ function renderHistoryTable() {
   }
 
   const rows = filteredHistory.map((entry) => {
-    const ipLabel = entry.previousIp
-      ? `${escapeHtml(entry.previousIp)} → ${escapeHtml(entry.ip)}`
-      : escapeHtml(entry.ip);
+    const ipLabel = formatHistoryIpLabel(entry, true);
     return `
       <tr>
         <td class="mono">${escapeHtml(formatDateTime(entry.changedAt))}</td>
@@ -3895,12 +5851,15 @@ function renderHistoryTable() {
 
 function renderStats() {
   const assignedIps = getAssignedIpsSet();
+  const inventoryDevices = getInventoryDevices();
+  const services = getServiceRecords();
   const freeInPools = state.subnets.reduce((total, subnet) => {
     return total + countFreeInSubnet(subnet);
   }, 0);
 
   elements.statSubnets.textContent = String(state.subnets.length);
-  elements.statDevices.textContent = String(state.devices.length);
+  elements.statDevices.textContent = String(inventoryDevices.length);
+  elements.statServices.textContent = String(services.length);
   elements.statOccupied.textContent = String(assignedIps.size);
   elements.statAvailable.textContent = String(freeInPools);
 }
@@ -4004,6 +5963,16 @@ async function handleMissingTypeSubmit(event) {
           mac: device.mac || "",
           type: targetType,
           subnetId: device.subnetId || "",
+          hostDeviceId: device.hostDeviceId || "",
+          source: device.source || "",
+          sourceKind: device.sourceKind || "",
+          sourceId: device.sourceId || "",
+          integrationStatus: device.integrationStatus || "",
+          protocol: device.protocol || "",
+          serviceUrl: device.serviceUrl || "",
+          accessPort: device.accessPort || "",
+          ports: device.ports || "",
+          lastSeenAt: device.lastSeenAt || "",
           note: device.note || "",
           createdAt: device.createdAt,
         }),
@@ -4021,14 +5990,14 @@ async function handleMissingTypeSubmit(event) {
 
 function renderDashboardAttention() {
   const conflictMap = new Map();
-  state.devices.forEach((device) => {
+  getInventoryDevices().forEach((device) => {
     const bucket = conflictMap.get(device.ip) || [];
     bucket.push(device.name);
     conflictMap.set(device.ip, bucket);
   });
   const conflictEntries = [...conflictMap.entries()].filter(([, names]) => names.length > 1);
 
-  const placementIssues = state.devices.flatMap((device) => {
+  const placementIssues = getInventoryDevices().flatMap((device) => {
     const subnet = resolveDeviceSubnet(device);
     if (!subnet) {
       return [`${device.name} · ${device.ip} · ${t("status_no_subnet")}`];
@@ -4054,6 +6023,12 @@ function renderDashboardAttention() {
 
   const missingTypeDevices = getDevicesMissingType()
     .map((device) => `${device.name} · ${device.ip}${device.unknownType ? ` · ${t("missing_type_raw_value", { value: device.unknownType })}` : ""}`);
+  const orphanDevices = state.devices
+    .filter(hasMissingHost)
+    .map((device) => `${device.name} · ${device.ip} · ${getDeviceSourceLabel(device.source || "")}`);
+  const staleDiscovery = (state.admin?.discoveryResults || [])
+    .filter((result) => result.state === "stale")
+    .map((result) => `${result.name} · ${getDeviceSourceLabel(result.source)} · ${formatDateTime(result.lastSeenAt || result.updatedAt)}`);
 
   const items = [
     {
@@ -4095,6 +6070,20 @@ function renderDashboardAttention() {
         : "",
     },
     {
+      value: orphanDevices.length,
+      title: t("dashboard_attention_orphans_title"),
+      note: t("dashboard_attention_orphans_note"),
+      tone: orphanDevices.length > 0 ? "warn" : "ok",
+      details: orphanDevices,
+    },
+    {
+      value: staleDiscovery.length,
+      title: t("dashboard_attention_stale_title"),
+      note: t("dashboard_attention_stale_note"),
+      tone: staleDiscovery.length > 0 ? "warn" : "ok",
+      details: staleDiscovery,
+    },
+    {
       value: automationExcluded.length,
       title: t("dashboard_attention_automation_title"),
       note: t("dashboard_attention_automation_note"),
@@ -4131,7 +6120,7 @@ function renderDashboardHistory() {
   const items = state.history
     .slice(0, 3)
     .map((entry) => {
-      const ipLabel = entry.previousIp ? `${entry.previousIp} → ${entry.ip}` : entry.ip;
+      const ipLabel = formatHistoryIpLabel(entry);
       return `
         <li class="mini-item">
           <div class="mini-title">${escapeHtml(entry.deviceName)}</div>
@@ -4212,6 +6201,7 @@ function normalizeServerSettings(rawSettings, meta = {}) {
   return {
     scanIntervalSeconds,
     defaultSubnetScanEnabled: normalizeBoolean(rawSettings?.defaultSubnetScanEnabled, true),
+    discoveryDataPolicy: normalizeDiscoveryDataPolicy(rawSettings?.discoveryDataPolicy),
     scanTimeoutMs,
     scanConcurrency,
     limits: {
@@ -4248,6 +6238,53 @@ function normalizeAuthState(rawAuth = {}) {
   };
 }
 
+function normalizeDiscoveryAgent(entry) {
+  return {
+    id: String(entry?.id || "").trim(),
+    name: String(entry?.name || "").trim(),
+    kind: String(entry?.kind || "").trim(),
+    enabled: Boolean(entry?.enabled),
+    allowedCidrs: Array.isArray(entry?.allowedCidrs) ? entry.allowedCidrs.map((cidr) => String(cidr)) : [],
+    createMode: String(entry?.createMode || "preview_only").trim(),
+    linkedHostDeviceId: String(entry?.linkedHostDeviceId || "").trim(),
+    lastSeenAt: entry?.lastSeenAt || "",
+    lastError: String(entry?.lastError || "").trim(),
+    lastRemoteAddr: String(entry?.lastRemoteAddr || "").trim(),
+    lastRejectedAt: entry?.lastRejectedAt || "",
+    lastRejectReason: String(entry?.lastRejectReason || "").trim(),
+    createdAt: entry?.createdAt || "",
+    updatedAt: entry?.updatedAt || "",
+  };
+}
+
+function normalizeDiscoveryResult(entry) {
+  return {
+    id: String(entry?.id || "").trim(),
+    agentId: String(entry?.agentId || "").trim(),
+    agentName: String(entry?.agentName || "").trim(),
+    source: String(entry?.source || "").trim(),
+    sourceId: String(entry?.sourceId || "").trim(),
+    sourceKind: String(entry?.sourceKind || "").trim(),
+    hostDeviceId: String(entry?.hostDeviceId || "").trim(),
+    hostName: String(entry?.hostName || "").trim(),
+    name: String(entry?.name || "").trim(),
+    status: String(entry?.status || "").trim(),
+    ports: String(entry?.ports || "").trim(),
+    accessPort: String(entry?.accessPort || "").trim(),
+    serviceUrl: String(entry?.serviceUrl || "").trim(),
+    lastSeenAt: entry?.lastSeenAt || "",
+    matchedDeviceId: String(entry?.matchedDeviceId || "").trim(),
+    matchedServiceId: String(entry?.matchedServiceId || "").trim(),
+    state: String(entry?.state || "new").trim(),
+    receivedFields: Array.isArray(entry?.receivedFields) ? entry.receivedFields.map((field) => String(field)) : [],
+    acceptedFields: Array.isArray(entry?.acceptedFields) ? entry.acceptedFields.map((field) => String(field)) : [],
+    visibleFields: Array.isArray(entry?.visibleFields) ? entry.visibleFields.map((field) => String(field)) : [],
+    visibleRaw: entry?.visibleRaw && typeof entry.visibleRaw === "object" ? entry.visibleRaw : {},
+    createdAt: entry?.createdAt || "",
+    updatedAt: entry?.updatedAt || "",
+  };
+}
+
 function normalizeAdminState(rawAdmin = null) {
   if (!rawAdmin) {
     return null;
@@ -4256,6 +6293,12 @@ function normalizeAdminState(rawAdmin = null) {
   return {
     accessGroups: Array.isArray(rawAdmin?.accessGroups)
       ? rawAdmin.accessGroups.map(normalizeAccessGroup)
+      : [],
+    discoveryAgents: Array.isArray(rawAdmin?.discoveryAgents)
+      ? rawAdmin.discoveryAgents.map(normalizeDiscoveryAgent)
+      : [],
+    discoveryResults: Array.isArray(rawAdmin?.discoveryResults)
+      ? rawAdmin.discoveryResults.map(normalizeDiscoveryResult)
       : [],
     users: Array.isArray(rawAdmin?.users)
       ? rawAdmin.users.map((entry) => ({
@@ -4292,13 +6335,27 @@ function normalizeScanResult(entry) {
   };
 }
 
+function formatHistoryIpLabel(entry, alreadyEscaped = false) {
+  const emptyLabel = t("no_data");
+  const ip = entry?.ip || "";
+  const previousIp = entry?.previousIp || "";
+  const label = previousIp
+    ? `${previousIp} → ${ip || emptyLabel}`
+    : ip || emptyLabel;
+
+  return alreadyEscaped ? escapeHtml(label) : label;
+}
+
 function normalizeHistoryItem(entry) {
+  const rawIp = String(entry?.ip || "").trim();
+  const rawPreviousIp = String(entry?.previousIp || "").trim();
+
   return {
     id: entry?.id ?? createId(),
     deviceId: String(entry?.deviceId || "").trim(),
     deviceName: String(entry?.deviceName || "").trim(),
-    ip: normalizeIp(String(entry?.ip || "").trim()),
-    previousIp: entry?.previousIp ? normalizeIp(String(entry.previousIp).trim()) : "",
+    ip: rawIp ? normalizeIp(rawIp) : "",
+    previousIp: rawPreviousIp ? normalizeIp(rawPreviousIp) : "",
     action: String(entry?.action || "assigned").trim(),
     actor: String(entry?.actor || "system").trim(),
     changedAt: entry?.changedAt || new Date().toISOString(),
@@ -4455,6 +6512,17 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups, customDevice
   const note = String(rawDevice?.note || "").trim();
   let subnetId = String(rawDevice?.subnetId || "").trim();
   const groupId = String(rawDevice?.groupId || "").trim();
+  const id = String(rawDevice?.id || createId());
+  const hostDeviceId = String(rawDevice?.hostDeviceId || "").trim();
+  const source = normalizeMetadataToken(rawDevice?.source, "");
+  const sourceKind = normalizeMetadataToken(rawDevice?.sourceKind, "");
+  const sourceId = String(rawDevice?.sourceId || "").trim();
+  const integrationStatus = normalizeMetadataToken(rawDevice?.integrationStatus, "");
+  const protocol = normalizeMetadataToken(rawDevice?.protocol, "");
+  const serviceUrl = String(rawDevice?.serviceUrl || "").trim();
+  const accessPort = String(rawDevice?.accessPort || "").trim();
+  const ports = String(rawDevice?.ports || "").trim();
+  const lastSeenAt = String(rawDevice?.lastSeenAt || "").trim();
 
   if (!name) {
     throw new Error(t("error_device_name_required"));
@@ -4464,6 +6532,10 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups, customDevice
 
   if (mac && !/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(mac)) {
     throw new Error(t("error_device_mac_invalid", { name }));
+  }
+
+  if (hostDeviceId && hostDeviceId === id) {
+    throw new Error(t("error_device_host_self"));
   }
 
   const allowedDeviceTypes = new Set([
@@ -4510,13 +6582,23 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups, customDevice
   }
 
   return {
-    id: String(rawDevice?.id || createId()),
+    id,
     name,
     ip,
     mac,
     type,
     unknownType,
     subnetId,
+    hostDeviceId,
+    source,
+    sourceKind,
+    sourceId,
+    integrationStatus,
+    protocol,
+    serviceUrl,
+    accessPort,
+    ports,
+    lastSeenAt,
     note,
     createdAt: rawDevice?.createdAt || new Date().toISOString(),
   };
@@ -4532,7 +6614,7 @@ function serializeDevice(device) {
 function serializeSnapshotPayload(sourceState = state) {
   return {
     exportedAt: new Date().toISOString(),
-    version: "0.2",
+    version: "0.3",
     subnets: sourceState.subnets,
     groups: sourceState.groups,
     devices: sourceState.devices.map(serializeDevice),
@@ -4600,7 +6682,7 @@ function normalizeGroupEndpoint(value, subnet) {
 }
 
 function getDevicesInSubnet(subnet) {
-  return state.devices.filter((device) => isIpInsideNetwork(ipToInt(device.ip), subnet));
+  return getInventoryDevices().filter((device) => isIpInsideNetwork(ipToInt(device.ip), subnet));
 }
 
 function isSubnetPingVisible(subnet) {
@@ -4623,7 +6705,7 @@ function getGroupsInSubnet(subnetId) {
 }
 
 function getDevicesInGroup(group) {
-  return state.devices.filter((device) => {
+  return getInventoryDevices().filter((device) => {
     const ipInt = ipToInt(device.ip);
     return ipInt >= group.rangeStartInt && ipInt <= group.rangeEndInt;
   });
@@ -4675,7 +6757,7 @@ function getReachableScanIps() {
 }
 
 function getAssignedIpsSet() {
-  return new Set(state.devices.map((device) => device.ip));
+  return new Set(getInventoryDevices().map((device) => device.ip));
 }
 
 function getBusyIpsSet() {
@@ -4717,7 +6799,7 @@ function countPingOnlyInSubnet(subnet, reachableSet = getReachableScanIps()) {
     return 0;
   }
   const assignedSet = new Set(
-    state.devices
+    getInventoryDevices()
       .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
       .map((device) => device.ip)
   );
@@ -4733,7 +6815,7 @@ function countPingOnlyInSubnet(subnet, reachableSet = getReachableScanIps()) {
 
 function countBusyInSubnet(subnet, reachableSet = getReachableScanIps()) {
   const busySet = new Set(
-    state.devices
+    getInventoryDevices()
       .filter((device) => isIpInsidePool(ipToInt(device.ip), subnet))
       .map((device) => device.ip)
   );
@@ -4789,6 +6871,45 @@ function resolveDeviceGroup(device, subnet = resolveDeviceSubnet(device)) {
   return findRangeGroupForIp(ipToInt(device.ip), subnet.id);
 }
 
+function resolveDeviceHost(device) {
+  const hostId = String(device?.hostDeviceId || "").trim();
+  if (!hostId) {
+    return null;
+  }
+  return state.devices.find((entry) => entry.id === hostId) || null;
+}
+
+function hasMissingHost(device) {
+  return Boolean(device?.hostDeviceId && !resolveDeviceHost(device));
+}
+
+function isServiceRecord(device) {
+  return String(device?.type || "").trim().toLowerCase() === "service";
+}
+
+function getInventoryDevices() {
+  return state.devices.filter((device) => !isServiceRecord(device));
+}
+
+function getServiceRecords() {
+  return state.devices.filter(isServiceRecord);
+}
+
+function isHostSharedServiceIp(device, host = resolveDeviceHost(device)) {
+  return Boolean(isServiceRecord(device) && host && device.ip === host.ip);
+}
+
+function isIpConflictCandidate(device) {
+  return !isHostSharedServiceIp(device);
+}
+
+function hasIpConflict(device) {
+  if (!isIpConflictCandidate(device)) {
+    return false;
+  }
+  return state.devices.some((entry) => entry.id !== device.id && entry.ip === device.ip && isIpConflictCandidate(entry));
+}
+
 function findSubnetForIp(ipInt, subnets = state.subnets) {
   return subnets.find((subnet) => ipInt >= subnet.networkInt && ipInt <= subnet.broadcastInt);
 }
@@ -4810,15 +6931,21 @@ function handleDeviceSubnetChange() {
   updateSuggestedIp();
 }
 
-function buildDeviceTypeOptionMarkup({ includeUnset = true } = {}) {
+function handleServiceHostChange() {
+  clearServiceFormStatus();
+}
+
+function buildDeviceTypeOptionMarkup({ includeUnset = true, includeServices = false } = {}) {
   const options = [];
   if (includeUnset) {
     options.push(`<option value="">${escapeHtml(t("device_type_unset_option"))}</option>`);
   }
 
-  getAvailableDeviceTypes().forEach((type) => {
-    options.push(`<option value="${escapeHtml(type.id)}">${escapeHtml(type.label)}</option>`);
-  });
+  getAvailableDeviceTypes()
+    .filter((type) => includeServices || type.id !== "service")
+    .forEach((type) => {
+      options.push(`<option value="${escapeHtml(type.id)}">${escapeHtml(type.label)}</option>`);
+    });
 
   return options.join("");
 }
@@ -4933,9 +7060,16 @@ function normalizeSearchableText(value) {
 }
 
 function evaluateDeviceStatus(device, subnet) {
-  const sameIpCount = state.devices.filter((entry) => entry.ip === device.ip).length;
-  if (sameIpCount > 1) {
+  if (hasIpConflict(device)) {
     return { label: t("status_conflict"), variant: "danger" };
+  }
+
+  if (hasMissingHost(device)) {
+    return { label: t("status_orphan"), variant: "warn" };
+  }
+
+  if (device.integrationStatus === "stale") {
+    return { label: t("status_stale"), variant: "warn" };
   }
 
   if (!subnet) {
@@ -4950,19 +7084,40 @@ function evaluateDeviceStatus(device, subnet) {
 }
 
 function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = "") {
+  const isService = isServiceRecord(device);
   const subnet = resolveDeviceSubnet(device);
   const group = resolveDeviceGroup(device, subnet);
   const pingState = getVisiblePingState(device.ip, subnet);
-  const sameIpCount = state.devices.filter((entry) => entry.ip === device.ip).length;
   const exactIpTerm = normalizeIpSafe(searchTerm);
 
-  if (quickFilter === "conflicts" && sameIpCount <= 1) {
+  if (quickFilter === "devices" && isService) {
+    return false;
+  }
+  if (quickFilter === "services" && !isService) {
+    return false;
+  }
+  if (quickFilter === "conflicts" && !hasIpConflict(device)) {
     return false;
   }
   if (quickFilter === "no-subnet" && subnet) {
     return false;
   }
   if (quickFilter === "outside-pool" && (!subnet || isIpInsidePool(ipToInt(device.ip), subnet))) {
+    return false;
+  }
+  if (quickFilter === "orphan-host" && !hasMissingHost(device)) {
+    return false;
+  }
+  if (quickFilter === "status-running" && device.integrationStatus !== "running") {
+    return false;
+  }
+  if (quickFilter === "status-offline" && !(device.integrationStatus === "offline" || pingState?.isReachable === false)) {
+    return false;
+  }
+  if (quickFilter === "status-stale" && device.integrationStatus !== "stale") {
+    return false;
+  }
+  if (quickFilter.startsWith("source-") && device.source !== quickFilter.replace("source-", "")) {
     return false;
   }
   if (groupFilter && group?.id !== groupFilter) {
@@ -4984,6 +7139,16 @@ function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = ""
     device.type,
     device.unknownType || "",
     getDeviceTypeLabel(device.type),
+    resolveDeviceHost(device)?.name || "",
+    device.source,
+    device.sourceKind,
+    device.sourceId,
+    device.integrationStatus,
+    device.protocol,
+    device.serviceUrl,
+    device.accessPort,
+    device.ports,
+    device.lastSeenAt,
     device.note,
     subnet?.name || "",
     subnet?.cidr || "",
@@ -5170,6 +7335,16 @@ function findExistingDeviceForCsv(row, devices) {
   });
 }
 
+function findDeviceHostByReference(row, devices) {
+  const hostId = String(row.host_id || row.hostDeviceId || row.host_device_id || "").trim();
+  const hostName = String(row.host || row.host_name || row.hostName || "").trim();
+  if (!hostId && !hostName) {
+    return null;
+  }
+
+  return devices.find((device) => device.id === hostId || device.name === hostName) || null;
+}
+
 function parseCsv(text) {
   const rows = [];
   const sanitizedText = text.startsWith("\uFEFF") ? text.slice(1) : text;
@@ -5252,6 +7427,35 @@ function normalizeCsvHeader(header) {
     mac: "mac",
     type: "type",
     "тип": "type",
+    host: "host",
+    "host name": "host_name",
+    "host id": "host_id",
+    "хост": "host",
+    source: "source",
+    "источник": "source",
+    "джерело": "source",
+    "source kind": "source_kind",
+    "source id": "source_id",
+    "source status": "integration_status",
+    "integration status": "integration_status",
+    status: "status",
+    protocol: "protocol",
+    "протокол": "protocol",
+    url: "url",
+    "service url": "service_url",
+    service_url: "service_url",
+    "url сервиса": "service_url",
+    "url сервісу": "service_url",
+    access: "access_port",
+    "access port": "access_port",
+    access_port: "access_port",
+    "порт доступа": "access_port",
+    "порт доступу": "access_port",
+    ports: "ports",
+    "порты": "ports",
+    "порти": "ports",
+    "last seen": "last_seen_at",
+    last_seen: "last_seen_at",
     "начало пула": "range_start",
     "початок пулу": "range_start",
     "pool start": "range_start",
@@ -5297,10 +7501,22 @@ function normalizeDeviceTypeValue(value) {
     containers: "container",
     контейнер: "container",
     "контейнери": "container",
+    service: "service",
+    services: "service",
+    сервис: "service",
+    сервіс: "service",
     iot: "iot",
   };
 
   return aliases[normalized] || normalized.replace(/[^a-z0-9_-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+function normalizeMetadataToken(value, fallback = "") {
+  const normalized = normalizeSearchableText(value);
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized.replace(/[^a-z0-9_-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
 function toCsv(rows, options = {}) {

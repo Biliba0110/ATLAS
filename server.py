@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 import subprocess
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -42,6 +42,71 @@ ROLE_EDITOR = "editor"
 ROLE_VIEWER = "viewer"
 SUPPORTED_ROLES = {ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}
 SESSION_COOKIE_NAME = "atlas_session"
+DISCOVERY_SCHEMA = "atlas.discovery.snapshot.v1"
+DISCOVERY_RESULT_STATES = {"new", "matched", "stale", "ignored", "error"}
+DISCOVERY_RUN_STATES = {"running", "completed", "failed", "rejected"}
+DISCOVERY_CREATE_MODES = {"preview_only", "auto_create_services", "auto_create_devices_and_services"}
+DISCOVERY_MAX_BODY_BYTES = 512 * 1024
+DISCOVERY_MAX_ITEMS = 500
+DISCOVERY_MAX_RAW_BYTES = 16 * 1024
+DISCOVERY_TIMESTAMP_SKEW_SECONDS = 300
+DISCOVERY_NONCE_TTL_SECONDS = 600
+DEFAULT_DISCOVERY_DATA_POLICY = {
+    "storeRuntime": True,
+    "storeLabels": False,
+    "storeNetworkDetails": False,
+    "storeInternalIps": False,
+    "storeRawMetadata": False,
+    "showMetadataInPreview": False,
+}
+DISCOVERY_CORE_RAW_FIELDS = {
+    "address",
+    "containerId",
+    "fqdn",
+    "hostname",
+    "ip",
+    "mac",
+    "macAddress",
+    "mac_address",
+    "node",
+    "primaryIp",
+    "primary_ip",
+    "proxmoxType",
+    "type",
+    "uid",
+    "vmid",
+}
+DISCOVERY_RUNTIME_RAW_FIELDS = {
+    "created",
+    "disk",
+    "dockerState",
+    "finishedAt",
+    "image",
+    "images",
+    "maxDisk",
+    "maxMemory",
+    "memory",
+    "phase",
+    "platform",
+    "release",
+    "restartCount",
+    "startedAt",
+    "statusText",
+    "system",
+    "template",
+    "uptime",
+}
+DISCOVERY_LABEL_RAW_FIELDS = {"labels", "owners", "selector", "tags"}
+DISCOVERY_NETWORK_RAW_FIELDS = {
+    "clusterIP",
+    "externalIPs",
+    "hostIP",
+    "ips",
+    "loadBalancer",
+    "networks",
+    "nodeName",
+    "podIP",
+}
 
 STATIC_FILES = {
     "index.html",
@@ -97,6 +162,16 @@ CREATE TABLE IF NOT EXISTS devices (
     mac TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL,
     subnet_id TEXT,
+    host_device_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    source_kind TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '',
+    integration_status TEXT NOT NULL DEFAULT '',
+    protocol TEXT NOT NULL DEFAULT '',
+    service_url TEXT NOT NULL DEFAULT '',
+    access_port TEXT NOT NULL DEFAULT '',
+    ports TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     FOREIGN KEY (subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
@@ -177,6 +252,80 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS discovery_agents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'host',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    token_hash TEXT NOT NULL DEFAULT '',
+    allowed_cidrs TEXT NOT NULL DEFAULT '',
+    create_mode TEXT NOT NULL DEFAULT 'preview_only'
+        CHECK (create_mode IN ('preview_only', 'auto_create_services', 'auto_create_devices_and_services')),
+    linked_host_device_id TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_remote_addr TEXT NOT NULL DEFAULT '',
+    last_rejected_at TEXT NOT NULL DEFAULT '',
+    last_reject_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discovery_results (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    host_device_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT '',
+    ports TEXT NOT NULL DEFAULT '',
+    access_port TEXT NOT NULL DEFAULT '',
+    service_url TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    matched_device_id TEXT NOT NULL DEFAULT '',
+    matched_service_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'new'
+        CHECK (state IN ('new', 'matched', 'stale', 'ignored', 'error')),
+    raw TEXT NOT NULL DEFAULT '{}',
+    received_fields TEXT NOT NULL DEFAULT '[]',
+    accepted_fields TEXT NOT NULL DEFAULT '[]',
+    visible_fields TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (agent_id, source, source_id),
+    FOREIGN KEY (agent_id) REFERENCES discovery_agents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    schema TEXT NOT NULL DEFAULT 'atlas.discovery.snapshot.v1',
+    source TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed', 'rejected')),
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL DEFAULT '',
+    found_count INTEGER NOT NULL DEFAULT 0,
+    created_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    stale_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    remote_addr TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES discovery_agents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discovery_nonces (
+    agent_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, nonce),
+    FOREIGN KEY (agent_id) REFERENCES discovery_agents(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_subnets_network_int ON subnets(network_int);
 CREATE INDEX IF NOT EXISTS idx_groups_subnet_id ON range_groups(subnet_id);
 CREATE INDEX IF NOT EXISTS idx_devices_subnet_id ON devices(subnet_id);
@@ -186,6 +335,14 @@ CREATE INDEX IF NOT EXISTS idx_history_changed_at ON ip_history(changed_at DESC)
 CREATE INDEX IF NOT EXISTS idx_user_access_groups_user_id ON user_access_groups(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_agents_enabled ON discovery_agents(enabled);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_agent_id ON discovery_results(agent_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_state ON discovery_results(state);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_source_lookup ON discovery_results(agent_id, source, source_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_last_seen ON discovery_results(last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_agent_id ON discovery_runs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_started_at ON discovery_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovery_nonces_expires_at ON discovery_nonces(expires_at);
 """
 
 SUBSCRIBERS: set[queue.Queue[str]] = set()
@@ -254,6 +411,37 @@ def verify_password(password: str, stored_hash: str) -> bool:
         iterations,
     ).hex()
     return hmac.compare_digest(actual_hash, expected_hash)
+
+
+def generate_agent_token() -> str:
+    return f"atlas_agent_{secrets.token_urlsafe(32)}"
+
+
+def hash_agent_token(token: str) -> str:
+    token_value = str(token or "").strip()
+    if not token_value:
+        raise ValueError("Токен агента не может быть пустым.")
+    digest = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
+    return f"sha256${digest}"
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def hmac_sha256_hex(secret: str, message: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def normalize_signature_value(value: object) -> str:
+    raw_value = str(value or "").strip()
+    if raw_value.startswith("sha256="):
+        raw_value = raw_value.removeprefix("sha256=")
+    return raw_value.lower()
 
 
 def normalize_ip_address(value: object) -> str:
@@ -355,12 +543,71 @@ def normalize_device_type(value: object) -> str:
         "контейнер": "container",
         "контейнеры": "container",
         "контейнери": "container",
+        "service": "service",
+        "services": "service",
+        "сервис": "service",
+        "сервіс": "service",
         "iot": "iot",
     }
     device_type = aliases.get(raw_value, raw_value.replace(" ", "-"))
     if not device_type or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in device_type):
         raise ValueError("Тип устройства должен содержать только латинские буквы, цифры, дефис или подчёркивание.")
     return device_type
+
+
+def normalize_slug_value(value: object, *, default: str = "") -> str:
+    normalized = str(value or default).strip().lower().replace(" ", "-")
+    if not normalized:
+        return default
+    if any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in normalized):
+        raise ValueError("Источник, статус и тип интеграции должны содержать только латинские буквы, цифры, дефис или подчёркивание.")
+    return normalized
+
+
+def normalize_device_ports(value: object) -> str:
+    raw_value = str(value or "").strip()
+    if len(raw_value) > 500:
+        raise ValueError("Список портов слишком длинный.")
+    return raw_value
+
+
+def normalize_optional_text(value: object, max_length: int, field_name: str) -> str:
+    text = str(value or "").strip()
+    if len(text) > max_length:
+        raise ValueError(f"{field_name} слишком длинный.")
+    return text
+
+
+def is_service_ip_duplicate_allowed(
+    connection: sqlite3.Connection,
+    *,
+    device_id: str,
+    ip: str,
+    device_type: str,
+    host_device_id: str,
+) -> bool:
+    if device_type != "service" or not host_device_id:
+        return False
+
+    host_row = connection.execute(
+        "SELECT id, ip FROM devices WHERE id = ?",
+        (host_device_id,),
+    ).fetchone()
+    if host_row is None or host_row["ip"] != ip:
+        return False
+
+    conflicting_row = connection.execute(
+        """
+        SELECT id, name
+        FROM devices
+        WHERE ip = ?
+          AND id NOT IN (?, ?)
+          AND NOT (type = 'service' AND host_device_id = ?)
+        LIMIT 1
+        """,
+        (ip, device_id, host_device_id, host_device_id),
+    ).fetchone()
+    return conflicting_row is None
 
 
 def normalize_group_payload(
@@ -438,7 +685,20 @@ def normalize_device_payload(
     note = str(payload.get("note") or "").strip()
     subnet_id = str(payload.get("subnetId") or "").strip()
     group_id = str(payload.get("groupId") or "").strip()
+    host_device_id = str(payload.get("hostDeviceId") or "").strip()
+    source = normalize_slug_value(payload.get("source"), default="")
+    source_kind = normalize_slug_value(payload.get("sourceKind"), default="")
+    source_id = str(payload.get("sourceId") or "").strip()
+    integration_status = normalize_slug_value(payload.get("integrationStatus"), default="")
+    protocol = normalize_slug_value(payload.get("protocol"), default="")
+    service_url = str(payload.get("serviceUrl") or "").strip()
+    access_port = normalize_device_ports(payload.get("accessPort"))
+    ports = normalize_device_ports(payload.get("ports"))
+    last_seen_at = str(payload.get("lastSeenAt") or "").strip()
     ip_int = ip_to_int_value(ip)
+
+    if host_device_id == device_id:
+        raise ValueError("Устройство не может быть собственным хостом.")
 
     subnet = get_subnet_by_id(connection, subnet_id) if subnet_id else None
     if subnet is not None and not (subnet["networkInt"] <= ip_int <= subnet["broadcastInt"]):
@@ -465,7 +725,13 @@ def normalize_device_payload(
         "SELECT id, name FROM devices WHERE ip = ? AND id != ? LIMIT 1",
         (ip, device_id),
     ).fetchone()
-    if duplicate_ip is not None:
+    if duplicate_ip is not None and not is_service_ip_duplicate_allowed(
+        connection,
+        device_id=device_id,
+        ip=ip,
+        device_type=device_type,
+        host_device_id=host_device_id,
+    ):
         raise ValueError(f"IP {ip} уже назначен устройству {duplicate_ip['name']}.")
 
     if mac:
@@ -483,6 +749,16 @@ def normalize_device_payload(
         "mac": mac,
         "type": device_type,
         "subnetId": subnet_id,
+        "hostDeviceId": host_device_id,
+        "source": source,
+        "sourceKind": source_kind,
+        "sourceId": source_id,
+        "integrationStatus": integration_status,
+        "protocol": protocol,
+        "serviceUrl": service_url,
+        "accessPort": access_port,
+        "ports": ports,
+        "lastSeenAt": last_seen_at,
         "note": note,
         "createdAt": created_at or str(payload.get("createdAt") or utc_now_iso()),
     }
@@ -501,6 +777,20 @@ def ensure_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "subnets", "access_group_id", "TEXT")
     ensure_column(connection, "subnets", "scan_enabled", "INTEGER NOT NULL DEFAULT 1")
     ensure_column(connection, "users", "is_system_admin", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(connection, "devices", "host_device_id", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "source", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "source_kind", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "source_id", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "integration_status", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "protocol", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "service_url", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "access_port", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "ports", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "discovery_results", "received_fields", "TEXT NOT NULL DEFAULT '[]'")
+    ensure_column(connection, "discovery_results", "accepted_fields", "TEXT NOT NULL DEFAULT '[]'")
+    ensure_column(connection, "discovery_results", "visible_fields", "TEXT NOT NULL DEFAULT '[]'")
+    connection.execute("UPDATE devices SET source = '' WHERE source = 'manual'")
 
 
 def ensure_system_admin_marker(connection: sqlite3.Connection) -> None:
@@ -698,6 +988,16 @@ def device_from_row(row: sqlite3.Row) -> dict:
         "mac": row["mac"] or "",
         "type": row["type"],
         "subnetId": row["subnet_id"] or "",
+        "hostDeviceId": row["host_device_id"] or "",
+        "source": row["source"] or "",
+        "sourceKind": row["source_kind"] or "",
+        "sourceId": row["source_id"] or "",
+        "integrationStatus": row["integration_status"] or "",
+        "protocol": row["protocol"] or "",
+        "serviceUrl": row["service_url"] or "",
+        "accessPort": row["access_port"] or "",
+        "ports": row["ports"] or "",
+        "lastSeenAt": row["last_seen_at"] or "",
         "note": row["note"],
         "createdAt": row["created_at"],
     }
@@ -751,6 +1051,85 @@ def user_from_row(row: sqlite3.Row) -> dict:
     }
 
 
+def discovery_agent_from_row(row: sqlite3.Row) -> dict:
+    try:
+        allowed_cidrs = json.loads(row["allowed_cidrs"] or "[]")
+    except json.JSONDecodeError:
+        allowed_cidrs = []
+    if not isinstance(allowed_cidrs, list):
+        allowed_cidrs = []
+
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "kind": row["kind"],
+        "enabled": bool(row["enabled"]),
+        "allowedCidrs": [str(item) for item in allowed_cidrs],
+        "createMode": row["create_mode"],
+        "linkedHostDeviceId": row["linked_host_device_id"] or "",
+        "lastSeenAt": row["last_seen_at"] or "",
+        "lastError": row["last_error"] or "",
+        "lastRemoteAddr": row["last_remote_addr"] or "",
+        "lastRejectedAt": row["last_rejected_at"] or "",
+        "lastRejectReason": row["last_reject_reason"] or "",
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def decode_json_object(value: str) -> dict:
+    try:
+        decoded = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def decode_json_list(value: str) -> list[str]:
+    try:
+        decoded = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [str(item or "").strip() for item in decoded if str(item or "").strip()]
+
+
+def discovery_result_from_row(row: sqlite3.Row) -> dict:
+    raw = decode_json_object(row["raw"] or "{}")
+    visible_fields = decode_json_list(row["visible_fields"] or "[]")
+    visible_raw = {
+        key: raw.get(key)
+        for key in visible_fields
+        if key in raw
+    }
+    return {
+        "id": row["id"],
+        "agentId": row["agent_id"],
+        "agentName": row["agent_name"] or "",
+        "source": row["source"],
+        "sourceId": row["source_id"],
+        "sourceKind": row["source_kind"],
+        "hostDeviceId": row["host_device_id"] or "",
+        "hostName": row["host_name"] or "",
+        "name": row["name"],
+        "status": row["status"] or "",
+        "ports": row["ports"] or "",
+        "accessPort": row["access_port"] or "",
+        "serviceUrl": row["service_url"] or "",
+        "lastSeenAt": row["last_seen_at"] or "",
+        "matchedDeviceId": row["matched_device_id"] or "",
+        "matchedServiceId": row["matched_service_id"] or "",
+        "state": row["state"],
+        "receivedFields": decode_json_list(row["received_fields"] or "[]"),
+        "acceptedFields": decode_json_list(row["accepted_fields"] or "[]"),
+        "visibleFields": visible_fields,
+        "visibleRaw": visible_raw,
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def get_user_access_group_ids(connection: sqlite3.Connection, user_id: str) -> list[str]:
     return [
         row["access_group_id"]
@@ -780,6 +1159,72 @@ def list_users(connection: sqlite3.Connection) -> list[dict]:
     for user in users:
         user["accessGroupIds"] = get_user_access_group_ids(connection, user["id"])
     return users
+
+
+def list_discovery_agents(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        discovery_agent_from_row(row)
+        for row in connection.execute(
+            "SELECT * FROM discovery_agents ORDER BY name COLLATE NOCASE ASC, created_at ASC"
+        )
+    ]
+
+
+def list_discovery_results(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        discovery_result_from_row(row)
+        for row in connection.execute(
+            """
+            SELECT
+                discovery_results.*,
+                discovery_agents.name AS agent_name,
+                devices.name AS host_name
+            FROM discovery_results
+            LEFT JOIN discovery_agents ON discovery_agents.id = discovery_results.agent_id
+            LEFT JOIN devices ON devices.id = discovery_results.host_device_id
+            ORDER BY discovery_results.updated_at DESC, discovery_results.created_at DESC
+            """
+        )
+    ]
+
+
+def get_discovery_result_row(connection: sqlite3.Connection, result_id: str) -> sqlite3.Row:
+    row = connection.execute(
+        """
+        SELECT
+            discovery_results.*,
+            discovery_agents.name AS agent_name,
+            discovery_agents.linked_host_device_id AS agent_linked_host_device_id,
+            devices.name AS host_name
+        FROM discovery_results
+        LEFT JOIN discovery_agents ON discovery_agents.id = discovery_results.agent_id
+        LEFT JOIN devices ON devices.id = discovery_results.host_device_id
+        WHERE discovery_results.id = ?
+        """,
+        (result_id,),
+    ).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Найденный объект не найден.")
+    return row
+
+
+def get_discovery_result(connection: sqlite3.Connection, result_id: str) -> dict:
+    return discovery_result_from_row(get_discovery_result_row(connection, result_id))
+
+
+def decode_discovery_raw(row: sqlite3.Row) -> dict:
+    return decode_json_object(row["raw"] or "{}")
+
+
+def get_device_row(connection: sqlite3.Connection, device_id: str) -> sqlite3.Row | None:
+    if not device_id:
+        return None
+    return connection.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+
+
+def resolve_discovery_host_row(connection: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
+    host_device_id = row["host_device_id"] or row["agent_linked_host_device_id"] or ""
+    return get_device_row(connection, host_device_id)
 
 
 def list_user_access_group_rows(connection: sqlite3.Connection) -> list[dict]:
@@ -832,7 +1277,7 @@ def export_backup(connection: sqlite3.Connection, include: dict | None = None) -
 
     payload = {
         "kind": "atlas-backup",
-        "version": "0.2.5",
+        "version": "0.3",
         "exportedAt": utc_now_iso(),
         "sections": {},
     }
@@ -912,6 +1357,10 @@ def import_backup(connection: sqlite3.Connection, backup: dict, actor: str) -> d
     with connection:
         if "inventory" in sections:
             inventory = sections.get("inventory") or {}
+            connection.execute("DELETE FROM discovery_nonces")
+            connection.execute("DELETE FROM discovery_runs")
+            connection.execute("DELETE FROM discovery_results")
+            connection.execute("UPDATE discovery_agents SET linked_host_device_id = '', updated_at = ?", (utc_now_iso(),))
             connection.execute("DELETE FROM devices")
             connection.execute("DELETE FROM range_groups")
             connection.execute("DELETE FROM subnets")
@@ -1158,11 +1607,13 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
         "operator": "",
         "accentTheme": "atlas",
         "autoRescanAfterDeviceSave": True,
+        "modalBlurEnabled": True,
         "suggestionMode": "compact",
         "language": "en",
         "customSignature": "",
         "customGroupTemplates": [],
         "customDeviceTypes": [],
+        "customDeviceSources": [],
     }
     rows = connection.execute(
         "SELECT key, value FROM user_settings WHERE user_id = ?",
@@ -1171,9 +1622,9 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
     for row in rows:
         key = row["key"]
         raw_value = row["value"]
-        if key in {"autoRescanAfterDeviceSave"}:
+        if key in {"autoRescanAfterDeviceSave", "modalBlurEnabled"}:
             defaults[key] = raw_value == "1"
-        elif key in {"customGroupTemplates", "customDeviceTypes"}:
+        elif key in {"customGroupTemplates", "customDeviceTypes", "customDeviceSources"}:
             try:
                 defaults[key] = json.loads(raw_value)
             except json.JSONDecodeError:
@@ -1188,11 +1639,13 @@ def save_user_preferences(connection: sqlite3.Connection, user_id: str, payload:
         "operator",
         "accentTheme",
         "autoRescanAfterDeviceSave",
+        "modalBlurEnabled",
         "suggestionMode",
         "language",
         "customSignature",
         "customGroupTemplates",
         "customDeviceTypes",
+        "customDeviceSources",
     }
     now = utc_now_iso()
     changed = False
@@ -1202,9 +1655,9 @@ def save_user_preferences(connection: sqlite3.Connection, user_id: str, payload:
             continue
 
         value = payload[key]
-        if key == "autoRescanAfterDeviceSave":
+        if key in {"autoRescanAfterDeviceSave", "modalBlurEnabled"}:
             stored_value = "1" if bool(value) else "0"
-        elif key in {"customGroupTemplates", "customDeviceTypes"}:
+        elif key in {"customGroupTemplates", "customDeviceTypes", "customDeviceSources"}:
             stored_value = json.dumps(value if isinstance(value, list) else [], ensure_ascii=False)
         else:
             stored_value = str(value or "").strip()
@@ -1300,6 +1753,8 @@ def load_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
         "admin": {
             "users": list_users(connection),
             "accessGroups": all_access_groups,
+            "discoveryAgents": list_discovery_agents(connection),
+            "discoveryResults": list_discovery_results(connection),
         } if is_admin(user) else None,
         "meta": {
             "revision": get_current_revision(),
@@ -1481,10 +1936,43 @@ def get_default_subnet_scan_enabled(connection: sqlite3.Connection | None = None
         return resolve_default(temporary_connection)
 
 
+def normalize_discovery_data_policy(value: object) -> dict:
+    policy = dict(DEFAULT_DISCOVERY_DATA_POLICY)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = {}
+    if not isinstance(value, dict):
+        return policy
+
+    for key, default_value in DEFAULT_DISCOVERY_DATA_POLICY.items():
+        if key in value:
+            policy[key] = normalize_boolean(value.get(key), default_value)
+    if policy["storeRawMetadata"]:
+        policy["storeRuntime"] = True
+        policy["storeLabels"] = True
+        policy["storeNetworkDetails"] = True
+        policy["storeInternalIps"] = True
+    return policy
+
+
+def get_discovery_data_policy(connection: sqlite3.Connection | None = None) -> dict:
+    def resolve_policy(active_connection: sqlite3.Connection) -> dict:
+        return normalize_discovery_data_policy(get_setting(active_connection, "discovery_data_policy"))
+
+    if connection is not None:
+        return resolve_policy(connection)
+
+    with connect_db() as temporary_connection:
+        return resolve_policy(temporary_connection)
+
+
 def load_settings(connection: sqlite3.Connection) -> dict:
     return {
         "scanIntervalSeconds": get_scan_interval_seconds(connection),
         "defaultSubnetScanEnabled": get_default_subnet_scan_enabled(connection),
+        "discoveryDataPolicy": get_discovery_data_policy(connection),
         "scanTimeoutMs": SCAN_TIMEOUT_MS,
         "scanConcurrency": SCAN_CONCURRENCY,
         "limits": {
@@ -1495,7 +1983,7 @@ def load_settings(connection: sqlite3.Connection) -> dict:
 
 
 def update_settings(connection: sqlite3.Connection, payload: dict) -> dict:
-    supported_keys = {"scanIntervalSeconds", "defaultSubnetScanEnabled", "subnetScanSettings"}
+    supported_keys = {"scanIntervalSeconds", "defaultSubnetScanEnabled", "subnetScanSettings", "discoveryDataPolicy"}
     if not any(key in payload for key in supported_keys):
         raise ValueError("Нет поддерживаемых настроек для обновления.")
 
@@ -1525,6 +2013,15 @@ def update_settings(connection: sqlite3.Connection, payload: dict) -> dict:
                 "UPDATE subnets SET scan_enabled = ? WHERE id = ?",
                 (1 if bool((item or {}).get("scanEnabled")) else 0, subnet_id),
             )
+
+    if "discoveryDataPolicy" in payload:
+        discovery_data_policy = normalize_discovery_data_policy(payload.get("discoveryDataPolicy"))
+        set_setting(
+            connection,
+            "discovery_data_policy",
+            json.dumps(discovery_data_policy, ensure_ascii=False, sort_keys=True),
+        )
+        reapply_discovery_data_policy(connection, discovery_data_policy)
 
     connection.commit()
     bump_revision(
@@ -1660,6 +2157,1118 @@ def map_integrity_error(error: sqlite3.IntegrityError) -> str:
     if "devices.ip" in message:
         return "Устройство с таким IP уже существует."
     return "Операция нарушает ограничения данных. Проверьте уникальные поля и связи."
+
+
+def normalize_boolean(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def normalize_discovery_agent_kind(value: object) -> str:
+    kind = normalize_slug_value(value, default="host")
+    if len(kind) > 40:
+        raise ValueError("Тип агента слишком длинный.")
+    return kind
+
+
+def normalize_discovery_create_mode(value: object) -> str:
+    mode = normalize_slug_value(value, default="preview_only")
+    if mode not in DISCOVERY_CREATE_MODES:
+        raise ValueError("Некорректный режим create-on-discovery.")
+    return mode
+
+
+def normalize_allowed_cidrs(value: object) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        raw_items = value.replace("\n", ",").split(",")
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raise ValueError("Allowed CIDR должен быть списком или строкой.")
+
+    normalized_cidrs: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        item = str(raw_item or "").strip()
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError as error:
+            raise ValueError(f"Некорректный allowed CIDR: {item}.") from error
+        normalized = str(network)
+        if normalized in seen:
+            continue
+        normalized_cidrs.append(normalized)
+        seen.add(normalized)
+
+    if len(normalized_cidrs) > 32:
+        raise ValueError("Слишком много allowed CIDR для одного агента.")
+    return normalized_cidrs
+
+
+def normalize_discovery_agent_payload(
+    connection: sqlite3.Connection,
+    payload: dict,
+    *,
+    current: dict | None = None,
+) -> dict:
+    source = current or {}
+    name = str(payload.get("name", source.get("name", ""))).strip()
+    if not name:
+        raise ValueError("Имя агента обязательно.")
+    if len(name) > 80:
+        raise ValueError("Имя агента слишком длинное.")
+
+    kind = normalize_discovery_agent_kind(payload.get("kind", source.get("kind", "host")))
+    enabled = normalize_boolean(payload.get("enabled", source.get("enabled", True)), True)
+    allowed_cidrs = normalize_allowed_cidrs(payload.get("allowedCidrs", source.get("allowedCidrs", [])))
+    create_mode = normalize_discovery_create_mode(payload.get("createMode", source.get("createMode", "preview_only")))
+    linked_host_device_id = str(payload.get("linkedHostDeviceId", source.get("linkedHostDeviceId", "")) or "").strip()
+    if linked_host_device_id:
+        host_exists = connection.execute(
+            "SELECT 1 FROM devices WHERE id = ?",
+            (linked_host_device_id,),
+        ).fetchone()
+        if host_exists is None:
+            raise ValueError("Указанный host для агента не найден.")
+
+    return {
+        "name": name,
+        "kind": kind,
+        "enabled": enabled,
+        "allowedCidrs": allowed_cidrs,
+        "createMode": create_mode,
+        "linkedHostDeviceId": linked_host_device_id,
+    }
+
+
+def create_discovery_agent(connection: sqlite3.Connection, payload: dict) -> dict:
+    agent_payload = normalize_discovery_agent_payload(connection, payload)
+    agent_id = create_id()
+    shared_token_agent_id = str(payload.get("sharedTokenAgentId") or "").strip()
+    token = ""
+    token_hash = ""
+    if shared_token_agent_id:
+        shared_row = connection.execute(
+            "SELECT token_hash FROM discovery_agents WHERE id = ?",
+            (shared_token_agent_id,),
+        ).fetchone()
+        if shared_row is None:
+            raise ValueError("Агент-источник общего токена не найден.")
+        token_hash = shared_row["token_hash"]
+    else:
+        token = generate_agent_token()
+        token_hash = hash_agent_token(token)
+    now = utc_now_iso()
+    connection.execute(
+        """
+        INSERT INTO discovery_agents (
+            id, name, kind, enabled, token_hash, allowed_cidrs, create_mode,
+            linked_host_device_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            agent_id,
+            agent_payload["name"],
+            agent_payload["kind"],
+            1 if agent_payload["enabled"] else 0,
+            token_hash,
+            json.dumps(agent_payload["allowedCidrs"], ensure_ascii=False),
+            agent_payload["createMode"],
+            agent_payload["linkedHostDeviceId"],
+            now,
+            now,
+        ),
+    )
+    connection.commit()
+    bump_revision("discovery-agent-created", {"agentId": agent_id})
+    row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    return {
+        "agent": discovery_agent_from_row(row),
+        "token": token,
+        "sharedTokenAgentId": shared_token_agent_id,
+    }
+
+
+def update_discovery_agent(connection: sqlite3.Connection, agent_id: str, payload: dict) -> dict:
+    row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
+
+    current = discovery_agent_from_row(row)
+    agent_payload = normalize_discovery_agent_payload(connection, payload, current=current)
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE discovery_agents
+        SET name = ?,
+            kind = ?,
+            enabled = ?,
+            allowed_cidrs = ?,
+            create_mode = ?,
+            linked_host_device_id = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            agent_payload["name"],
+            agent_payload["kind"],
+            1 if agent_payload["enabled"] else 0,
+            json.dumps(agent_payload["allowedCidrs"], ensure_ascii=False),
+            agent_payload["createMode"],
+            agent_payload["linkedHostDeviceId"],
+            now,
+            agent_id,
+        ),
+    )
+    connection.commit()
+    bump_revision("discovery-agent-updated", {"agentId": agent_id})
+    updated_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    return discovery_agent_from_row(updated_row)
+
+
+def rotate_discovery_agent_token(connection: sqlite3.Connection, agent_id: str) -> dict:
+    row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
+
+    token = generate_agent_token()
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE discovery_agents
+        SET token_hash = ?,
+            updated_at = ?,
+            last_error = '',
+            last_rejected_at = '',
+            last_reject_reason = ''
+        WHERE id = ?
+        """,
+        (hash_agent_token(token), now, agent_id),
+    )
+    connection.commit()
+    bump_revision("discovery-agent-token-rotated", {"agentId": agent_id})
+    updated_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    return {
+        "agent": discovery_agent_from_row(updated_row),
+        "token": token,
+    }
+
+
+def get_bearer_token(header_value: str | None) -> str:
+    raw_value = str(header_value or "").strip()
+    prefix = "Bearer "
+    if not raw_value.startswith(prefix):
+        raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery agent token required.")
+    token = raw_value[len(prefix):].strip()
+    if not token:
+        raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery agent token required.")
+    return token
+
+
+def get_request_remote_addr(handler: BaseHTTPRequestHandler) -> str:
+    return str(handler.client_address[0] if handler.client_address else "").strip()
+
+
+def is_remote_addr_allowed(agent: dict, remote_addr: str) -> bool:
+    allowed_cidrs = agent.get("allowedCidrs") or []
+    if not allowed_cidrs:
+        return True
+
+    try:
+        remote_ip = ipaddress.ip_address(remote_addr)
+    except ValueError:
+        return False
+
+    for cidr in allowed_cidrs:
+        try:
+            if remote_ip in ipaddress.ip_network(str(cidr), strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def reject_discovery_agent_snapshot(
+    connection: sqlite3.Connection,
+    agent_id: str,
+    reason: str,
+    remote_addr: str,
+) -> None:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE discovery_agents
+        SET last_rejected_at = ?,
+            last_reject_reason = ?,
+            last_remote_addr = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (now, reason[:500], remote_addr, now, agent_id),
+    )
+    connection.commit()
+
+
+def validate_discovery_nonce(connection: sqlite3.Connection, agent_id: str, nonce: str) -> None:
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+    expires_at = (now + timedelta(seconds=DISCOVERY_NONCE_TTL_SECONDS)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    connection.execute("DELETE FROM discovery_nonces WHERE expires_at <= ?", (now_iso,))
+    try:
+        connection.execute(
+            """
+            INSERT INTO discovery_nonces (agent_id, nonce, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (agent_id, nonce, now_iso, expires_at),
+        )
+    except sqlite3.IntegrityError as error:
+        raise RequestError(HTTPStatus.CONFLICT, "Discovery snapshot nonce was already used.") from error
+
+
+def normalize_discovery_item(raw_item: object, fallback_source: str, observed_at: str) -> dict:
+    if not isinstance(raw_item, dict):
+        raise ValueError("Discovery item должен быть объектом.")
+
+    allowed_keys = {
+        "source",
+        "sourceId",
+        "sourceKind",
+        "hostDeviceId",
+        "name",
+        "status",
+        "ports",
+        "accessPort",
+        "serviceUrl",
+        "lastSeenAt",
+        "raw",
+    }
+    unknown_keys = sorted(set(raw_item) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"Discovery item содержит неизвестные поля: {', '.join(unknown_keys[:5])}.")
+
+    source = normalize_slug_value(raw_item.get("source") or fallback_source, default=fallback_source or "agent")
+    source_id = normalize_optional_text(raw_item.get("sourceId"), 180, "sourceId")
+    source_kind = normalize_slug_value(raw_item.get("sourceKind"), default="service")
+    name = normalize_optional_text(raw_item.get("name"), 160, "name")
+    if not source_id:
+        raise ValueError("Discovery item должен содержать sourceId.")
+    if not name:
+        raise ValueError("Discovery item должен содержать name.")
+
+    raw_metadata = raw_item.get("raw") if isinstance(raw_item.get("raw"), dict) else {}
+    raw_json = canonical_json(raw_metadata)
+    if len(raw_json.encode("utf-8")) > DISCOVERY_MAX_RAW_BYTES:
+        raise ValueError("raw metadata discovery item слишком большой.")
+
+    return {
+        "source": source,
+        "sourceId": source_id,
+        "sourceKind": source_kind,
+        "hostDeviceId": normalize_optional_text(raw_item.get("hostDeviceId"), 80, "hostDeviceId"),
+        "name": name,
+        "status": normalize_slug_value(raw_item.get("status"), default=""),
+        "ports": normalize_device_ports(raw_item.get("ports")),
+        "accessPort": normalize_device_ports(raw_item.get("accessPort")),
+        "serviceUrl": normalize_optional_text(raw_item.get("serviceUrl"), 500, "serviceUrl"),
+        "lastSeenAt": normalize_optional_text(raw_item.get("lastSeenAt") or observed_at, 40, "lastSeenAt"),
+        "raw": raw_json,
+    }
+
+
+def normalize_discovery_snapshot_payload(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Discovery payload должен быть объектом.")
+
+    allowed_payload_keys = {"source", "observedAt", "host", "items", "metadata"}
+    unknown_payload_keys = sorted(set(payload) - allowed_payload_keys)
+    if unknown_payload_keys:
+        raise ValueError(f"Discovery payload содержит неизвестные поля: {', '.join(unknown_payload_keys[:5])}.")
+
+    source = normalize_slug_value(payload.get("source"), default="agent")
+    observed_at = normalize_optional_text(payload.get("observedAt"), 40, "observedAt") or utc_now_iso()
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise ValueError("Discovery payload должен содержать items.")
+    if len(items) > DISCOVERY_MAX_ITEMS:
+        raise ValueError(f"Discovery payload содержит больше {DISCOVERY_MAX_ITEMS} объектов.")
+
+    host = payload.get("host") if isinstance(payload.get("host"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    host_json = canonical_json(host)
+    metadata_json = canonical_json(metadata)
+    if len(host_json.encode("utf-8")) > DISCOVERY_MAX_RAW_BYTES:
+        raise ValueError("host inventory discovery payload слишком большой.")
+    if len(metadata_json.encode("utf-8")) > DISCOVERY_MAX_RAW_BYTES:
+        raise ValueError("metadata discovery payload слишком большой.")
+
+    return {
+        "source": source,
+        "observedAt": observed_at,
+        "host": host_json,
+        "metadata": metadata_json,
+        "items": [normalize_discovery_item(item, source, observed_at) for item in items],
+    }
+
+
+def discovery_raw_field_names(raw: dict) -> list[str]:
+    return sorted(
+        str(key or "").strip()[:80]
+        for key, value in raw.items()
+        if str(key or "").strip() and value not in ("", [], {}, None)
+    )
+
+
+def accepted_discovery_raw_fields(policy: dict) -> set[str] | None:
+    if policy.get("storeRawMetadata"):
+        return None
+
+    fields = set(DISCOVERY_CORE_RAW_FIELDS)
+    if policy.get("storeRuntime"):
+        fields.update(DISCOVERY_RUNTIME_RAW_FIELDS)
+    if policy.get("storeLabels"):
+        fields.update(DISCOVERY_LABEL_RAW_FIELDS)
+    if policy.get("storeNetworkDetails") or policy.get("storeInternalIps"):
+        fields.update(DISCOVERY_NETWORK_RAW_FIELDS)
+    return fields
+
+
+def filter_discovery_raw_by_policy(raw: dict, policy: dict) -> dict:
+    accepted_fields = accepted_discovery_raw_fields(policy)
+    if accepted_fields is None:
+        return {
+            key: value
+            for key, value in raw.items()
+            if value not in ("", [], {}, None)
+        }
+    return {
+        key: value
+        for key, value in raw.items()
+        if key in accepted_fields and value not in ("", [], {}, None)
+    }
+
+
+def apply_discovery_data_policy_to_item(item: dict, policy: dict) -> dict:
+    raw = decode_json_object(item.get("raw") or "{}")
+    received_fields = discovery_raw_field_names(raw)
+    accepted_raw = filter_discovery_raw_by_policy(raw, policy)
+    accepted_field_names = discovery_raw_field_names(accepted_raw)
+    visible_fields = accepted_field_names if policy.get("showMetadataInPreview") else []
+    updated_item = dict(item)
+    updated_item["raw"] = canonical_json(accepted_raw)
+    updated_item["receivedFields"] = received_fields
+    updated_item["acceptedFields"] = accepted_field_names
+    updated_item["visibleFields"] = visible_fields
+    return updated_item
+
+
+def reapply_discovery_data_policy(connection: sqlite3.Connection, policy: dict) -> None:
+    rows = connection.execute("SELECT id, raw FROM discovery_results").fetchall()
+    for row in rows:
+        accepted_raw = filter_discovery_raw_by_policy(decode_json_object(row["raw"] or "{}"), policy)
+        accepted_fields = discovery_raw_field_names(accepted_raw)
+        visible_fields = accepted_fields if policy.get("showMetadataInPreview") else []
+        connection.execute(
+            """
+            UPDATE discovery_results
+            SET raw = ?,
+                accepted_fields = ?,
+                visible_fields = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                canonical_json(accepted_raw),
+                json.dumps(accepted_fields, ensure_ascii=False),
+                json.dumps(visible_fields, ensure_ascii=False),
+                utc_now_iso(),
+                row["id"],
+            ),
+        )
+
+
+def verify_discovery_timestamp(value: object) -> str:
+    timestamp = normalize_optional_text(value, 40, "timestamp")
+    if not timestamp:
+        raise ValueError("Discovery snapshot должен содержать timestamp.")
+    try:
+        parsed_timestamp = parse_iso8601(timestamp)
+    except ValueError as error:
+        raise ValueError("Некорректный timestamp discovery snapshot.") from error
+    if parsed_timestamp.tzinfo is None:
+        parsed_timestamp = parsed_timestamp.replace(tzinfo=timezone.utc)
+    skew = abs((datetime.now(timezone.utc) - parsed_timestamp).total_seconds())
+    if skew > DISCOVERY_TIMESTAMP_SKEW_SECONDS:
+        raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery snapshot timestamp is outside allowed window.")
+    return timestamp
+
+
+def update_discovery_linked_records(
+    connection: sqlite3.Connection,
+    *,
+    matched_device_id: str = "",
+    matched_service_id: str = "",
+    status: str = "",
+    last_seen_at: str = "",
+    ports: str = "",
+    access_port: str = "",
+    service_url: str = "",
+) -> int:
+    updated_count = 0
+    status_value = normalize_slug_value(status, default="") if status else ""
+    linked_updates = [
+        (matched_device_id, False),
+        (matched_service_id, True),
+    ]
+    for linked_id, is_service in linked_updates:
+        if not linked_id:
+            continue
+        row = connection.execute("SELECT id FROM devices WHERE id = ?", (linked_id,)).fetchone()
+        if row is None:
+            continue
+        if is_service:
+            connection.execute(
+                """
+                UPDATE devices
+                SET integration_status = ?,
+                    last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at),
+                    ports = COALESCE(NULLIF(?, ''), ports),
+                    access_port = COALESCE(NULLIF(?, ''), access_port),
+                    service_url = COALESCE(NULLIF(?, ''), service_url)
+                WHERE id = ?
+                """,
+                (status_value, last_seen_at, ports, access_port, service_url, linked_id),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE devices
+                SET integration_status = ?,
+                    last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at)
+                WHERE id = ?
+                """,
+                (status_value, last_seen_at, linked_id),
+            )
+        updated_count += 1
+    return updated_count
+
+
+def mark_missing_discovery_results_stale(
+    connection: sqlite3.Connection,
+    *,
+    agent_id: str,
+    source: str,
+    seen_source_ids: set[str],
+    now: str,
+) -> int:
+    stale_count = 0
+    rows = connection.execute(
+        """
+        SELECT id, source_id, matched_device_id, matched_service_id
+        FROM discovery_results
+        WHERE agent_id = ?
+          AND source = ?
+          AND state NOT IN ('ignored', 'stale')
+        """,
+        (agent_id, source),
+    ).fetchall()
+    for row in rows:
+        if row["source_id"] in seen_source_ids:
+            continue
+        connection.execute(
+            "UPDATE discovery_results SET state = 'stale', updated_at = ? WHERE id = ?",
+            (now, row["id"]),
+        )
+        update_discovery_linked_records(
+            connection,
+            matched_device_id=row["matched_device_id"] or "",
+            matched_service_id=row["matched_service_id"] or "",
+            status="stale",
+        )
+        stale_count += 1
+    return stale_count
+
+
+def get_snapshot_active_sources(snapshot: dict) -> set[str]:
+    active_sources = {item["source"] for item in snapshot["items"] if item.get("source")}
+    try:
+        metadata = json.loads(snapshot.get("metadata") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        return active_sources
+
+    raw_sources = metadata.get("activeSources")
+    if isinstance(raw_sources, list):
+        for raw_source in raw_sources:
+            try:
+                active_sources.add(normalize_slug_value(raw_source, default=""))
+            except ValueError:
+                continue
+    return {source for source in active_sources if source}
+
+
+def save_discovery_snapshot(
+    connection: sqlite3.Connection,
+    agent: dict,
+    snapshot: dict,
+    remote_addr: str,
+) -> dict:
+    now = utc_now_iso()
+    run_id = create_id()
+    updated_count = 0
+    stale_count = 0
+    created_count = 0
+    item_ids: list[str] = []
+    seen_source_ids_by_source: dict[str, set[str]] = {}
+    discovery_data_policy = get_discovery_data_policy(connection)
+    policy_items = [
+        apply_discovery_data_policy_to_item(item, discovery_data_policy)
+        for item in snapshot["items"]
+    ]
+    for item in policy_items:
+        seen_source_ids_by_source.setdefault(item["source"], set()).add(item["sourceId"])
+    active_sources = get_snapshot_active_sources(snapshot)
+    with connection:
+        connection.execute(
+            """
+            INSERT INTO discovery_runs (
+                id, agent_id, schema, source, status, started_at, finished_at,
+                found_count, updated_count, remote_addr, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                agent["id"],
+                DISCOVERY_SCHEMA,
+                snapshot["source"],
+                "completed",
+                now,
+                now,
+                len(policy_items),
+                len(policy_items),
+                remote_addr,
+                now,
+            ),
+        )
+
+        for item in policy_items:
+            host_device_id = item["hostDeviceId"] or agent.get("linkedHostDeviceId", "")
+            existing = connection.execute(
+                """
+                SELECT id, state, matched_device_id, matched_service_id
+                FROM discovery_results
+                WHERE agent_id = ? AND source = ? AND source_id = ?
+                """,
+                (agent["id"], item["source"], item["sourceId"]),
+            ).fetchone()
+            result_id = existing["id"] if existing else create_id()
+            if existing and existing["state"] == "ignored":
+                state = "ignored"
+            elif existing and (existing["state"] == "matched" or existing["matched_device_id"] or existing["matched_service_id"]):
+                state = "matched"
+            else:
+                state = "new"
+            connection.execute(
+                """
+                INSERT INTO discovery_results (
+                    id, agent_id, source, source_id, source_kind, host_device_id,
+                    name, status, ports, access_port, service_url, last_seen_at,
+                    state, raw, received_fields, accepted_fields, visible_fields,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(agent_id, source, source_id) DO UPDATE SET
+                    source_kind = excluded.source_kind,
+                    host_device_id = excluded.host_device_id,
+                    name = excluded.name,
+                    status = excluded.status,
+                    ports = excluded.ports,
+                    access_port = excluded.access_port,
+                    service_url = excluded.service_url,
+                    last_seen_at = excluded.last_seen_at,
+                    state = CASE
+                        WHEN discovery_results.state = 'ignored' THEN 'ignored'
+                    ELSE excluded.state
+                    END,
+                    raw = excluded.raw,
+                    received_fields = excluded.received_fields,
+                    accepted_fields = excluded.accepted_fields,
+                    visible_fields = excluded.visible_fields,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    result_id,
+                    agent["id"],
+                    item["source"],
+                    item["sourceId"],
+                    item["sourceKind"],
+                    host_device_id,
+                    item["name"],
+                    item["status"],
+                    item["ports"],
+                    item["accessPort"],
+                    item["serviceUrl"],
+                    item["lastSeenAt"],
+                    state,
+                    item["raw"],
+                    json.dumps(item["receivedFields"], ensure_ascii=False),
+                    json.dumps(item["acceptedFields"], ensure_ascii=False),
+                    json.dumps(item["visibleFields"], ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            if existing and state == "matched":
+                update_discovery_linked_records(
+                    connection,
+                    matched_device_id=existing["matched_device_id"] or "",
+                    matched_service_id=existing["matched_service_id"] or "",
+                    status=item["status"],
+                    last_seen_at=item["lastSeenAt"],
+                    ports=item["ports"],
+                    access_port=item["accessPort"],
+                    service_url=item["serviceUrl"],
+                )
+            updated_count += 1
+            item_ids.append(result_id)
+
+        for source in active_sources:
+            stale_count += mark_missing_discovery_results_stale(
+                connection,
+                agent_id=agent["id"],
+                source=source,
+                seen_source_ids=seen_source_ids_by_source.get(source, set()),
+                now=now,
+            )
+
+        connection.execute(
+            "UPDATE discovery_runs SET stale_count = ? WHERE id = ?",
+            (stale_count, run_id),
+        )
+
+        connection.execute(
+            """
+            UPDATE discovery_agents
+            SET last_seen_at = ?,
+                last_error = '',
+                last_remote_addr = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, remote_addr, now, agent["id"]),
+        )
+
+    created_count = auto_create_discovery_records(connection, agent, item_ids)
+    if created_count:
+        connection.execute(
+            "UPDATE discovery_runs SET created_count = ? WHERE id = ?",
+            (created_count, run_id),
+        )
+        connection.commit()
+
+    bump_revision(
+        "discovery-snapshot-received",
+        {"agentId": agent["id"], "items": updated_count, "stale": stale_count, "created": created_count},
+    )
+    return {
+        "status": "accepted",
+        "runId": run_id,
+        "agentId": agent["id"],
+        "received": updated_count,
+        "stale": stale_count,
+        "created": created_count,
+        "resultIds": item_ids,
+    }
+
+
+def ingest_discovery_snapshot(
+    connection: sqlite3.Connection,
+    envelope: dict,
+    handler: BaseHTTPRequestHandler,
+) -> dict:
+    if not isinstance(envelope, dict):
+        raise ValueError("Discovery snapshot должен быть объектом.")
+    allowed_keys = {"agentId", "schema", "schemaKey", "timestamp", "nonce", "payload", "signature"}
+    unknown_keys = sorted(set(envelope) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"Discovery snapshot содержит неизвестные поля: {', '.join(unknown_keys[:5])}.")
+
+    remote_addr = get_request_remote_addr(handler)
+    agent_id = normalize_optional_text(envelope.get("agentId"), 80, "agentId")
+    if not agent_id:
+        raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery agent is unknown.")
+
+    agent_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    if agent_row is None:
+        raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery agent is unknown.")
+    agent = discovery_agent_from_row(agent_row)
+
+    def reject(status: HTTPStatus, reason: str) -> None:
+        reject_discovery_agent_snapshot(connection, agent_id, reason, remote_addr)
+        raise RequestError(status, reason)
+
+    if not agent["enabled"]:
+        reject(HTTPStatus.FORBIDDEN, "Discovery agent is disabled.")
+    if not is_remote_addr_allowed(agent, remote_addr):
+        reject(HTTPStatus.FORBIDDEN, "Discovery agent remote address is not allowed.")
+
+    try:
+        token = get_bearer_token(handler.headers.get("Authorization"))
+    except RequestError as error:
+        reject(error.status, error.message)
+    if not hmac.compare_digest(hash_agent_token(token), agent_row["token_hash"]):
+        reject(HTTPStatus.UNAUTHORIZED, "Discovery agent token is invalid.")
+
+    schema = normalize_optional_text(envelope.get("schema"), 80, "schema")
+    if schema != DISCOVERY_SCHEMA:
+        reject(HTTPStatus.BAD_REQUEST, "Discovery schema is not supported.")
+    try:
+        timestamp = verify_discovery_timestamp(envelope.get("timestamp"))
+    except ValueError as error:
+        reject(HTTPStatus.BAD_REQUEST, str(error))
+    except RequestError as error:
+        reject(error.status, error.message)
+    nonce = normalize_optional_text(envelope.get("nonce"), 128, "nonce")
+    if not nonce:
+        reject(HTTPStatus.BAD_REQUEST, "Discovery snapshot nonce is required.")
+
+    expected_schema_key = hmac_sha256_hex(token, f"schema:{schema}")
+    if not hmac.compare_digest(normalize_signature_value(envelope.get("schemaKey")), expected_schema_key):
+        reject(HTTPStatus.UNAUTHORIZED, "Discovery schemaKey is invalid.")
+
+    payload = envelope.get("payload")
+    signature_payload = {
+        "schema": schema,
+        "timestamp": timestamp,
+        "nonce": nonce,
+        "payload": payload,
+    }
+    expected_signature = hmac_sha256_hex(token, canonical_json(signature_payload))
+    if not hmac.compare_digest(normalize_signature_value(envelope.get("signature")), expected_signature):
+        reject(HTTPStatus.UNAUTHORIZED, "Discovery signature is invalid.")
+
+    validate_discovery_nonce(connection, agent_id, nonce)
+    try:
+        snapshot = normalize_discovery_snapshot_payload(payload)
+    except ValueError as error:
+        reject(HTTPStatus.BAD_REQUEST, str(error))
+    return save_discovery_snapshot(connection, agent, snapshot, remote_addr)
+
+
+def update_discovery_result_state(
+    connection: sqlite3.Connection,
+    result_id: str,
+    state: str,
+) -> dict:
+    if state not in DISCOVERY_RESULT_STATES:
+        raise ValueError("Некорректное состояние найденного объекта.")
+    now = utc_now_iso()
+    cursor = connection.execute(
+        "UPDATE discovery_results SET state = ?, updated_at = ? WHERE id = ?",
+        (state, now, result_id),
+    )
+    connection.commit()
+    if cursor.rowcount == 0:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Найденный объект не найден.")
+    bump_revision("discovery-result-updated", {"resultId": result_id, "state": state})
+    return get_discovery_result(connection, result_id)
+
+
+def link_discovery_result(
+    connection: sqlite3.Connection,
+    result_id: str,
+    payload: dict,
+) -> dict:
+    target_id = str(payload.get("targetId") or "").strip()
+    target_type = str(payload.get("targetType") or "").strip().lower()
+    if target_type not in {"device", "service"}:
+        raise ValueError("Нужно выбрать тип связи: device или service.")
+    target_row = get_device_row(connection, target_id)
+    if target_row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Запись для связи не найдена.")
+    target = device_from_row(target_row)
+    if target_type == "service" and target["type"] != "service":
+        raise ValueError("Для связи с сервисом выбрана не сервисная запись.")
+    if target_type == "device" and target["type"] == "service":
+        raise ValueError("Для связи с устройством выбрана сервисная запись.")
+
+    row = get_discovery_result_row(connection, result_id)
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE discovery_results
+        SET matched_device_id = ?,
+            matched_service_id = ?,
+            state = 'matched',
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            target_id if target_type == "device" else row["matched_device_id"],
+            target_id if target_type == "service" else row["matched_service_id"],
+            now,
+            result_id,
+        ),
+    )
+    connection.commit()
+    bump_revision("discovery-result-linked", {"resultId": result_id, "targetId": target_id})
+    return get_discovery_result(connection, result_id)
+
+
+def first_raw_value(raw: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def discovery_device_type(source_kind: str, raw: dict) -> str:
+    raw_type = normalize_slug_value(raw.get("type"), default="") if raw.get("type") else ""
+    kind = normalize_slug_value(raw_type or source_kind, default="server")
+    if kind in {"iot", "sensor", "controller"}:
+        return "iot"
+    if kind in {"container", "docker-container"}:
+        return "container"
+    if kind == "service":
+        return "server"
+    if kind in {"vm", "virtual-machine", "lxc", "proxmox-vm", "proxmox-lxc", "node", "host"}:
+        return "server"
+    return kind
+
+
+def discovery_result_target_type(row: sqlite3.Row) -> str:
+    source = normalize_slug_value(row["source"], default="")
+    source_kind = normalize_slug_value(row["source_kind"], default="")
+    if source == "docker" or source_kind in {"service", "container", "docker-container", "pod", "workload"}:
+        return "service"
+    return "device"
+
+
+def find_existing_record_for_discovery(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    target_type: str,
+) -> dict | None:
+    type_condition = "type = 'service'" if target_type == "service" else "type != 'service'"
+    existing_row = connection.execute(
+        f"""
+        SELECT *
+        FROM devices
+        WHERE source = ?
+          AND source_id = ?
+          AND {type_condition}
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        (row["source"], row["source_id"]),
+    ).fetchone()
+    if existing_row is not None:
+        return device_from_row(existing_row)
+
+    if target_type == "device":
+        raw = decode_discovery_raw(row)
+        ip = first_raw_value(raw, ["primaryIp", "primary_ip", "ip", "address"])
+        if ip:
+            ip_row = connection.execute(
+                "SELECT * FROM devices WHERE ip = ? AND type != 'service' ORDER BY created_at ASC LIMIT 1",
+                (ip,),
+            ).fetchone()
+            if ip_row is not None:
+                return device_from_row(ip_row)
+    return None
+
+
+def ensure_agent_linked_host(
+    connection: sqlite3.Connection,
+    agent_id: str,
+    host_device_id: str,
+) -> None:
+    if not host_device_id:
+        return
+    row = connection.execute(
+        "SELECT linked_host_device_id FROM discovery_agents WHERE id = ?",
+        (agent_id,),
+    ).fetchone()
+    if row is None or row["linked_host_device_id"]:
+        return
+    connection.execute(
+        "UPDATE discovery_agents SET linked_host_device_id = ?, updated_at = ? WHERE id = ?",
+        (host_device_id, utc_now_iso(), agent_id),
+    )
+    connection.commit()
+
+
+def create_discovery_result_record(
+    connection: sqlite3.Connection,
+    result_id: str,
+    payload: dict,
+    actor: str,
+) -> dict:
+    target_type = str(payload.get("targetType") or "").strip().lower()
+    if target_type not in {"device", "service"}:
+        raise ValueError("Нужно выбрать, что создать: device или service.")
+
+    row = get_discovery_result_row(connection, result_id)
+    raw = decode_discovery_raw(row)
+    source = row["source"] or "agent"
+    source_kind = row["source_kind"] or target_type
+    now = utc_now_iso()
+
+    if target_type == "service":
+        host_row = resolve_discovery_host_row(connection, row)
+        if host_row is None:
+            raise ValueError("Для создания сервиса нужно связать результат или агента с хостом.")
+        host = device_from_row(host_row)
+        protocol = first_raw_value(raw, ["protocol", "scheme"])
+        device_payload = normalize_device_payload(
+            connection,
+            {
+                "name": row["name"],
+                "ip": host["ip"],
+                "type": "service",
+                "hostDeviceId": host["id"],
+                "source": source,
+                "sourceKind": source_kind or "service",
+                "sourceId": row["source_id"],
+                "integrationStatus": row["status"] or "",
+                "protocol": protocol,
+                "serviceUrl": row["service_url"] or "",
+                "accessPort": row["access_port"] or "",
+                "ports": row["ports"] or "",
+                "lastSeenAt": row["last_seen_at"] or now,
+                "note": "Discovery",
+            },
+        )
+        created = insert_device(connection, device_payload, actor)
+        connection.execute(
+            """
+            UPDATE discovery_results
+            SET host_device_id = ?,
+                matched_service_id = ?,
+                state = 'matched',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (host["id"], created["id"], utc_now_iso(), result_id),
+        )
+        connection.commit()
+        bump_revision("discovery-result-created", {"resultId": result_id, "serviceId": created["id"]})
+        return {"result": get_discovery_result(connection, result_id), "record": created}
+
+    ip = first_raw_value(raw, ["primaryIp", "primary_ip", "ip", "address"])
+    if not ip:
+        raise ValueError("Для создания устройства в discovery metadata должен быть primaryIp или ip.")
+    mac = first_raw_value(raw, ["mac", "macAddress", "mac_address"])
+    host_row = resolve_discovery_host_row(connection, row)
+    device_payload = normalize_device_payload(
+        connection,
+        {
+            "name": row["name"],
+            "ip": ip,
+            "mac": mac,
+            "type": discovery_device_type(source_kind, raw),
+            "hostDeviceId": host_row["id"] if host_row is not None else "",
+            "source": source,
+            "sourceKind": source_kind,
+            "sourceId": row["source_id"],
+            "integrationStatus": row["status"] or "",
+            "serviceUrl": row["service_url"] or "",
+            "accessPort": row["access_port"] or "",
+            "ports": row["ports"] or "",
+            "lastSeenAt": row["last_seen_at"] or now,
+            "note": "Discovery",
+        },
+    )
+    created = insert_device(connection, device_payload, actor)
+    connection.execute(
+        """
+        UPDATE discovery_results
+        SET matched_device_id = ?,
+            state = 'matched',
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (created["id"], utc_now_iso(), result_id),
+    )
+    connection.commit()
+    bump_revision("discovery-result-created", {"resultId": result_id, "deviceId": created["id"]})
+    return {"result": get_discovery_result(connection, result_id), "record": created}
+
+
+def auto_create_discovery_records(
+    connection: sqlite3.Connection,
+    agent: dict,
+    result_ids: list[str],
+) -> int:
+    create_mode = agent.get("createMode") or "preview_only"
+    if create_mode == "preview_only" or not result_ids:
+        return 0
+
+    created_or_linked_count = 0
+    rows = [
+        get_discovery_result_row(connection, result_id)
+        for result_id in result_ids
+    ]
+
+    # Create/link devices first so a host can become the parent for services
+    # received in the same agent package.
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: 0 if discovery_result_target_type(row) == "device" else 1,
+    )
+
+    for row in ordered_rows:
+        if row["state"] in {"ignored", "matched", "stale"}:
+            continue
+        target_type = discovery_result_target_type(row)
+        if create_mode == "auto_create_services" and target_type != "service":
+            continue
+
+        existing = find_existing_record_for_discovery(connection, row, target_type)
+        if existing is not None:
+            link_discovery_result(
+                connection,
+                row["id"],
+                {"targetType": target_type, "targetId": existing["id"]},
+            )
+            if target_type == "device" and row["source_kind"] == "host":
+                ensure_agent_linked_host(connection, agent["id"], existing["id"])
+            created_or_linked_count += 1
+            continue
+
+        try:
+            created = create_discovery_result_record(
+                connection,
+                row["id"],
+                {"targetType": target_type},
+                "discovery",
+            )
+        except (RequestError, ValueError, sqlite3.IntegrityError):
+            continue
+
+        record = created.get("record", {})
+        if target_type == "device" and row["source_kind"] == "host":
+            ensure_agent_linked_host(connection, agent["id"], record.get("id", ""))
+        created_or_linked_count += 1
+    return created_or_linked_count
 
 
 def create_access_group(connection: sqlite3.Connection, payload: dict) -> dict:
@@ -1977,8 +3586,10 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
     connection.execute(
         """
         INSERT INTO devices (
-            id, name, ip, mac, type, subnet_id, note, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            id, name, ip, mac, type, subnet_id, host_device_id, source,
+            source_kind, source_id, integration_status, protocol, service_url, access_port, ports, last_seen_at,
+            note, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             device["id"],
@@ -1987,6 +3598,16 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
             device.get("mac", ""),
             device["type"],
             device.get("subnetId") or None,
+            device.get("hostDeviceId", ""),
+            device.get("source", ""),
+            device.get("sourceKind", ""),
+            device.get("sourceId", ""),
+            device.get("integrationStatus", ""),
+            device.get("protocol", ""),
+            device.get("serviceUrl", ""),
+            device.get("accessPort", ""),
+            device.get("ports", ""),
+            device.get("lastSeenAt", ""),
             device.get("note", ""),
             device["createdAt"],
         ),
@@ -2009,6 +3630,16 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
         **device,
         "subnetId": device.get("subnetId", ""),
         "mac": device.get("mac", ""),
+        "hostDeviceId": device.get("hostDeviceId", ""),
+        "source": device.get("source", ""),
+        "sourceKind": device.get("sourceKind", ""),
+        "sourceId": device.get("sourceId", ""),
+        "integrationStatus": device.get("integrationStatus", ""),
+        "protocol": device.get("protocol", ""),
+        "serviceUrl": device.get("serviceUrl", ""),
+        "accessPort": device.get("accessPort", ""),
+        "ports": device.get("ports", ""),
+        "lastSeenAt": device.get("lastSeenAt", ""),
     }
 
 
@@ -2084,7 +3715,9 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
     cursor = connection.execute(
         """
         UPDATE devices
-        SET name = ?, ip = ?, mac = ?, type = ?, subnet_id = ?, note = ?
+        SET name = ?, ip = ?, mac = ?, type = ?, subnet_id = ?, host_device_id = ?,
+            source = ?, source_kind = ?, source_id = ?, integration_status = ?,
+            protocol = ?, service_url = ?, access_port = ?, ports = ?, last_seen_at = ?, note = ?
         WHERE id = ?
         """,
         (
@@ -2093,6 +3726,16 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
             device.get("mac", ""),
             device["type"],
             device.get("subnetId") or None,
+            device.get("hostDeviceId", ""),
+            device.get("source", ""),
+            device.get("sourceKind", ""),
+            device.get("sourceId", ""),
+            device.get("integrationStatus", ""),
+            device.get("protocol", ""),
+            device.get("serviceUrl", ""),
+            device.get("accessPort", ""),
+            device.get("ports", ""),
+            device.get("lastSeenAt", ""),
             device.get("note", ""),
             device_id,
         ),
@@ -2116,6 +3759,16 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
         or existing_device["mac"] != device.get("mac", "")
         or existing_device["type"] != device["type"]
         or existing_device.get("subnetId", "") != device.get("subnetId", "")
+        or existing_device.get("hostDeviceId", "") != device.get("hostDeviceId", "")
+        or existing_device.get("source", "") != device.get("source", "")
+        or existing_device.get("sourceKind", "") != device.get("sourceKind", "")
+        or existing_device.get("sourceId", "") != device.get("sourceId", "")
+        or existing_device.get("integrationStatus", "") != device.get("integrationStatus", "")
+        or existing_device.get("protocol", "") != device.get("protocol", "")
+        or existing_device.get("serviceUrl", "") != device.get("serviceUrl", "")
+        or existing_device.get("accessPort", "") != device.get("accessPort", "")
+        or existing_device.get("ports", "") != device.get("ports", "")
+        or existing_device.get("lastSeenAt", "") != device.get("lastSeenAt", "")
         or existing_device["note"] != device.get("note", "")
     ):
         record_history(
@@ -2136,6 +3789,16 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
         **device,
         "subnetId": device.get("subnetId", ""),
         "mac": device.get("mac", ""),
+        "hostDeviceId": device.get("hostDeviceId", ""),
+        "source": device.get("source", ""),
+        "sourceKind": device.get("sourceKind", ""),
+        "sourceId": device.get("sourceId", ""),
+        "integrationStatus": device.get("integrationStatus", ""),
+        "protocol": device.get("protocol", ""),
+        "serviceUrl": device.get("serviceUrl", ""),
+        "accessPort": device.get("accessPort", ""),
+        "ports": device.get("ports", ""),
+        "lastSeenAt": device.get("lastSeenAt", ""),
     }
 
 
@@ -2146,6 +3809,10 @@ def replace_state(connection: sqlite3.Connection, snapshot: dict, actor: str) ->
     }
 
     with connection:
+        connection.execute("DELETE FROM discovery_nonces")
+        connection.execute("DELETE FROM discovery_runs")
+        connection.execute("DELETE FROM discovery_results")
+        connection.execute("UPDATE discovery_agents SET linked_host_device_id = '', updated_at = ?", (utc_now_iso(),))
         connection.execute("DELETE FROM devices")
         connection.execute("DELETE FROM range_groups")
         connection.execute("DELETE FROM subnets")
@@ -2280,8 +3947,10 @@ def insert_device_without_commit(connection: sqlite3.Connection, device: dict) -
     connection.execute(
         """
         INSERT INTO devices (
-            id, name, ip, mac, type, subnet_id, note, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            id, name, ip, mac, type, subnet_id, host_device_id, source,
+            source_kind, source_id, integration_status, protocol, service_url, access_port, ports, last_seen_at,
+            note, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             device["id"],
@@ -2290,6 +3959,16 @@ def insert_device_without_commit(connection: sqlite3.Connection, device: dict) -
             device.get("mac", ""),
             device["type"],
             device.get("subnetId") or None,
+            device.get("hostDeviceId", ""),
+            device.get("source", ""),
+            device.get("sourceKind", ""),
+            device.get("sourceId", ""),
+            device.get("integrationStatus", ""),
+            device.get("protocol", ""),
+            device.get("serviceUrl", ""),
+            device.get("accessPort", ""),
+            device.get("ports", ""),
+            device.get("lastSeenAt", ""),
             device.get("note", ""),
             device["createdAt"],
         ),
@@ -2309,6 +3988,22 @@ def insert_history_without_commit(connection: sqlite3.Connection, history: dict)
         changed_at=history.get("changedAt"),
         history_id=history.get("id"),
     )
+
+
+def clear_history(connection: sqlite3.Connection, actor: str) -> None:
+    connection.execute("DELETE FROM ip_history")
+    record_history(
+        connection,
+        device_id="",
+        device_name="ATLAS",
+        ip="",
+        previous_ip="",
+        action="history_cleared",
+        actor=actor,
+        note="История очищена администратором.",
+    )
+    connection.commit()
+    bump_revision("history-cleared", {"entity": "history"})
 
 
 def insert_scan_result_without_commit(connection: sqlite3.Connection, scan_result: dict) -> None:
@@ -2391,7 +4086,7 @@ def ip_to_int_value(ip: str) -> int:
 def perform_scan(
     subnet_id: str | None = None,
     group_id: str | None = None,
-    source: str = "manual",
+    source: str = "user",
     *,
     only_enabled_subnets: bool = False,
 ) -> dict:
@@ -2543,7 +4238,7 @@ class BackgroundScanner(threading.Thread):
 
 
 class ATLASRequestHandler(BaseHTTPRequestHandler):
-    server_version = "ATLAS/0.2.5"
+    server_version = "ATLAS/0.3"
 
     def handle(self) -> None:
         try:
@@ -2567,6 +4262,12 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.OK, load_snapshot(connection, user))
                 return
 
+            if parsed.path == "/api/admin/discovery/agents":
+                with connect_db() as connection:
+                    require_admin_user(connection, self)
+                    self.send_json(HTTPStatus.OK, {"agents": list_discovery_agents(connection)})
+                return
+
             if parsed.path == "/api/stream":
                 self.handle_sse_stream()
                 return
@@ -2585,8 +4286,16 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
 
         try:
-            payload = self.read_json_body()
+            payload = self.read_json_body(
+                max_bytes=DISCOVERY_MAX_BODY_BYTES if parsed.path == "/api/discovery/snapshot" else None
+            )
             with connect_db() as connection:
+                if parsed.path == "/api/discovery/snapshot":
+                    self.send_json(
+                        HTTPStatus.ACCEPTED,
+                        ingest_discovery_snapshot(connection, payload, self),
+                    )
+                    return
                 if parsed.path == "/api/auth/login":
                     user, token, expires_at = login_user(
                         connection,
@@ -2626,6 +4335,49 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     require_admin_user(connection, self)
                     self.send_json(HTTPStatus.CREATED, create_user(connection, payload))
                     return
+                if parsed.path == "/api/admin/discovery/agents":
+                    require_admin_user(connection, self)
+                    self.send_json(HTTPStatus.CREATED, create_discovery_agent(connection, payload))
+                    return
+                if (
+                    len([part for part in parsed.path.split("/") if part]) == 6
+                    and parsed.path.startswith("/api/admin/discovery/agents/")
+                    and parsed.path.endswith("/rotate-token")
+                ):
+                    require_admin_user(connection, self)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    self.send_json(
+                        HTTPStatus.OK,
+                        rotate_discovery_agent_token(connection, parts[4]),
+                    )
+                    return
+                if (
+                    len([part for part in parsed.path.split("/") if part]) == 6
+                    and parsed.path.startswith("/api/admin/discovery/results/")
+                ):
+                    admin_user = require_admin_user(connection, self)
+                    actor = resolve_actor(self, payload, admin_user)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    result_id = parts[4]
+                    action = parts[5]
+                    if action == "ignore":
+                        self.send_json(HTTPStatus.OK, update_discovery_result_state(connection, result_id, "ignored"))
+                        return
+                    if action == "restore":
+                        self.send_json(HTTPStatus.OK, update_discovery_result_state(connection, result_id, "new"))
+                        return
+                    if action == "resolve":
+                        self.send_json(HTTPStatus.OK, update_discovery_result_state(connection, result_id, "ignored"))
+                        return
+                    if action == "link":
+                        self.send_json(HTTPStatus.OK, link_discovery_result(connection, result_id, payload))
+                        return
+                    if action == "create":
+                        self.send_json(
+                            HTTPStatus.CREATED,
+                            create_discovery_result_record(connection, result_id, payload, actor),
+                        )
+                        return
                 if (
                     len([part for part in parsed.path.split("/") if part]) == 5
                     and parsed.path.startswith("/api/admin/users/")
@@ -2690,7 +4442,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     summary = perform_scan(
                         subnet_id or None,
                         group_id or None,
-                        source="manual",
+                        source="user",
                         only_enabled_subnets=not subnet_id and not group_id,
                     )
                     self.send_json(HTTPStatus.OK, summary)
@@ -2731,6 +4483,14 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     user = require_authenticated_user(connection, self)
                     updated_user = update_current_user_profile(connection, user, payload)
                     self.send_json(HTTPStatus.OK, build_session_payload(connection, updated_user))
+                    return
+                if (
+                    len([part for part in parsed.path.split("/") if part]) == 5
+                    and parsed.path.startswith("/api/admin/discovery/agents/")
+                ):
+                    require_admin_user(connection, self)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    self.send_json(HTTPStatus.OK, update_discovery_agent(connection, parts[4], payload))
                     return
                 if len([part for part in parsed.path.split("/") if part]) == 4 and parsed.path.startswith("/api/admin/"):
                     admin_user = require_admin_user(connection, self)
@@ -2837,6 +4597,10 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     user = require_admin_user(connection, self)
                     actor = resolve_actor(self, user=user)
                     with connection:
+                        connection.execute("DELETE FROM discovery_nonces")
+                        connection.execute("DELETE FROM discovery_runs")
+                        connection.execute("DELETE FROM discovery_results")
+                        connection.execute("UPDATE discovery_agents SET linked_host_device_id = '', updated_at = ?", (utc_now_iso(),))
                         connection.execute("DELETE FROM devices")
                         connection.execute("DELETE FROM range_groups")
                         connection.execute("DELETE FROM subnets")
@@ -2914,6 +4678,12 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                         self.send_json(HTTPStatus.OK, {"status": "deleted"})
                         return
 
+                if parsed.path == "/api/admin/history":
+                    user = require_admin_user(connection, self)
+                    clear_history(connection, resolve_actor(self, user=user))
+                    self.send_json(HTTPStatus.OK, {"status": "cleared"})
+                    return
+
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
         except RequestError as error:
             self.send_json(error.status, {"error": error.message})
@@ -2988,10 +4758,12 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def read_json_body(self) -> dict:
+    def read_json_body(self, *, max_bytes: int | None = None) -> dict:
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             return {}
+        if max_bytes is not None and content_length > max_bytes:
+            raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "JSON payload is too large.")
 
         raw_body = self.rfile.read(content_length)
         try:
