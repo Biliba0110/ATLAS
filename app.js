@@ -360,6 +360,16 @@ const elements = {
   discoveryAgentTokenCard: document.getElementById("discovery-agent-token-card"),
   discoveryAgentConfigSnippet: document.getElementById("discovery-agent-config-snippet"),
   copyDiscoveryAgentConfigButton: document.getElementById("copy-discovery-agent-config-button"),
+  discoveryAgentPolicyForm: document.getElementById("discovery-agent-policy-form"),
+  discoveryAgentPolicyTitle: document.getElementById("discovery-agent-policy-title"),
+  discoveryAgentPolicyUseDefault: document.getElementById("discovery-agent-policy-use-default"),
+  discoveryAgentPolicyStoreRuntime: document.getElementById("discovery-agent-policy-store-runtime"),
+  discoveryAgentPolicyStoreLabels: document.getElementById("discovery-agent-policy-store-labels"),
+  discoveryAgentPolicyStoreNetwork: document.getElementById("discovery-agent-policy-store-network"),
+  discoveryAgentPolicyStoreRaw: document.getElementById("discovery-agent-policy-store-raw"),
+  discoveryAgentPolicyShowPreview: document.getElementById("discovery-agent-policy-show-preview"),
+  saveDiscoveryAgentPolicyButton: document.getElementById("save-discovery-agent-policy-button"),
+  cancelDiscoveryAgentPolicyButton: document.getElementById("cancel-discovery-agent-policy-button"),
   discoveryPolicyStoreRuntime: document.getElementById("discovery-policy-store-runtime"),
   discoveryPolicyStoreLabels: document.getElementById("discovery-policy-store-labels"),
   discoveryPolicyStoreNetwork: document.getElementById("discovery-policy-store-network"),
@@ -370,6 +380,8 @@ const elements = {
   discoverySummaryGrid: document.getElementById("discovery-summary-grid"),
   discoveryResultsTableBody: document.getElementById("discovery-results-table-body"),
   discoveryResultsCounter: document.getElementById("discovery-results-counter"),
+  discoveryAuditEventFilter: document.getElementById("discovery-audit-event-filter"),
+  discoveryAuditTableBody: document.getElementById("discovery-audit-table-body"),
   userAccessGroupOptions: document.getElementById("user-access-group-options"),
   adminPanels: [...document.querySelectorAll(".admin-only")],
   passwordToggleButtons: [...document.querySelectorAll("[data-password-toggle]")],
@@ -402,6 +414,7 @@ const elements = {
   backupIncludeSystem: document.getElementById("backup-include-system"),
   backupIncludeAccess: document.getElementById("backup-include-access"),
   backupIncludePreferences: document.getElementById("backup-include-preferences"),
+  backupIncludeDiscovery: document.getElementById("backup-include-discovery"),
   exportSubnetsCsvButton: document.getElementById("export-subnets-csv-button"),
   exportGroupsCsvButton: document.getElementById("export-groups-csv-button"),
   exportDevicesCsvButton: document.getElementById("export-devices-csv-button"),
@@ -437,6 +450,7 @@ let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
 const expandedGroupIds = new Set();
+const expandedDiscoveryResultIds = new Set();
 let isAuthReady = false;
 let interfaceSettingsBaseline = null;
 let modalScrollY = 0;
@@ -449,6 +463,7 @@ let editingServiceId = "";
 let editingAccessGroupId = "";
 let editingUserId = "";
 let editingDiscoveryAgentId = "";
+let editingDiscoveryAgentPolicyId = "";
 let lastDiscoveryAgentConfig = "";
 
 initialize().catch((error) => {
@@ -576,6 +591,30 @@ function getDeviceSourceLogoClass(source) {
   return `source-logo--custom source-logo--tone-${hashSourceTone(normalizedSource)}`;
 }
 
+function isAgentManagedRecord(record) {
+  return Boolean(record?.sourceId || record?.lastSeenAt);
+}
+
+function isGeneratedAgentNote(note) {
+  const normalizedNote = normalizeMetadataToken(note, "");
+  return normalizedNote === "discovery" || normalizedNote === "agent";
+}
+
+function renderRegistrySourceBadges(record) {
+  const isAgentRecord = isAgentManagedRecord(record);
+  const originLabel = isAgentRecord ? t("registry_source_agent") : t("registry_source_manual");
+  const originVariant = isAgentRecord ? "info" : "muted";
+  const source = normalizeMetadataToken(record?.source, "");
+  const sourceLabel = source ? getDeviceSourceLabel(source) : "";
+  const badges = [
+    `<span class="registry-source-badge registry-source-badge--${originVariant}">${escapeHtml(originLabel)}</span>`,
+  ];
+  if (isAgentRecord && sourceLabel) {
+    badges.push(`<span class="registry-source-badge">${escapeHtml(sourceLabel)}</span>`);
+  }
+  return `<div class="registry-source-badges">${badges.join("")}</div>`;
+}
+
 function hashSourceTone(value) {
   const source = String(value || "custom");
   let hash = 0;
@@ -673,7 +712,9 @@ function applyLocalizedUi() {
     button.setAttribute("aria-label", t("field_help_button_label"));
   });
 
-  renderDiscoveryAgentFormOptions();
+  if (!shouldPreserveOpenForm(elements.discoveryAgentForm)) {
+    renderDiscoveryAgentFormOptions();
+  }
 
   if (activeFieldHelpButton) {
     const popover = document.querySelector(".field-help-popover");
@@ -944,14 +985,20 @@ function bindEvents() {
   elements.resetDiscoveryAgentFormButton?.addEventListener("click", () => prepareDiscoveryAgentForm());
   elements.discoveryAgentForm?.elements.allowedCidrs?.addEventListener("input", autosizeDiscoveryAllowedCidrs);
   elements.copyDiscoveryAgentConfigButton?.addEventListener("click", copyDiscoveryAgentConfig);
+  elements.discoveryAgentPolicyForm?.addEventListener("submit", handleDiscoveryAgentPolicySave);
+  elements.cancelDiscoveryAgentPolicyButton?.addEventListener("click", hideDiscoveryAgentPolicyEditor);
+  elements.discoveryAgentPolicyUseDefault?.addEventListener("change", syncDiscoveryAgentPolicyControls);
+  elements.discoveryAgentPolicyStoreRaw?.addEventListener("change", syncDiscoveryAgentPolicyControls);
   elements.saveDiscoveryPolicyButton?.addEventListener("click", handleDiscoveryPolicySave);
   elements.discoveryPolicyStoreRaw?.addEventListener("change", syncDiscoveryPolicyControls);
   elements.discoveryResultsTableBody?.addEventListener("click", handleDiscoveryPreviewActions);
+  elements.discoveryAuditEventFilter?.addEventListener("change", renderDiscoveryAudit);
   elements.historySearchInput?.addEventListener("input", renderHistoryTable);
   elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
   elements.historyScopeFilter?.addEventListener("change", renderHistoryTable);
   elements.dashboardAttentionList?.addEventListener("click", handleDashboardAttentionClick);
   elements.missingTypeForm?.addEventListener("submit", handleMissingTypeSubmit);
+  document.addEventListener("pointerdown", handleFieldHelpPointerDown, true);
   document.addEventListener("click", handleDocumentClick);
   window.addEventListener("focus", () => refreshState(true));
   window.addEventListener("keydown", handleGlobalKeydown);
@@ -2107,6 +2154,74 @@ function autosizeDiscoveryAllowedCidrs() {
   textarea.style.overflowY = textarea.scrollHeight > nextHeight ? "auto" : "hidden";
 }
 
+function getSelectDefaultValue(select) {
+  if (select.multiple) {
+    return [...select.options]
+      .filter((option) => option.defaultSelected)
+      .map((option) => option.value)
+      .join("\u0000");
+  }
+  const defaultOption = [...select.options].find((option) => option.defaultSelected) || select.options[0];
+  return defaultOption?.value || "";
+}
+
+function getFormControlValue(control) {
+  if (!control || !control.name || control.type === "button" || control.type === "submit" || control.type === "reset") {
+    return null;
+  }
+  if (control.type === "checkbox" || control.type === "radio") {
+    return Boolean(control.checked);
+  }
+  if (control.tagName === "SELECT") {
+    if (control.multiple) {
+      return [...control.selectedOptions].map((option) => option.value).join("\u0000");
+    }
+    return control.value;
+  }
+  return String(control.value || "");
+}
+
+function getFormControlDefaultValue(control) {
+  if (!control || !control.name || control.type === "button" || control.type === "submit" || control.type === "reset") {
+    return null;
+  }
+  if (control.type === "checkbox" || control.type === "radio") {
+    return Boolean(control.defaultChecked);
+  }
+  if (control.tagName === "SELECT") {
+    return getSelectDefaultValue(control);
+  }
+  return String(control.defaultValue || "");
+}
+
+function isFormDirty(form) {
+  if (!form) {
+    return false;
+  }
+  return [...form.elements].some((control) => {
+    const value = getFormControlValue(control);
+    if (value === null) {
+      return false;
+    }
+    return value !== getFormControlDefaultValue(control);
+  });
+}
+
+function isModalOpen(modalId) {
+  const modal = document.getElementById(modalId);
+  return Boolean(modal && !modal.hidden);
+}
+
+function shouldPreserveOpenForm(form, modalId = "") {
+  if (!form || !isFormDirty(form)) {
+    return false;
+  }
+  if (!modalId) {
+    return true;
+  }
+  return isModalOpen(modalId);
+}
+
 function prepareDiscoveryAgentForm(agent = null) {
   if (!elements.discoveryAgentForm) {
     return;
@@ -2152,6 +2267,51 @@ function getDiscoveryDataPolicyDraft() {
   });
 }
 
+function getDiscoveryAgentEffectivePolicy(agent) {
+  return normalizeDiscoveryDataPolicy(agent?.dataPolicyOverride || state.settings?.discoveryDataPolicy);
+}
+
+function getDiscoveryAgentPolicyDraft() {
+  const storeRawMetadata = Boolean(elements.discoveryAgentPolicyStoreRaw?.checked);
+  return normalizeDiscoveryDataPolicy({
+    storeRuntime: storeRawMetadata || Boolean(elements.discoveryAgentPolicyStoreRuntime?.checked),
+    storeLabels: storeRawMetadata || Boolean(elements.discoveryAgentPolicyStoreLabels?.checked),
+    storeNetworkDetails: storeRawMetadata || Boolean(elements.discoveryAgentPolicyStoreNetwork?.checked),
+    storeInternalIps: storeRawMetadata || Boolean(elements.discoveryAgentPolicyStoreNetwork?.checked),
+    storeRawMetadata,
+    showMetadataInPreview: Boolean(elements.discoveryAgentPolicyShowPreview?.checked),
+  });
+}
+
+function isDiscoveryDataPolicyDirty() {
+  if (!isSettingsModalOpen()) {
+    return false;
+  }
+  const currentPolicy = normalizeDiscoveryDataPolicy(state.settings?.discoveryDataPolicy);
+  const draftPolicy = getDiscoveryDataPolicyDraft();
+  return Object.keys(DEFAULT_DISCOVERY_DATA_POLICY).some((key) => currentPolicy[key] !== draftPolicy[key]);
+}
+
+function isDiscoveryAgentPolicyDirty() {
+  if (!editingDiscoveryAgentPolicyId || !elements.discoveryAgentPolicyForm || elements.discoveryAgentPolicyForm.hidden) {
+    return false;
+  }
+  const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === editingDiscoveryAgentPolicyId);
+  if (!agent) {
+    return false;
+  }
+  const useDefault = Boolean(elements.discoveryAgentPolicyUseDefault?.checked);
+  if (useDefault !== Boolean(agent.usesDefaultDataPolicy)) {
+    return true;
+  }
+  if (useDefault) {
+    return false;
+  }
+  const currentPolicy = normalizeDiscoveryDataPolicy(agent.dataPolicyOverride || state.settings?.discoveryDataPolicy);
+  const draftPolicy = getDiscoveryAgentPolicyDraft();
+  return Object.keys(DEFAULT_DISCOVERY_DATA_POLICY).some((key) => currentPolicy[key] !== draftPolicy[key]);
+}
+
 function syncDiscoveryPolicyControls() {
   const storeRawMetadata = Boolean(elements.discoveryPolicyStoreRaw?.checked);
   [
@@ -2166,6 +2326,37 @@ function syncDiscoveryPolicyControls() {
       control.checked = true;
     }
     control.disabled = storeRawMetadata || !Boolean(state.auth?.capabilities?.isAdmin);
+  });
+}
+
+function syncDiscoveryAgentPolicyControls() {
+  const isAdmin = Boolean(state.auth?.capabilities?.isAdmin);
+  const useDefault = Boolean(elements.discoveryAgentPolicyUseDefault?.checked);
+  if (useDefault) {
+    setDiscoveryAgentPolicyControls(state.settings?.discoveryDataPolicy);
+  }
+  const storeRawMetadata = Boolean(elements.discoveryAgentPolicyStoreRaw?.checked);
+  [
+    elements.discoveryAgentPolicyStoreRuntime,
+    elements.discoveryAgentPolicyStoreLabels,
+    elements.discoveryAgentPolicyStoreNetwork,
+  ].forEach((control) => {
+    if (!control) {
+      return;
+    }
+    if (storeRawMetadata) {
+      control.checked = true;
+    }
+    control.disabled = !isAdmin || useDefault || storeRawMetadata;
+  });
+  [
+    elements.discoveryAgentPolicyStoreRaw,
+    elements.discoveryAgentPolicyShowPreview,
+    elements.saveDiscoveryAgentPolicyButton,
+  ].forEach((control) => {
+    if (control) {
+      control.disabled = !isAdmin || (useDefault && control !== elements.saveDiscoveryAgentPolicyButton);
+    }
   });
 }
 
@@ -2187,6 +2378,50 @@ function renderDiscoveryDataPolicySettings() {
     elements.discoveryPolicyShowPreview.checked = Boolean(policy.showMetadataInPreview);
   }
   syncDiscoveryPolicyControls();
+}
+
+function setDiscoveryAgentPolicyControls(policy) {
+  const normalizedPolicy = normalizeDiscoveryDataPolicy(policy);
+  if (elements.discoveryAgentPolicyStoreRuntime) {
+    elements.discoveryAgentPolicyStoreRuntime.checked = Boolean(normalizedPolicy.storeRuntime);
+  }
+  if (elements.discoveryAgentPolicyStoreLabels) {
+    elements.discoveryAgentPolicyStoreLabels.checked = Boolean(normalizedPolicy.storeLabels);
+  }
+  if (elements.discoveryAgentPolicyStoreNetwork) {
+    elements.discoveryAgentPolicyStoreNetwork.checked = Boolean(
+      normalizedPolicy.storeNetworkDetails || normalizedPolicy.storeInternalIps
+    );
+  }
+  if (elements.discoveryAgentPolicyStoreRaw) {
+    elements.discoveryAgentPolicyStoreRaw.checked = Boolean(normalizedPolicy.storeRawMetadata);
+  }
+  if (elements.discoveryAgentPolicyShowPreview) {
+    elements.discoveryAgentPolicyShowPreview.checked = Boolean(normalizedPolicy.showMetadataInPreview);
+  }
+}
+
+function prepareDiscoveryAgentPolicyEditor(agent) {
+  if (!elements.discoveryAgentPolicyForm || !agent) {
+    return;
+  }
+  editingDiscoveryAgentPolicyId = agent.id;
+  if (elements.discoveryAgentPolicyTitle) {
+    elements.discoveryAgentPolicyTitle.textContent = t("discovery_agent_policy_title_for", { name: agent.name });
+  }
+  if (elements.discoveryAgentPolicyUseDefault) {
+    elements.discoveryAgentPolicyUseDefault.checked = Boolean(agent.usesDefaultDataPolicy);
+  }
+  setDiscoveryAgentPolicyControls(getDiscoveryAgentEffectivePolicy(agent));
+  elements.discoveryAgentPolicyForm.hidden = false;
+  syncDiscoveryAgentPolicyControls();
+}
+
+function hideDiscoveryAgentPolicyEditor() {
+  editingDiscoveryAgentPolicyId = "";
+  if (elements.discoveryAgentPolicyForm) {
+    elements.discoveryAgentPolicyForm.hidden = true;
+  }
 }
 
 function prepareGroupModal(group = null) {
@@ -2644,12 +2879,20 @@ function renderPermissionAwareUi() {
     elements.discoveryPolicyStoreRaw,
     elements.discoveryPolicyShowPreview,
     elements.saveDiscoveryPolicyButton,
+    elements.discoveryAgentPolicyUseDefault,
+    elements.discoveryAgentPolicyStoreRuntime,
+    elements.discoveryAgentPolicyStoreLabels,
+    elements.discoveryAgentPolicyStoreNetwork,
+    elements.discoveryAgentPolicyStoreRaw,
+    elements.discoveryAgentPolicyShowPreview,
+    elements.saveDiscoveryAgentPolicyButton,
   ].forEach((control) => {
     if (control) {
       control.disabled = !isAdmin;
     }
   });
   syncDiscoveryPolicyControls();
+  syncDiscoveryAgentPolicyControls();
 
   elements.adminPanels.forEach((panel) => {
     panel.hidden = !isAdmin;
@@ -2659,26 +2902,47 @@ function renderPermissionAwareUi() {
 }
 
 function renderAdminPanels() {
-  if (!editingAccessGroupId) {
+  const preserveAccessGroupForm = shouldPreserveOpenForm(elements.accessGroupForm);
+  const preserveUserForm = shouldPreserveOpenForm(elements.userForm);
+  const preserveDiscoveryAgentForm = shouldPreserveOpenForm(elements.discoveryAgentForm);
+
+  if (!editingAccessGroupId && !preserveAccessGroupForm) {
     prepareAccessGroupForm();
   }
-  if (!editingUserId) {
+  if (!editingUserId && !preserveUserForm) {
     prepareUserForm();
   }
-  if (!editingDiscoveryAgentId) {
+  if (!editingDiscoveryAgentId && !preserveDiscoveryAgentForm) {
     prepareDiscoveryAgentForm();
-  } else {
+  } else if (!preserveDiscoveryAgentForm) {
     renderDiscoveryAgentFormOptions();
   }
   renderAccessGroupsTable();
   renderUsersTable();
-  renderDiscoveryDataPolicySettings();
+  if (!isDiscoveryDataPolicyDirty()) {
+    renderDiscoveryDataPolicySettings();
+  } else {
+    syncDiscoveryPolicyControls();
+  }
+  if (editingDiscoveryAgentPolicyId) {
+    const policyAgent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === editingDiscoveryAgentPolicyId);
+    if (!policyAgent) {
+      hideDiscoveryAgentPolicyEditor();
+    } else if (!isDiscoveryAgentPolicyDirty()) {
+      prepareDiscoveryAgentPolicyEditor(policyAgent);
+    } else {
+      syncDiscoveryAgentPolicyControls();
+    }
+  }
   renderDiscoveryAgentsTable();
   renderDiscoveryPreview();
-  const editingUser = editingUserId
-    ? (state.admin?.users || []).find((entry) => entry.id === editingUserId) || null
-    : null;
-  renderUserAccessGroupOptions(editingUser?.accessGroupIds || []);
+  renderDiscoveryAudit();
+  if (!preserveUserForm) {
+    const editingUser = editingUserId
+      ? (state.admin?.users || []).find((entry) => entry.id === editingUserId) || null
+      : null;
+    renderUserAccessGroupOptions(editingUser?.accessGroupIds || []);
+  }
 }
 
 function setActiveSettingsSection(sectionName) {
@@ -2835,7 +3099,8 @@ async function refreshState(silent = false, forceRender = false) {
     }
 
     applyState(normalizedSnapshot);
-    renderAll();
+    renderFormChrome();
+    renderLiveData();
     isAuthReady = true;
     if (state.auth?.user?.mustChangePassword) {
       openPasswordModal(true);
@@ -3292,6 +3557,42 @@ async function handleDiscoveryPolicySave() {
   }
 }
 
+async function handleDiscoveryAgentPolicySave(event) {
+  event.preventDefault();
+  if (!editingDiscoveryAgentPolicyId) {
+    return;
+  }
+
+  const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === editingDiscoveryAgentPolicyId);
+  if (!agent) {
+    hideDiscoveryAgentPolicyEditor();
+    return;
+  }
+
+  try {
+    const useDefault = Boolean(elements.discoveryAgentPolicyUseDefault?.checked);
+    const updatedAgent = await apiRequest(
+      `/admin/discovery/agents/${encodeURIComponent(agent.id)}/data-policy`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          useDefault,
+          dataPolicy: useDefault ? null : getDiscoveryAgentPolicyDraft(),
+        }),
+      },
+    );
+    state.admin.discoveryAgents = (state.admin?.discoveryAgents || []).map((entry) => (
+      entry.id === updatedAgent.id ? normalizeDiscoveryAgent(updatedAgent) : entry
+    ));
+    renderDiscoveryAgentsTable();
+    prepareDiscoveryAgentPolicyEditor(normalizeDiscoveryAgent(updatedAgent));
+    renderDiscoveryPreview();
+    setDiscoveryAgentStatus(t("discovery_agent_policy_saved", { name: agent.name }), "ok");
+  } catch (error) {
+    setDiscoveryAgentStatus(error.message, "danger");
+  }
+}
+
 async function handleAccessGroupTableActions(event) {
   const editButton = event.target.closest("[data-edit-access-group]");
   if (editButton) {
@@ -3431,6 +3732,17 @@ async function handleUserAdminTableActions(event) {
 }
 
 async function handleDiscoveryAgentTableActions(event) {
+  const policyButton = event.target.closest("[data-edit-discovery-agent-policy]");
+  if (policyButton) {
+    const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === policyButton.dataset.editDiscoveryAgentPolicy);
+    if (!agent) {
+      return;
+    }
+    prepareDiscoveryAgentPolicyEditor(agent);
+    elements.discoveryAgentPolicyForm?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return;
+  }
+
   const editButton = event.target.closest("[data-edit-discovery-agent]");
   if (editButton) {
     const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === editButton.dataset.editDiscoveryAgent);
@@ -3474,28 +3786,85 @@ async function handleDiscoveryAgentTableActions(event) {
   }
 
   const rotateButton = event.target.closest("[data-rotate-discovery-agent-token]");
-  if (!rotateButton) {
+  if (rotateButton) {
+    const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === rotateButton.dataset.rotateDiscoveryAgentToken);
+    if (!agent) {
+      return;
+    }
+    const confirmed = window.confirm(t("discovery_agent_rotate_token_confirm", { name: agent.name }));
+    if (!confirmed) {
+      return;
+    }
+    try {
+      const response = await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}/rotate-token`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      await refreshState(true, true);
+      showDiscoveryAgentConfig(response.agent || agent, response.token || "");
+      setDiscoveryAgentStatus(t("discovery_agent_token_rotated"), "ok");
+    } catch (error) {
+      setDiscoveryAgentStatus(error.message, "danger");
+    }
     return;
   }
 
-  const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === rotateButton.dataset.rotateDiscoveryAgentToken);
-  if (!agent) {
+  const revokeButton = event.target.closest("[data-revoke-discovery-agent-token]");
+  if (revokeButton) {
+    const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === revokeButton.dataset.revokeDiscoveryAgentToken);
+    if (!agent) {
+      return;
+    }
+    const confirmed = window.confirm(t("discovery_agent_revoke_token_confirm", { name: agent.name }));
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}/revoke-token`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      lastDiscoveryAgentConfig = "";
+      if (elements.discoveryAgentTokenCard) {
+        elements.discoveryAgentTokenCard.hidden = true;
+      }
+      await refreshState(true, true);
+      setDiscoveryAgentStatus(t("discovery_agent_token_revoked", { name: agent.name }), "ok");
+    } catch (error) {
+      setDiscoveryAgentStatus(error.message, "danger");
+    }
     return;
   }
-  const confirmed = window.confirm(t("discovery_agent_rotate_token_confirm", { name: agent.name }));
-  if (!confirmed) {
-    return;
-  }
-  try {
-    const response = await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}/rotate-token`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    await refreshState(true, true);
-    showDiscoveryAgentConfig(response.agent || agent, response.token || "");
-    setDiscoveryAgentStatus(t("discovery_agent_token_rotated"), "ok");
-  } catch (error) {
-    setDiscoveryAgentStatus(error.message, "danger");
+
+  const deleteButton = event.target.closest("[data-delete-discovery-agent]");
+  if (deleteButton) {
+    const agent = (state.admin?.discoveryAgents || []).find((entry) => entry.id === deleteButton.dataset.deleteDiscoveryAgent);
+    if (!agent) {
+      return;
+    }
+    const confirmed = window.confirm(t("discovery_agent_delete_confirm", { name: agent.name }));
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}`, {
+        method: "DELETE",
+      });
+      if (editingDiscoveryAgentId === agent.id) {
+        prepareDiscoveryAgentForm();
+      }
+      if (editingDiscoveryAgentPolicyId === agent.id) {
+        hideDiscoveryAgentPolicyEditor();
+      }
+      lastDiscoveryAgentConfig = "";
+      if (elements.discoveryAgentTokenCard) {
+        elements.discoveryAgentTokenCard.hidden = true;
+      }
+      await refreshState(true, true);
+      setDiscoveryAgentStatus(t("discovery_agent_deleted", { name: agent.name }), "ok");
+    } catch (error) {
+      setDiscoveryAgentStatus(error.message, "danger");
+    }
   }
 }
 
@@ -3862,6 +4231,7 @@ async function exportBackup() {
     system: Boolean(elements.backupIncludeSystem?.checked),
     access: Boolean(elements.backupIncludeAccess?.checked),
     preferences: Boolean(elements.backupIncludePreferences?.checked),
+    discovery: Boolean(elements.backupIncludeDiscovery?.checked),
   };
 
   if (!Object.values(include).some(Boolean)) {
@@ -4043,6 +4413,9 @@ async function handleImportFile(event) {
 
       await refreshState(true);
       showToast(t("backup_import_done", { name: file.name }));
+      if (Number(result?.discoveryAgentsNeedTokens || 0) > 0) {
+        showToast(t("backup_import_discovery_tokens", { count: result.discoveryAgentsNeedTokens }), true);
+      }
     } else {
       const shouldReplace = window.confirm(t("import_confirm_replace"));
 
@@ -4560,10 +4933,38 @@ function renderAll() {
   if (!isSettingsModalOpen()) {
     syncSettingsForm();
   }
-  renderSubnetOptions();
-  renderServiceHostOptions(elements.serviceHostSelect?.value || "");
-  renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
-  renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+  renderFormChrome();
+  renderLiveData();
+}
+
+function renderFormChrome() {
+  const preserveSubnetForm = shouldPreserveOpenForm(elements.subnetForm, "subnet-modal");
+  const preserveGroupForm = shouldPreserveOpenForm(elements.groupForm, "group-modal");
+  const preserveDeviceForm = shouldPreserveOpenForm(elements.deviceForm, "device-modal");
+  const preserveServiceForm = shouldPreserveOpenForm(elements.serviceForm, "service-modal");
+  const preserveNetworkSelectors = preserveSubnetForm || preserveGroupForm || preserveDeviceForm;
+
+  if (!preserveNetworkSelectors) {
+    renderSubnetOptions();
+  }
+  if (!preserveServiceForm) {
+    renderServiceHostOptions(elements.serviceHostSelect?.value || "");
+    renderServiceSourceOptions(elements.serviceForm?.elements.source?.value || "");
+  }
+  if (!preserveDeviceForm) {
+    renderDeviceTypeOptions(elements.deviceTypeSelect?.value || "");
+  }
+  renderDeviceGroupFilterOptions();
+  if (!preserveDeviceForm) {
+    updateSuggestedIp();
+  }
+  renderPermissionAwareUi();
+  if (isSettingsModalOpen()) {
+    applyInterfaceDraft(collectInterfaceSettingsDraft());
+  }
+}
+
+function renderLiveData() {
   renderDeviceGroupFilterOptions();
   renderSubnetsTable();
   renderGroupsTable();
@@ -4575,11 +4976,7 @@ function renderAll() {
   renderDashboardPanels();
   syncRegistrySections();
   updateAutomationWidgets();
-  updateSuggestedIp();
   renderPermissionAwareUi();
-  if (isSettingsModalOpen()) {
-    applyInterfaceDraft(collectInterfaceSettingsDraft());
-  }
 }
 
 function renderDeviceGroupFilterOptions() {
@@ -4729,41 +5126,54 @@ function initializeFieldHelp() {
         labelRow.append(labelText);
       }
 
-      const helpButton = document.createElement("button");
-      helpButton.type = "button";
+      const helpButton = document.createElement("span");
       helpButton.className = "field-help-button";
       helpButton.dataset.fieldHelp = key;
+      helpButton.dataset.fieldHelpControl = "true";
+      helpButton.tabIndex = 0;
+      helpButton.setAttribute("role", "button");
       helpButton.setAttribute("aria-label", t("field_help_button_label"));
       helpButton.setAttribute("aria-haspopup", "dialog");
       helpButton.textContent = "i";
 
-      helpButton.addEventListener("mouseenter", () => showFieldHelp(helpButton, key, false));
-      helpButton.addEventListener("mouseleave", () => {
-        if (activeFieldHelpButton === helpButton && !isFieldHelpPinned) {
-          hideFieldHelp();
-        }
-      });
-      helpButton.addEventListener("focus", () => showFieldHelp(helpButton, key, false));
-      helpButton.addEventListener("blur", () => {
-        if (activeFieldHelpButton === helpButton && !isFieldHelpPinned) {
-          hideFieldHelp();
-        }
-      });
       helpButton.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
 
-        if (activeFieldHelpButton === helpButton && isFieldHelpPinned) {
+        if (activeFieldHelpButton === helpButton) {
           hideFieldHelp(true);
           return;
         }
 
         showFieldHelp(helpButton, key, true);
       });
+      helpButton.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (activeFieldHelpButton === helpButton) {
+          hideFieldHelp(true);
+          return;
+        }
+        showFieldHelp(helpButton, key, true);
+      });
 
       labelRow.append(helpButton);
     });
   });
+}
+
+function handleFieldHelpPointerDown(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  if (target.closest(".field-help-button") || target.closest(".field-help-popover")) {
+    return;
+  }
+  hideFieldHelp(true);
 }
 
 function getFieldHelpPopover() {
@@ -5282,6 +5692,9 @@ function renderDiscoveryAgentsTable() {
         : agent.lastRejectedAt
           ? `${t("discovery_agent_last_rejected")}: ${formatDateTime(agent.lastRejectedAt)}`
           : t("no_data");
+      const policyLabel = agent.usesDefaultDataPolicy
+        ? t("discovery_agent_policy_default_short")
+        : t("discovery_agent_policy_custom_short");
       return `
         <tr>
           <td>
@@ -5294,13 +5707,19 @@ function renderDiscoveryAgentsTable() {
             ${agent.lastRemoteAddr ? `<div class="secondary-line mono">${escapeHtml(agent.lastRemoteAddr)}</div>` : ""}
           </td>
           <td><div class="discovery-agents-table__acl mono">${escapeHtml(cidrs)}</div></td>
-          <td>${escapeHtml(getDiscoveryCreateModeLabel(agent.createMode))}</td>
+          <td>
+            <div>${escapeHtml(getDiscoveryCreateModeLabel(agent.createMode))}</div>
+            <div class="secondary-line">${escapeHtml(policyLabel)}</div>
+          </td>
           <td class="mono">${escapeHtml(lastSeen)}</td>
           <td>
             <div class="discovery-preview-actions discovery-agents-table__actions">
               <button type="button" class="row-button" data-edit-discovery-agent="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
+              <button type="button" class="row-button" data-edit-discovery-agent-policy="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("discovery_agent_policy_button"))}</button>
               <button type="button" class="row-button" data-toggle-discovery-agent="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(agent.enabled ? t("discovery_agent_disable_button") : t("discovery_agent_enable_button"))}</button>
               <button type="button" class="row-button row-button--danger" data-rotate-discovery-agent-token="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("discovery_agent_rotate_token_button"))}</button>
+              <button type="button" class="row-button row-button--danger" data-revoke-discovery-agent-token="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("discovery_agent_revoke_token_button"))}</button>
+              <button type="button" class="row-button row-button--danger" data-delete-discovery-agent="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("discovery_agent_delete_button"))}</button>
             </div>
           </td>
         </tr>
@@ -5329,15 +5748,45 @@ function getDiscoveryStateVariant(stateName) {
   return "info";
 }
 
+function getDiscoveryTargetKind(result) {
+  const source = normalizeMetadataToken(result.source, "");
+  const sourceKind = normalizeMetadataToken(result.sourceKind, "");
+  if (sourceKind === "iot" || sourceKind === "sensor" || sourceKind === "controller") {
+    return "iot";
+  }
+  if (source === "docker" || ["service", "container", "docker-container", "pod", "workload"].includes(sourceKind)) {
+    return "service";
+  }
+  return "device";
+}
+
+function getDiscoveryTargetLabel(result) {
+  const targetKind = getDiscoveryTargetKind(result);
+  const key = {
+    iot: "discovery_target_iot",
+    service: "discovery_target_service",
+    device: "discovery_target_device",
+  }[targetKind];
+  return t(key);
+}
+
 function renderDiscoveryActions(result) {
   const normalizedState = String(result.state || "new").trim().toLowerCase();
   const actions = [];
+  const detailsAction = expandedDiscoveryResultIds.has(result.id)
+    ? ["details", "discovery_action_hide_details"]
+    : ["details", "discovery_action_details"];
+  actions.push(detailsAction);
   if (normalizedState === "ignored") {
     actions.push(["restore", "discovery_action_restore"]);
   } else {
     if (normalizedState !== "matched") {
-      actions.push(["create-service", "discovery_action_create_service"]);
-      actions.push(["create-device", "discovery_action_create_device"]);
+      const targetKind = getDiscoveryTargetKind(result);
+      if (targetKind === "service") {
+        actions.push(["create-service", "discovery_action_create_service"]);
+      } else {
+        actions.push(["create-device", targetKind === "iot" ? "discovery_action_create_iot" : "discovery_action_create_device"]);
+      }
       actions.push(["link", "discovery_action_link"]);
     }
     if (normalizedState === "stale" || normalizedState === "error") {
@@ -5406,6 +5855,16 @@ async function handleDiscoveryPreviewActions(event) {
   const result = (state.admin?.discoveryResults || []).find((item) => item.id === resultId);
   const resultName = result?.name || t("no_data");
 
+  if (action === "details") {
+    if (expandedDiscoveryResultIds.has(resultId)) {
+      expandedDiscoveryResultIds.delete(resultId);
+    } else {
+      expandedDiscoveryResultIds.add(resultId);
+    }
+    renderDiscoveryPreview();
+    return;
+  }
+
   try {
     button.disabled = true;
     if (action === "create-service" || action === "create-device") {
@@ -5448,6 +5907,144 @@ async function handleDiscoveryPreviewActions(event) {
   } finally {
     button.disabled = false;
   }
+}
+
+function getDiscoveryAuditEventLabel(eventType) {
+  const normalizedType = normalizeMetadataToken(eventType, "event");
+  const key = `discovery_audit_event_${normalizedType}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedType);
+}
+
+function getDiscoveryAuditSeverityVariant(severity) {
+  const normalizedSeverity = String(severity || "info").trim().toLowerCase();
+  if (normalizedSeverity === "warn" || normalizedSeverity === "warning") {
+    return "warn";
+  }
+  if (normalizedSeverity === "error" || normalizedSeverity === "danger") {
+    return "danger";
+  }
+  if (normalizedSeverity === "ok" || normalizedSeverity === "success") {
+    return "ok";
+  }
+  return "info";
+}
+
+function renderDiscoveryAuditFilterOptions(events) {
+  if (!elements.discoveryAuditEventFilter) {
+    return;
+  }
+  const previousValue = elements.discoveryAuditEventFilter.value || "all";
+  const eventTypes = [...new Set(events.map((event) => event.eventType).filter(Boolean))]
+    .sort((left, right) => getDiscoveryAuditEventLabel(left).localeCompare(getDiscoveryAuditEventLabel(right), getLanguage()));
+  elements.discoveryAuditEventFilter.innerHTML = [
+    `<option value="all">${escapeHtml(t("discovery_audit_event_filter_all"))}</option>`,
+    ...eventTypes.map((eventType) => (
+      `<option value="${escapeHtml(eventType)}">${escapeHtml(getDiscoveryAuditEventLabel(eventType))}</option>`
+    )),
+  ].join("");
+  elements.discoveryAuditEventFilter.value = eventTypes.includes(previousValue) ? previousValue : "all";
+}
+
+function renderDiscoveryAudit() {
+  if (!elements.discoveryAuditTableBody) {
+    return;
+  }
+
+  const events = state.admin?.discoveryAuditEvents || [];
+  renderDiscoveryAuditFilterOptions(events);
+  const eventFilter = elements.discoveryAuditEventFilter?.value || "all";
+  const filteredEvents = eventFilter === "all"
+    ? events
+    : events.filter((event) => event.eventType === eventFilter);
+
+  if (filteredEvents.length === 0) {
+    elements.discoveryAuditTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="6">${escapeHtml(events.length ? t("no_results") : t("empty_discovery_audit"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.discoveryAuditTableBody.innerHTML = filteredEvents
+    .slice(0, 60)
+    .map((event) => {
+      const agentLabel = event.agentName || event.agentId || t("no_data");
+      const actorDetails = [event.actor, event.remoteAddr].filter(Boolean).join(" · ") || t("no_data");
+      const details = event.message || Object.entries(event.details || {})
+        .slice(0, 2)
+        .map(([key, value]) => `${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`)
+        .join(" · ");
+      return `
+        <tr>
+          <td class="mono">${escapeHtml(formatDateTime(event.createdAt))}</td>
+          <td>
+            <span class="status-badge status-badge--${getDiscoveryAuditSeverityVariant(event.severity)}">
+              ${escapeHtml(event.severity || "info")}
+            </span>
+          </td>
+          <td>${escapeHtml(getDiscoveryAuditEventLabel(event.eventType))}</td>
+          <td>
+            <strong>${escapeHtml(agentLabel)}</strong>
+            ${event.agentId ? `<div class="secondary-line mono">${escapeHtml(event.agentId)}</div>` : ""}
+          </td>
+          <td>${escapeHtml(actorDetails)}</td>
+          <td><div class="discovery-audit-table__note">${escapeHtml(details || t("no_data"))}</div></td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderDiscoveryDetails(result) {
+  const visibleEntries = Object.entries(result.visibleRaw || {})
+    .filter(([, value]) => value !== "" && value !== null && value !== undefined)
+    .slice(0, 12);
+  const detailItems = [
+    ["discovery_details_target", getDiscoveryTargetLabel(result)],
+    ["device_source_label", getDeviceSourceLabel(result.source)],
+    ["device_source_kind_label", result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data")],
+    ["device_source_id_label", result.sourceId || t("no_data")],
+    ["discovery_details_received_fields", String(result.receivedFields?.length || 0)],
+    ["discovery_details_accepted_fields", String(result.acceptedFields?.length || 0)],
+    ["discovery_details_visible_fields", String(result.visibleFields?.length || 0)],
+  ];
+  if (result.serviceUrl) {
+    detailItems.push(["service_public_url_label", result.serviceUrl]);
+  }
+  if (result.accessPort) {
+    detailItems.push(["service_access_port_label", result.accessPort]);
+  }
+  if (result.ports) {
+    detailItems.push(["service_ports_label", result.ports]);
+  }
+
+  return `
+    <div class="discovery-details-panel">
+      <div class="discovery-details-grid">
+        ${detailItems.map(([labelKey, value]) => `
+          <div class="discovery-details-item">
+            <span>${escapeHtml(t(labelKey))}</span>
+            <strong>${escapeHtml(value)}</strong>
+          </div>
+        `).join("")}
+      </div>
+      <div class="discovery-metadata-list">
+        <span class="secondary-line">${escapeHtml(t("discovery_details_metadata_title"))}</span>
+        ${visibleEntries.length > 0
+          ? visibleEntries.map(([key, value]) => {
+            const textValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+            return `
+              <div class="discovery-metadata-row">
+                <span>${escapeHtml(key)}</span>
+                <code>${escapeHtml(truncateText(textValue, 120))}</code>
+              </div>
+            `;
+          }).join("")
+          : `<div class="secondary-line">${escapeHtml(t("discovery_details_no_visible_metadata"))}</div>`}
+      </div>
+    </div>
+  `;
 }
 
 function renderDiscoveryPreview() {
@@ -5499,12 +6096,14 @@ function renderDiscoveryPreview() {
     const metadataSummary = renderDiscoveryMetadataSummary(result);
     const hostLabel = result.hostName || result.hostDeviceId || t("no_binding");
     const ports = [result.accessPort, result.ports].filter(Boolean).join(" · ") || t("no_data");
+    const isExpanded = expandedDiscoveryResultIds.has(result.id);
     return `
       <tr>
         <td>
           <span class="status-badge status-badge--${getDiscoveryStateVariant(result.state)}">
             ${escapeHtml(getDiscoveryStateLabel(result.state))}
           </span>
+          <div class="secondary-line">${escapeHtml(getDiscoveryTargetLabel(result))}</div>
         </td>
         <td>
           <strong>${escapeHtml(result.name || t("no_data"))}</strong>
@@ -5520,6 +6119,11 @@ function renderDiscoveryPreview() {
         <td class="mono">${escapeHtml(formatDateTime(result.lastSeenAt || result.updatedAt))}</td>
         <td>${renderDiscoveryActions(result)}</td>
       </tr>
+      ${isExpanded ? `
+        <tr class="discovery-details-row">
+          <td colspan="7">${renderDiscoveryDetails(result)}</td>
+        </tr>
+      ` : ""}
     `;
   }).join("");
 }
@@ -5638,6 +6242,9 @@ function renderServicesList() {
       service.sourceKind && service.sourceKind !== "service" ? getDeviceSourceKindLabel(service.sourceKind) : "",
       service.sourceId,
     ].filter(Boolean);
+    const note = service.note && !isGeneratedAgentNote(service.note)
+      ? renderRegistryComment(service.note)
+      : "";
 
     return `
       <tr>
@@ -5645,6 +6252,7 @@ function renderServicesList() {
           <div class="service-table__name${sourceLogo ? "" : " service-table__name--plain"}">
             ${sourceLogo}
             <strong>${escapeHtml(service.name)}</strong>
+            ${renderRegistrySourceBadges(service)}
             ${sourceDetails.length ? `<div class="secondary-line">${escapeHtml(sourceDetails.join(" · "))}</div>` : ""}
           </div>
         </td>
@@ -5665,7 +6273,7 @@ function renderServicesList() {
           <span class="status-badge status-badge--${status === "running" ? "ok" : status ? "warn" : "info"}">${escapeHtml(status ? getIntegrationStatusLabel(status) : getDeviceSourceLabel(source))}</span>
         </td>
         <td class="service-table__last-seen">${escapeHtml(service.lastSeenAt ? formatDateTime(service.lastSeenAt) : t("no_data"))}</td>
-        <td>${renderRegistryComment(service.note)}</td>
+        <td>${note}</td>
         <td>
           <div class="service-row-actions">
             <div class="service-row-actions__urls${publicUrl ? "" : " service-row-actions__urls--single"}">
@@ -5725,11 +6333,15 @@ function renderDevicesTable() {
       const groupCell = group
         ? `<button type="button" class="link-button table-row-link" data-jump-group="${escapeHtml(group.id)}">${escapeHtml(group.name)}</button><br><span class="mono">${escapeHtml(formatGroupRange(group, true))}</span>`
         : escapeHtml(t("no_data"));
+      const note = device.note && !isGeneratedAgentNote(device.note)
+        ? renderRegistryComment(device.note)
+        : "";
       return `
         <tr>
           <td>
             <strong>${escapeHtml(device.name)}</strong>
-            ${device.note ? renderRegistryComment(device.note) : ""}
+            ${renderRegistrySourceBadges(device)}
+            ${note}
           </td>
           <td class="mono">${escapeHtml(device.ip)}</td>
           <td class="mono">${escapeHtml(device.mac || t("no_data"))}</td>
@@ -6239,6 +6851,9 @@ function normalizeAuthState(rawAuth = {}) {
 }
 
 function normalizeDiscoveryAgent(entry) {
+  const dataPolicyOverride = entry?.dataPolicyOverride && typeof entry.dataPolicyOverride === "object"
+    ? normalizeDiscoveryDataPolicy(entry.dataPolicyOverride)
+    : null;
   return {
     id: String(entry?.id || "").trim(),
     name: String(entry?.name || "").trim(),
@@ -6252,6 +6867,8 @@ function normalizeDiscoveryAgent(entry) {
     lastRemoteAddr: String(entry?.lastRemoteAddr || "").trim(),
     lastRejectedAt: entry?.lastRejectedAt || "",
     lastRejectReason: String(entry?.lastRejectReason || "").trim(),
+    dataPolicyOverride,
+    usesDefaultDataPolicy: dataPolicyOverride ? false : entry?.usesDefaultDataPolicy !== false,
     createdAt: entry?.createdAt || "",
     updatedAt: entry?.updatedAt || "",
   };
@@ -6285,6 +6902,21 @@ function normalizeDiscoveryResult(entry) {
   };
 }
 
+function normalizeDiscoveryAuditEvent(entry) {
+  return {
+    id: Number(entry?.id || 0),
+    eventType: String(entry?.eventType || "").trim(),
+    severity: String(entry?.severity || "info").trim(),
+    agentId: String(entry?.agentId || "").trim(),
+    agentName: String(entry?.agentName || "").trim(),
+    actor: String(entry?.actor || "system").trim(),
+    remoteAddr: String(entry?.remoteAddr || "").trim(),
+    message: String(entry?.message || "").trim(),
+    details: entry?.details && typeof entry.details === "object" ? entry.details : {},
+    createdAt: entry?.createdAt || "",
+  };
+}
+
 function normalizeAdminState(rawAdmin = null) {
   if (!rawAdmin) {
     return null;
@@ -6299,6 +6931,9 @@ function normalizeAdminState(rawAdmin = null) {
       : [],
     discoveryResults: Array.isArray(rawAdmin?.discoveryResults)
       ? rawAdmin.discoveryResults.map(normalizeDiscoveryResult)
+      : [],
+    discoveryAuditEvents: Array.isArray(rawAdmin?.discoveryAuditEvents)
+      ? rawAdmin.discoveryAuditEvents.map(normalizeDiscoveryAuditEvent)
       : [],
     users: Array.isArray(rawAdmin?.users)
       ? rawAdmin.users.map((entry) => ({

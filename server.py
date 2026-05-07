@@ -46,9 +46,12 @@ DISCOVERY_SCHEMA = "atlas.discovery.snapshot.v1"
 DISCOVERY_RESULT_STATES = {"new", "matched", "stale", "ignored", "error"}
 DISCOVERY_RUN_STATES = {"running", "completed", "failed", "rejected"}
 DISCOVERY_CREATE_MODES = {"preview_only", "auto_create_services", "auto_create_devices_and_services"}
-DISCOVERY_MAX_BODY_BYTES = 512 * 1024
-DISCOVERY_MAX_ITEMS = 500
-DISCOVERY_MAX_RAW_BYTES = 16 * 1024
+DISCOVERY_AGENT_KINDS = {"host", "local", "hypervisor", "external"}
+DISCOVERY_MAX_BODY_BYTES = int(os.environ.get("ATLAS_DISCOVERY_MAX_BODY_BYTES", str(512 * 1024)))
+DISCOVERY_MAX_ITEMS = int(os.environ.get("ATLAS_DISCOVERY_MAX_ITEMS", "500"))
+DISCOVERY_MAX_RAW_BYTES = int(os.environ.get("ATLAS_DISCOVERY_MAX_RAW_BYTES", str(16 * 1024)))
+DISCOVERY_MAX_PACKETS_PER_RUN = int(os.environ.get("ATLAS_DISCOVERY_MAX_PACKETS_PER_RUN", "128"))
+DISCOVERY_RETRY_AFTER_SECONDS = int(os.environ.get("ATLAS_DISCOVERY_RETRY_AFTER_SECONDS", "30"))
 DISCOVERY_TIMESTAMP_SKEW_SECONDS = 300
 DISCOVERY_NONCE_TTL_SECONDS = 600
 DEFAULT_DISCOVERY_DATA_POLICY = {
@@ -63,17 +66,30 @@ DISCOVERY_CORE_RAW_FIELDS = {
     "address",
     "containerId",
     "fqdn",
+    "battery",
+    "batteryLevel",
+    "deviceClass",
+    "firmware",
+    "firmwareVersion",
     "hostname",
     "ip",
+    "location",
     "mac",
     "macAddress",
     "mac_address",
+    "manufacturer",
+    "model",
     "node",
     "primaryIp",
     "primary_ip",
+    "protocol",
+    "room",
+    "rssi",
+    "signal",
     "proxmoxType",
     "type",
     "uid",
+    "vendor",
     "vmid",
 }
 DISCOVERY_RUNTIME_RAW_FIELDS = {
@@ -262,6 +278,7 @@ CREATE TABLE IF NOT EXISTS discovery_agents (
     create_mode TEXT NOT NULL DEFAULT 'preview_only'
         CHECK (create_mode IN ('preview_only', 'auto_create_services', 'auto_create_devices_and_services')),
     linked_host_device_id TEXT NOT NULL DEFAULT '',
+    data_policy TEXT NOT NULL DEFAULT '',
     last_seen_at TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',
     last_remote_addr TEXT NOT NULL DEFAULT '',
@@ -301,18 +318,22 @@ CREATE TABLE IF NOT EXISTS discovery_results (
 CREATE TABLE IF NOT EXISTS discovery_runs (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
+    external_run_id TEXT NOT NULL DEFAULT '',
     schema TEXT NOT NULL DEFAULT 'atlas.discovery.snapshot.v1',
     source TEXT NOT NULL DEFAULT '',
+    sources TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'running'
         CHECK (status IN ('running', 'completed', 'failed', 'rejected')),
     started_at TEXT NOT NULL,
     finished_at TEXT NOT NULL DEFAULT '',
+    packet_count INTEGER NOT NULL DEFAULT 0,
     found_count INTEGER NOT NULL DEFAULT 0,
     created_count INTEGER NOT NULL DEFAULT 0,
     updated_count INTEGER NOT NULL DEFAULT 0,
     stale_count INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
     remote_addr TEXT NOT NULL DEFAULT '',
+    seen_source_ids TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES discovery_agents(id) ON DELETE CASCADE
 );
@@ -324,6 +345,19 @@ CREATE TABLE IF NOT EXISTS discovery_nonces (
     expires_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, nonce),
     FOREIGN KEY (agent_id) REFERENCES discovery_agents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discovery_audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    agent_id TEXT NOT NULL DEFAULT '',
+    agent_name TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL DEFAULT 'system',
+    remote_addr TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    details TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_subnets_network_int ON subnets(network_int);
@@ -343,6 +377,8 @@ CREATE INDEX IF NOT EXISTS idx_discovery_results_last_seen ON discovery_results(
 CREATE INDEX IF NOT EXISTS idx_discovery_runs_agent_id ON discovery_runs(agent_id);
 CREATE INDEX IF NOT EXISTS idx_discovery_runs_started_at ON discovery_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_discovery_nonces_expires_at ON discovery_nonces(expires_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_audit_created_at ON discovery_audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovery_audit_agent_id ON discovery_audit_events(agent_id);
 """
 
 SUBSCRIBERS: set[queue.Queue[str]] = set()
@@ -370,10 +406,16 @@ def create_id() -> str:
 
 
 class RequestError(Exception):
-    def __init__(self, status: HTTPStatus, message: str) -> None:
+    def __init__(
+        self,
+        status: HTTPStatus,
+        message: str,
+        headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.headers = headers or []
 
 
 def hash_password(password: str, *, salt: str | None = None) -> str:
@@ -787,9 +829,15 @@ def ensure_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "devices", "access_port", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "ports", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "discovery_agents", "data_policy", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "discovery_results", "received_fields", "TEXT NOT NULL DEFAULT '[]'")
     ensure_column(connection, "discovery_results", "accepted_fields", "TEXT NOT NULL DEFAULT '[]'")
     ensure_column(connection, "discovery_results", "visible_fields", "TEXT NOT NULL DEFAULT '[]'")
+    ensure_column(connection, "discovery_runs", "external_run_id", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "discovery_runs", "sources", "TEXT NOT NULL DEFAULT '[]'")
+    ensure_column(connection, "discovery_runs", "packet_count", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(connection, "discovery_runs", "seen_source_ids", "TEXT NOT NULL DEFAULT '{}'")
+    connection.execute("UPDATE discovery_agents SET kind = 'host' WHERE kind = 'network'")
     connection.execute("UPDATE devices SET source = '' WHERE source = 'manual'")
 
 
@@ -917,6 +965,9 @@ def ensure_db() -> None:
         ensure_migrations(connection)
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_subnets_access_group_id ON subnets(access_group_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discovery_runs_external_run_id ON discovery_runs(agent_id, external_run_id)"
         )
         connection.execute(
             """
@@ -1058,6 +1109,7 @@ def discovery_agent_from_row(row: sqlite3.Row) -> dict:
         allowed_cidrs = []
     if not isinstance(allowed_cidrs, list):
         allowed_cidrs = []
+    raw_data_policy = str(row["data_policy"] or "").strip()
 
     return {
         "id": row["id"],
@@ -1072,6 +1124,8 @@ def discovery_agent_from_row(row: sqlite3.Row) -> dict:
         "lastRemoteAddr": row["last_remote_addr"] or "",
         "lastRejectedAt": row["last_rejected_at"] or "",
         "lastRejectReason": row["last_reject_reason"] or "",
+        "dataPolicyOverride": normalize_discovery_data_policy(raw_data_policy) if raw_data_policy else None,
+        "usesDefaultDataPolicy": not bool(raw_data_policy),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -1127,6 +1181,21 @@ def discovery_result_from_row(row: sqlite3.Row) -> dict:
         "visibleRaw": visible_raw,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+    }
+
+
+def discovery_audit_event_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "eventType": row["event_type"],
+        "severity": row["severity"],
+        "agentId": row["agent_id"] or "",
+        "agentName": row["agent_name"] or "",
+        "actor": row["actor"] or "system",
+        "remoteAddr": row["remote_addr"] or "",
+        "message": row["message"] or "",
+        "details": decode_json_object(row["details"] or "{}"),
+        "createdAt": row["created_at"],
     }
 
 
@@ -1186,6 +1255,59 @@ def list_discovery_results(connection: sqlite3.Connection) -> list[dict]:
             """
         )
     ]
+
+
+def list_discovery_audit_events(connection: sqlite3.Connection, limit: int = 80) -> list[dict]:
+    return [
+        discovery_audit_event_from_row(row)
+        for row in connection.execute(
+            """
+            SELECT *
+            FROM discovery_audit_events
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    ]
+
+
+def record_discovery_audit_event(
+    connection: sqlite3.Connection,
+    event_type: str,
+    *,
+    severity: str = "info",
+    agent_id: str = "",
+    agent_name: str = "",
+    actor: str = "system",
+    remote_addr: str = "",
+    message: str = "",
+    details: dict | None = None,
+) -> None:
+    normalized_details = details if isinstance(details, dict) else {}
+
+    def short_text(value: object, max_length: int) -> str:
+        return str(value or "").strip()[:max_length]
+
+    connection.execute(
+        """
+        INSERT INTO discovery_audit_events (
+            event_type, severity, agent_id, agent_name, actor, remote_addr,
+            message, details, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            short_text(event_type, 80) or "discovery_event",
+            short_text(severity, 24) or "info",
+            short_text(agent_id, 80),
+            short_text(agent_name, 120),
+            short_text(actor, 120) or "system",
+            short_text(remote_addr, 128),
+            short_text(message, 240),
+            json.dumps(normalized_details, ensure_ascii=False, sort_keys=True),
+            utc_now_iso(),
+        ),
+    )
 
 
 def get_discovery_result_row(connection: sqlite3.Connection, result_id: str) -> sqlite3.Row:
@@ -1267,6 +1389,34 @@ def list_app_settings_rows(connection: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def list_discovery_agent_backup_rows(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "kind": row["kind"],
+            "enabled": bool(row["enabled"]),
+            "allowedCidrs": decode_json_list(row["allowed_cidrs"] or "[]"),
+            "createMode": row["create_mode"],
+            "linkedHostDeviceId": row["linked_host_device_id"] or "",
+            "dataPolicyOverride": normalize_discovery_data_policy(row["data_policy"]) if str(row["data_policy"] or "").strip() else None,
+            "usesDefaultDataPolicy": not bool(str(row["data_policy"] or "").strip()),
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "tokenRequired": True,
+        }
+        for row in connection.execute(
+            """
+            SELECT
+                id, name, kind, enabled, allowed_cidrs, create_mode,
+                linked_host_device_id, data_policy, created_at, updated_at
+            FROM discovery_agents
+            ORDER BY name COLLATE NOCASE ASC, created_at ASC
+            """
+        )
+    ]
+
+
 def export_backup(connection: sqlite3.Connection, include: dict | None = None) -> dict:
     include = include or {}
     include_inventory = bool(include.get("inventory", True))
@@ -1274,6 +1424,7 @@ def export_backup(connection: sqlite3.Connection, include: dict | None = None) -
     include_system = bool(include.get("system", True))
     include_access = bool(include.get("access", True))
     include_preferences = bool(include.get("preferences", True))
+    include_discovery = bool(include.get("discovery", True))
 
     payload = {
         "kind": "atlas-backup",
@@ -1341,7 +1492,90 @@ def export_backup(connection: sqlite3.Connection, include: dict | None = None) -
             "userSettings": list_user_settings_rows(connection),
         }
 
+    if include_discovery:
+        payload["sections"]["discovery"] = {
+            "agents": list_discovery_agent_backup_rows(connection),
+            "secretPolicy": "tokens-not-exported",
+            "restoreNote": "Restored agents are disabled and require token rotation.",
+        }
+
     return payload
+
+
+def import_discovery_agent_definitions(connection: sqlite3.Connection, agents: list, actor: str) -> int:
+    restored_count = 0
+    now = utc_now_iso()
+    valid_host_ids = {
+        row["id"]
+        for row in connection.execute("SELECT id FROM devices")
+    }
+    seen_agent_ids: set[str] = set()
+    for raw_agent in agents:
+        if not isinstance(raw_agent, dict):
+            continue
+        agent_id = normalize_optional_text(raw_agent.get("id") or create_id(), 80, "agentId") or create_id()
+        if agent_id in seen_agent_ids:
+            continue
+        seen_agent_ids.add(agent_id)
+        name = normalize_optional_text(raw_agent.get("name"), 80, "name")
+        if not name:
+            continue
+        kind = normalize_slug_value(raw_agent.get("kind"), default="host")
+        allowed_cidrs = normalize_allowed_cidrs(raw_agent.get("allowedCidrs"))
+        create_mode = normalize_discovery_create_mode(raw_agent.get("createMode"))
+        data_policy = ""
+        if not bool(raw_agent.get("usesDefaultDataPolicy", True)):
+            data_policy = json.dumps(
+                normalize_discovery_data_policy(raw_agent.get("dataPolicyOverride") or raw_agent.get("dataPolicy")),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        linked_host_device_id = normalize_optional_text(raw_agent.get("linkedHostDeviceId"), 80, "linkedHostDeviceId")
+        if linked_host_device_id not in valid_host_ids:
+            linked_host_device_id = ""
+        created_at = normalize_optional_text(raw_agent.get("createdAt"), 40, "createdAt") or now
+        invalid_token_hash = hash_agent_token(generate_agent_token())
+        connection.execute(
+            """
+            INSERT INTO discovery_agents (
+                id, name, kind, enabled, token_hash, allowed_cidrs, create_mode,
+                linked_host_device_id, data_policy, last_error, last_remote_addr,
+                last_rejected_at, last_reject_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id,
+                name,
+                kind,
+                0,
+                invalid_token_hash,
+                json.dumps(allowed_cidrs, ensure_ascii=False),
+                create_mode,
+                linked_host_device_id,
+                data_policy,
+                "Token required after restore.",
+                "",
+                "",
+                "",
+                created_at,
+                now,
+            ),
+        )
+        record_discovery_audit_event(
+            connection,
+            "agent_restored",
+            severity="warn",
+            agent_id=agent_id,
+            agent_name=name,
+            actor=actor,
+            message="Discovery agent restored without token. Rotate token before enabling.",
+            details={
+                "enabledBeforeBackup": bool(raw_agent.get("enabled")),
+                "tokenRequired": True,
+            },
+        )
+        restored_count += 1
+    return restored_count
 
 
 def import_backup(connection: sqlite3.Connection, backup: dict, actor: str) -> dict:
@@ -1353,6 +1587,7 @@ def import_backup(connection: sqlite3.Connection, backup: dict, actor: str) -> d
         raise ValueError("В backup отсутствуют секции для восстановления.")
 
     replaced_access = False
+    discovery_agents_need_tokens = 0
 
     with connection:
         if "inventory" in sections:
@@ -1485,11 +1720,33 @@ def import_backup(connection: sqlite3.Connection, backup: dict, actor: str) -> d
                     ),
                 )
 
+        if "discovery" in sections:
+            discovery = sections.get("discovery") or {}
+            connection.execute("DELETE FROM discovery_nonces")
+            connection.execute("DELETE FROM discovery_runs")
+            connection.execute("DELETE FROM discovery_results")
+            connection.execute("DELETE FROM discovery_agents")
+            restored_count = import_discovery_agent_definitions(
+                connection,
+                discovery.get("agents") if isinstance(discovery.get("agents"), list) else [],
+                actor,
+            )
+            discovery_agents_need_tokens = restored_count
+            record_discovery_audit_event(
+                connection,
+                "agents_restored",
+                severity="warn",
+                actor=actor,
+                message="Discovery agent definitions restored. Tokens were not restored.",
+                details={"restored": restored_count, "tokensRestored": False},
+            )
+
     bump_revision("backup-imported", {"entity": "backup"})
     signal_background_scanner(run_scan=True)
     return {
         "status": "ok",
         "requiresReauth": replaced_access,
+        "discoveryAgentsNeedTokens": discovery_agents_need_tokens,
     }
 
 
@@ -1755,6 +2012,7 @@ def load_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
             "accessGroups": all_access_groups,
             "discoveryAgents": list_discovery_agents(connection),
             "discoveryResults": list_discovery_results(connection),
+            "discoveryAuditEvents": list_discovery_audit_events(connection),
         } if is_admin(user) else None,
         "meta": {
             "revision": get_current_revision(),
@@ -1968,6 +2226,13 @@ def get_discovery_data_policy(connection: sqlite3.Connection | None = None) -> d
         return resolve_policy(temporary_connection)
 
 
+def get_effective_discovery_agent_policy(connection: sqlite3.Connection, agent: dict) -> dict:
+    override = agent.get("dataPolicyOverride")
+    if isinstance(override, dict):
+        return normalize_discovery_data_policy(override)
+    return get_discovery_data_policy(connection)
+
+
 def load_settings(connection: sqlite3.Connection) -> dict:
     return {
         "scanIntervalSeconds": get_scan_interval_seconds(connection),
@@ -1982,7 +2247,7 @@ def load_settings(connection: sqlite3.Connection) -> dict:
     }
 
 
-def update_settings(connection: sqlite3.Connection, payload: dict) -> dict:
+def update_settings(connection: sqlite3.Connection, payload: dict, actor: str = "system") -> dict:
     supported_keys = {"scanIntervalSeconds", "defaultSubnetScanEnabled", "subnetScanSettings", "discoveryDataPolicy"}
     if not any(key in payload for key in supported_keys):
         raise ValueError("Нет поддерживаемых настроек для обновления.")
@@ -2021,7 +2286,14 @@ def update_settings(connection: sqlite3.Connection, payload: dict) -> dict:
             "discovery_data_policy",
             json.dumps(discovery_data_policy, ensure_ascii=False, sort_keys=True),
         )
-        reapply_discovery_data_policy(connection, discovery_data_policy)
+        reapply_default_discovery_data_policy(connection, discovery_data_policy)
+        record_discovery_audit_event(
+            connection,
+            "policy_changed",
+            actor=actor,
+            message="Discovery data policy changed.",
+            details={"policy": discovery_data_policy},
+        )
 
     connection.commit()
     bump_revision(
@@ -2176,6 +2448,8 @@ def normalize_boolean(value: object, default: bool = False) -> bool:
 
 def normalize_discovery_agent_kind(value: object) -> str:
     kind = normalize_slug_value(value, default="host")
+    if kind not in DISCOVERY_AGENT_KINDS:
+        raise ValueError("Некорректный тип агента.")
     if len(kind) > 40:
         raise ValueError("Тип агента слишком длинный.")
     return kind
@@ -2255,7 +2529,7 @@ def normalize_discovery_agent_payload(
     }
 
 
-def create_discovery_agent(connection: sqlite3.Connection, payload: dict) -> dict:
+def create_discovery_agent(connection: sqlite3.Connection, payload: dict, actor: str = "system") -> dict:
     agent_payload = normalize_discovery_agent_payload(connection, payload)
     agent_id = create_id()
     shared_token_agent_id = str(payload.get("sharedTokenAgentId") or "").strip()
@@ -2293,6 +2567,20 @@ def create_discovery_agent(connection: sqlite3.Connection, payload: dict) -> dic
             now,
         ),
     )
+    record_discovery_audit_event(
+        connection,
+        "agent_created",
+        agent_id=agent_id,
+        agent_name=agent_payload["name"],
+        actor=actor,
+        message="Discovery agent created.",
+        details={
+            "kind": agent_payload["kind"],
+            "enabled": agent_payload["enabled"],
+            "createMode": agent_payload["createMode"],
+            "sharedTokenAgentId": shared_token_agent_id,
+        },
+    )
     connection.commit()
     bump_revision("discovery-agent-created", {"agentId": agent_id})
     row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
@@ -2303,7 +2591,7 @@ def create_discovery_agent(connection: sqlite3.Connection, payload: dict) -> dic
     }
 
 
-def update_discovery_agent(connection: sqlite3.Connection, agent_id: str, payload: dict) -> dict:
+def update_discovery_agent(connection: sqlite3.Connection, agent_id: str, payload: dict, actor: str = "system") -> dict:
     row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
     if row is None:
         raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
@@ -2334,13 +2622,87 @@ def update_discovery_agent(connection: sqlite3.Connection, agent_id: str, payloa
             agent_id,
         ),
     )
+    if current["enabled"] != agent_payload["enabled"]:
+        record_discovery_audit_event(
+            connection,
+            "agent_enabled" if agent_payload["enabled"] else "agent_disabled",
+            agent_id=agent_id,
+            agent_name=agent_payload["name"],
+            actor=actor,
+            message="Discovery agent enabled." if agent_payload["enabled"] else "Discovery agent disabled.",
+            details={
+                "previousEnabled": current["enabled"],
+                "enabled": agent_payload["enabled"],
+            },
+        )
+    else:
+        changed_keys = [
+            key for key in ("name", "kind", "allowedCidrs", "createMode", "linkedHostDeviceId")
+            if current.get(key) != agent_payload.get(key)
+        ]
+        if changed_keys:
+            record_discovery_audit_event(
+                connection,
+                "agent_updated",
+                agent_id=agent_id,
+                agent_name=agent_payload["name"],
+                actor=actor,
+                message="Discovery agent settings changed.",
+                details={"changed": changed_keys},
+            )
     connection.commit()
     bump_revision("discovery-agent-updated", {"agentId": agent_id})
     updated_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
     return discovery_agent_from_row(updated_row)
 
 
-def rotate_discovery_agent_token(connection: sqlite3.Connection, agent_id: str) -> dict:
+def update_discovery_agent_data_policy(
+    connection: sqlite3.Connection,
+    agent_id: str,
+    payload: dict,
+    actor: str = "system",
+) -> dict:
+    row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
+
+    use_default = normalize_boolean(payload.get("useDefault"), False)
+    data_policy_value = ""
+    effective_policy = get_discovery_data_policy(connection)
+    if not use_default:
+        effective_policy = normalize_discovery_data_policy(payload.get("dataPolicy"))
+        data_policy_value = json.dumps(effective_policy, ensure_ascii=False, sort_keys=True)
+
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE discovery_agents
+        SET data_policy = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (data_policy_value, now, agent_id),
+    )
+    reapply_discovery_data_policy(connection, effective_policy, agent_id=agent_id)
+    record_discovery_audit_event(
+        connection,
+        "agent_policy_changed",
+        agent_id=agent_id,
+        agent_name=row["name"],
+        actor=actor,
+        message="Discovery agent data policy changed.",
+        details={
+            "useDefault": use_default,
+            "policy": effective_policy,
+        },
+    )
+    connection.commit()
+    bump_revision("discovery-agent-policy-updated", {"agentId": agent_id})
+    updated_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    return discovery_agent_from_row(updated_row)
+
+
+def rotate_discovery_agent_token(connection: sqlite3.Connection, agent_id: str, actor: str = "system") -> dict:
     row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
     if row is None:
         raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
@@ -2359,12 +2721,82 @@ def rotate_discovery_agent_token(connection: sqlite3.Connection, agent_id: str) 
         """,
         (hash_agent_token(token), now, agent_id),
     )
+    record_discovery_audit_event(
+        connection,
+        "token_rotated",
+        agent_id=agent_id,
+        agent_name=row["name"],
+        actor=actor,
+        message="Discovery agent token rotated.",
+    )
     connection.commit()
     bump_revision("discovery-agent-token-rotated", {"agentId": agent_id})
     updated_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
     return {
         "agent": discovery_agent_from_row(updated_row),
         "token": token,
+    }
+
+
+def revoke_discovery_agent_token(connection: sqlite3.Connection, agent_id: str, actor: str = "system") -> dict:
+    row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
+
+    invalid_token = generate_agent_token()
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE discovery_agents
+        SET token_hash = ?,
+            enabled = 0,
+            updated_at = ?,
+            last_error = '',
+            last_rejected_at = '',
+            last_reject_reason = ''
+        WHERE id = ?
+        """,
+        (hash_agent_token(invalid_token), now, agent_id),
+    )
+    record_discovery_audit_event(
+        connection,
+        "token_revoked",
+        severity="warn",
+        agent_id=agent_id,
+        agent_name=row["name"],
+        actor=actor,
+        message="Discovery agent token revoked.",
+    )
+    connection.commit()
+    bump_revision("discovery-agent-token-revoked", {"agentId": agent_id})
+    updated_row = connection.execute("SELECT * FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    return {
+        "agent": discovery_agent_from_row(updated_row),
+        "status": "revoked",
+    }
+
+
+def delete_discovery_agent(connection: sqlite3.Connection, agent_id: str, actor: str = "system") -> dict:
+    row = connection.execute("SELECT id, name FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
+    if row is None:
+        raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
+
+    with connection:
+        record_discovery_audit_event(
+            connection,
+            "agent_deleted",
+            severity="warn",
+            agent_id=agent_id,
+            agent_name=row["name"],
+            actor=actor,
+            message="Discovery agent deleted.",
+        )
+        connection.execute("DELETE FROM discovery_agents WHERE id = ?", (agent_id,))
+    bump_revision("discovery-agent-deleted", {"agentId": agent_id})
+    return {
+        "status": "deleted",
+        "agentId": agent_id,
+        "name": row["name"],
     }
 
 
@@ -2409,6 +2841,10 @@ def reject_discovery_agent_snapshot(
     remote_addr: str,
 ) -> None:
     now = utc_now_iso()
+    agent_row = connection.execute(
+        "SELECT name FROM discovery_agents WHERE id = ?",
+        (agent_id,),
+    ).fetchone()
     connection.execute(
         """
         UPDATE discovery_agents
@@ -2419,6 +2855,16 @@ def reject_discovery_agent_snapshot(
         WHERE id = ?
         """,
         (now, reason[:500], remote_addr, now, agent_id),
+    )
+    record_discovery_audit_event(
+        connection,
+        "snapshot_rejected",
+        severity="warn",
+        agent_id=agent_id,
+        agent_name=agent_row["name"] if agent_row else "",
+        actor="agent",
+        remote_addr=remote_addr,
+        message=reason,
     )
     connection.commit()
 
@@ -2473,7 +2919,7 @@ def normalize_discovery_item(raw_item: object, fallback_source: str, observed_at
     raw_metadata = raw_item.get("raw") if isinstance(raw_item.get("raw"), dict) else {}
     raw_json = canonical_json(raw_metadata)
     if len(raw_json.encode("utf-8")) > DISCOVERY_MAX_RAW_BYTES:
-        raise ValueError("raw metadata discovery item слишком большой.")
+        raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "raw metadata discovery item слишком большой.")
 
     return {
         "source": source,
@@ -2505,16 +2951,19 @@ def normalize_discovery_snapshot_payload(payload: object) -> dict:
     if not isinstance(items, list):
         raise ValueError("Discovery payload должен содержать items.")
     if len(items) > DISCOVERY_MAX_ITEMS:
-        raise ValueError(f"Discovery payload содержит больше {DISCOVERY_MAX_ITEMS} объектов.")
+        raise RequestError(
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            f"Discovery payload содержит больше {DISCOVERY_MAX_ITEMS} объектов.",
+        )
 
     host = payload.get("host") if isinstance(payload.get("host"), dict) else {}
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     host_json = canonical_json(host)
     metadata_json = canonical_json(metadata)
     if len(host_json.encode("utf-8")) > DISCOVERY_MAX_RAW_BYTES:
-        raise ValueError("host inventory discovery payload слишком большой.")
+        raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "host inventory discovery payload слишком большой.")
     if len(metadata_json.encode("utf-8")) > DISCOVERY_MAX_RAW_BYTES:
-        raise ValueError("metadata discovery payload слишком большой.")
+        raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "metadata discovery payload слишком большой.")
 
     return {
         "source": source,
@@ -2576,8 +3025,14 @@ def apply_discovery_data_policy_to_item(item: dict, policy: dict) -> dict:
     return updated_item
 
 
-def reapply_discovery_data_policy(connection: sqlite3.Connection, policy: dict) -> None:
-    rows = connection.execute("SELECT id, raw FROM discovery_results").fetchall()
+def reapply_discovery_data_policy(connection: sqlite3.Connection, policy: dict, agent_id: str = "") -> None:
+    if agent_id:
+        rows = connection.execute(
+            "SELECT id, raw FROM discovery_results WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchall()
+    else:
+        rows = connection.execute("SELECT id, raw FROM discovery_results").fetchall()
     for row in rows:
         accepted_raw = filter_discovery_raw_by_policy(decode_json_object(row["raw"] or "{}"), policy)
         accepted_fields = discovery_raw_field_names(accepted_raw)
@@ -2601,6 +3056,16 @@ def reapply_discovery_data_policy(connection: sqlite3.Connection, policy: dict) 
         )
 
 
+def reapply_default_discovery_data_policy(connection: sqlite3.Connection, policy: dict) -> None:
+    rows = connection.execute(
+        "SELECT id FROM discovery_agents WHERE TRIM(COALESCE(data_policy, '')) = ''"
+    ).fetchall()
+    if not rows:
+        return
+    for row in rows:
+        reapply_discovery_data_policy(connection, policy, agent_id=row["id"])
+
+
 def verify_discovery_timestamp(value: object) -> str:
     timestamp = normalize_optional_text(value, 40, "timestamp")
     if not timestamp:
@@ -2615,6 +3080,71 @@ def verify_discovery_timestamp(value: object) -> str:
     if skew > DISCOVERY_TIMESTAMP_SKEW_SECONDS:
         raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery snapshot timestamp is outside allowed window.")
     return timestamp
+
+
+def normalize_discovery_run_id(value: object) -> str:
+    run_id = normalize_optional_text(value, 80, "runId")
+    if not run_id:
+        return ""
+    allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+    if any(character not in allowed_chars for character in run_id):
+        raise ValueError("Discovery runId содержит недопустимые символы.")
+    return run_id
+
+
+def normalize_discovery_packet_info(value: object, payload_source: str) -> dict:
+    if value is None:
+        return {
+            "source": payload_source,
+            "index": 1,
+            "total": 1,
+        }
+    if not isinstance(value, dict):
+        raise ValueError("Discovery packet metadata должен быть объектом.")
+
+    unknown_keys = sorted(set(value) - {"source", "index", "total"})
+    if unknown_keys:
+        raise ValueError(f"Discovery packet metadata содержит неизвестные поля: {', '.join(unknown_keys[:5])}.")
+
+    packet_source = normalize_slug_value(value.get("source") or payload_source, default=payload_source or "agent")
+    if packet_source != payload_source:
+        raise ValueError("Discovery packet source не совпадает с payload source.")
+    try:
+        packet_index = int(value.get("index", 1))
+        packet_total = int(value.get("total", 1))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Discovery packet index/total должны быть числами.") from error
+    if packet_index < 1 or packet_total < 1 or packet_index > packet_total:
+        raise ValueError("Discovery packet index/total некорректны.")
+    if packet_total > DISCOVERY_MAX_PACKETS_PER_RUN:
+        raise RequestError(
+            HTTPStatus.TOO_MANY_REQUESTS,
+            f"Discovery run содержит больше {DISCOVERY_MAX_PACKETS_PER_RUN} packets.",
+            headers=[("Retry-After", str(DISCOVERY_RETRY_AFTER_SECONDS))],
+        )
+    return {
+        "source": packet_source,
+        "index": packet_index,
+        "total": packet_total,
+    }
+
+
+def decode_seen_source_ids(value: str) -> dict[str, set[str]]:
+    raw_seen = decode_json_object(value)
+    seen: dict[str, set[str]] = {}
+    for source, source_ids in raw_seen.items():
+        if isinstance(source_ids, list):
+            normalized_source = normalize_slug_value(source, default="")
+            if normalized_source:
+                seen[normalized_source] = {str(source_id) for source_id in source_ids if str(source_id)}
+    return seen
+
+
+def encode_seen_source_ids(seen: dict[str, set[str]]) -> str:
+    return json.dumps(
+        {source: sorted(source_ids) for source, source_ids in sorted(seen.items())},
+        ensure_ascii=False,
+    )
 
 
 def update_discovery_linked_records(
@@ -2727,6 +3257,8 @@ def save_discovery_snapshot(
     agent: dict,
     snapshot: dict,
     remote_addr: str,
+    external_run_id: str = "",
+    packet_info: dict | None = None,
 ) -> dict:
     now = utc_now_iso()
     run_id = create_id()
@@ -2735,7 +3267,7 @@ def save_discovery_snapshot(
     created_count = 0
     item_ids: list[str] = []
     seen_source_ids_by_source: dict[str, set[str]] = {}
-    discovery_data_policy = get_discovery_data_policy(connection)
+    discovery_data_policy = get_effective_discovery_agent_policy(connection, agent)
     policy_items = [
         apply_discovery_data_policy_to_item(item, discovery_data_policy)
         for item in snapshot["items"]
@@ -2743,28 +3275,66 @@ def save_discovery_snapshot(
     for item in policy_items:
         seen_source_ids_by_source.setdefault(item["source"], set()).add(item["sourceId"])
     active_sources = get_snapshot_active_sources(snapshot)
+    packet_sources = {source for source in active_sources if source}
+    if snapshot.get("source"):
+        packet_sources.add(snapshot["source"])
+    packet_info = packet_info or {"source": snapshot["source"], "index": 1, "total": 1}
+    is_final_source_packet = int(packet_info.get("index", 1)) >= int(packet_info.get("total", 1))
     with connection:
-        connection.execute(
-            """
-            INSERT INTO discovery_runs (
-                id, agent_id, schema, source, status, started_at, finished_at,
-                found_count, updated_count, remote_addr, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id,
-                agent["id"],
-                DISCOVERY_SCHEMA,
-                snapshot["source"],
-                "completed",
-                now,
-                now,
-                len(policy_items),
-                len(policy_items),
-                remote_addr,
-                now,
-            ),
-        )
+        existing_run = None
+        if external_run_id:
+            existing_run = connection.execute(
+                """
+                SELECT id, sources, packet_count, seen_source_ids
+                FROM discovery_runs
+                WHERE agent_id = ? AND external_run_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (agent["id"], external_run_id),
+            ).fetchone()
+
+        if existing_run is not None:
+            if int(existing_run["packet_count"] or 0) >= DISCOVERY_MAX_PACKETS_PER_RUN:
+                raise RequestError(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    f"Discovery run содержит больше {DISCOVERY_MAX_PACKETS_PER_RUN} packets.",
+                    headers=[("Retry-After", str(DISCOVERY_RETRY_AFTER_SECONDS))],
+                )
+            run_id = existing_run["id"]
+            packet_sources.update(decode_json_list(existing_run["sources"] or "[]"))
+            cumulative_seen_source_ids = decode_seen_source_ids(existing_run["seen_source_ids"] or "{}")
+        else:
+            cumulative_seen_source_ids = {}
+            connection.execute(
+                """
+                INSERT INTO discovery_runs (
+                    id, agent_id, external_run_id, schema, source, sources, status,
+                    started_at, finished_at, packet_count, found_count, updated_count,
+                    remote_addr, seen_source_ids, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    agent["id"],
+                    external_run_id,
+                    DISCOVERY_SCHEMA,
+                    snapshot["source"],
+                    json.dumps(sorted(packet_sources), ensure_ascii=False),
+                    "running",
+                    now,
+                    "",
+                    0,
+                    0,
+                    0,
+                    remote_addr,
+                    "{}",
+                    now,
+                ),
+            )
+
+        for source, source_ids in seen_source_ids_by_source.items():
+            cumulative_seen_source_ids.setdefault(source, set()).update(source_ids)
 
         for item in policy_items:
             host_device_id = item["hostDeviceId"] or agent.get("linkedHostDeviceId", "")
@@ -2846,18 +3416,43 @@ def save_discovery_snapshot(
             updated_count += 1
             item_ids.append(result_id)
 
-        for source in active_sources:
-            stale_count += mark_missing_discovery_results_stale(
-                connection,
-                agent_id=agent["id"],
-                source=source,
-                seen_source_ids=seen_source_ids_by_source.get(source, set()),
-                now=now,
-            )
+        if is_final_source_packet:
+            for source in active_sources:
+                stale_count += mark_missing_discovery_results_stale(
+                    connection,
+                    agent_id=agent["id"],
+                    source=source,
+                    seen_source_ids=cumulative_seen_source_ids.get(source, set()),
+                    now=now,
+                )
 
         connection.execute(
-            "UPDATE discovery_runs SET stale_count = ? WHERE id = ?",
-            (stale_count, run_id),
+            """
+            UPDATE discovery_runs
+            SET status = 'completed',
+                source = ?,
+                sources = ?,
+                finished_at = ?,
+                packet_count = packet_count + 1,
+                found_count = found_count + ?,
+                updated_count = updated_count + ?,
+                stale_count = stale_count + ?,
+                remote_addr = ?,
+                seen_source_ids = ?,
+                error = ''
+            WHERE id = ?
+            """,
+            (
+                snapshot["source"],
+                json.dumps(sorted(packet_sources), ensure_ascii=False),
+                now,
+                len(policy_items),
+                updated_count,
+                stale_count,
+                remote_addr,
+                encode_seen_source_ids(cumulative_seen_source_ids),
+                run_id,
+            ),
         )
 
         connection.execute(
@@ -2875,11 +3470,30 @@ def save_discovery_snapshot(
     created_count = auto_create_discovery_records(connection, agent, item_ids)
     if created_count:
         connection.execute(
-            "UPDATE discovery_runs SET created_count = ? WHERE id = ?",
+            "UPDATE discovery_runs SET created_count = created_count + ? WHERE id = ?",
             (created_count, run_id),
         )
         connection.commit()
 
+    record_discovery_audit_event(
+        connection,
+        "snapshot_accepted",
+        agent_id=agent["id"],
+        agent_name=agent.get("name", ""),
+        actor="agent",
+        remote_addr=remote_addr,
+        message="Discovery snapshot accepted.",
+        details={
+            "runId": run_id,
+            "agentRunId": external_run_id,
+            "source": snapshot["source"],
+            "packet": packet_info,
+            "received": updated_count,
+            "stale": stale_count,
+            "created": created_count,
+        },
+    )
+    connection.commit()
     bump_revision(
         "discovery-snapshot-received",
         {"agentId": agent["id"], "items": updated_count, "stale": stale_count, "created": created_count},
@@ -2887,7 +3501,10 @@ def save_discovery_snapshot(
     return {
         "status": "accepted",
         "runId": run_id,
+        "agentRunId": external_run_id,
         "agentId": agent["id"],
+        "source": snapshot["source"],
+        "packet": packet_info,
         "received": updated_count,
         "stale": stale_count,
         "created": created_count,
@@ -2902,7 +3519,7 @@ def ingest_discovery_snapshot(
 ) -> dict:
     if not isinstance(envelope, dict):
         raise ValueError("Discovery snapshot должен быть объектом.")
-    allowed_keys = {"agentId", "schema", "schemaKey", "timestamp", "nonce", "payload", "signature"}
+    allowed_keys = {"agentId", "schema", "schemaKey", "timestamp", "nonce", "runId", "packet", "payload", "signature"}
     unknown_keys = sorted(set(envelope) - allowed_keys)
     if unknown_keys:
         raise ValueError(f"Discovery snapshot содержит неизвестные поля: {', '.join(unknown_keys[:5])}.")
@@ -2917,9 +3534,9 @@ def ingest_discovery_snapshot(
         raise RequestError(HTTPStatus.UNAUTHORIZED, "Discovery agent is unknown.")
     agent = discovery_agent_from_row(agent_row)
 
-    def reject(status: HTTPStatus, reason: str) -> None:
+    def reject(status: HTTPStatus, reason: str, headers: list[tuple[str, str]] | None = None) -> None:
         reject_discovery_agent_snapshot(connection, agent_id, reason, remote_addr)
-        raise RequestError(status, reason)
+        raise RequestError(status, reason, headers=headers)
 
     if not agent["enabled"]:
         reject(HTTPStatus.FORBIDDEN, "Discovery agent is disabled.")
@@ -2929,7 +3546,7 @@ def ingest_discovery_snapshot(
     try:
         token = get_bearer_token(handler.headers.get("Authorization"))
     except RequestError as error:
-        reject(error.status, error.message)
+        reject(error.status, error.message, headers=error.headers)
     if not hmac.compare_digest(hash_agent_token(token), agent_row["token_hash"]):
         reject(HTTPStatus.UNAUTHORIZED, "Discovery agent token is invalid.")
 
@@ -2941,10 +3558,14 @@ def ingest_discovery_snapshot(
     except ValueError as error:
         reject(HTTPStatus.BAD_REQUEST, str(error))
     except RequestError as error:
-        reject(error.status, error.message)
+        reject(error.status, error.message, headers=error.headers)
     nonce = normalize_optional_text(envelope.get("nonce"), 128, "nonce")
     if not nonce:
         reject(HTTPStatus.BAD_REQUEST, "Discovery snapshot nonce is required.")
+    try:
+        run_id = normalize_discovery_run_id(envelope.get("runId"))
+    except ValueError as error:
+        reject(HTTPStatus.BAD_REQUEST, str(error))
 
     expected_schema_key = hmac_sha256_hex(token, f"schema:{schema}")
     if not hmac.compare_digest(normalize_signature_value(envelope.get("schemaKey")), expected_schema_key):
@@ -2957,6 +3578,10 @@ def ingest_discovery_snapshot(
         "nonce": nonce,
         "payload": payload,
     }
+    if run_id:
+        signature_payload["runId"] = run_id
+    if envelope.get("packet") is not None:
+        signature_payload["packet"] = envelope.get("packet")
     expected_signature = hmac_sha256_hex(token, canonical_json(signature_payload))
     if not hmac.compare_digest(normalize_signature_value(envelope.get("signature")), expected_signature):
         reject(HTTPStatus.UNAUTHORIZED, "Discovery signature is invalid.")
@@ -2966,7 +3591,22 @@ def ingest_discovery_snapshot(
         snapshot = normalize_discovery_snapshot_payload(payload)
     except ValueError as error:
         reject(HTTPStatus.BAD_REQUEST, str(error))
-    return save_discovery_snapshot(connection, agent, snapshot, remote_addr)
+    except RequestError as error:
+        reject(error.status, error.message, headers=error.headers)
+    try:
+        packet_info = normalize_discovery_packet_info(envelope.get("packet"), snapshot["source"])
+    except ValueError as error:
+        reject(HTTPStatus.BAD_REQUEST, str(error))
+    except RequestError as error:
+        reject(error.status, error.message, headers=error.headers)
+    return save_discovery_snapshot(
+        connection,
+        agent,
+        snapshot,
+        remote_addr,
+        external_run_id=run_id,
+        packet_info=packet_info,
+    )
 
 
 def update_discovery_result_state(
@@ -3154,7 +3794,7 @@ def create_discovery_result_record(
                 "accessPort": row["access_port"] or "",
                 "ports": row["ports"] or "",
                 "lastSeenAt": row["last_seen_at"] or now,
-                "note": "Discovery",
+                "note": "Agent",
             },
         )
         created = insert_device(connection, device_payload, actor)
@@ -3194,7 +3834,7 @@ def create_discovery_result_record(
             "accessPort": row["access_port"] or "",
             "ports": row["ports"] or "",
             "lastSeenAt": row["last_seen_at"] or now,
-            "note": "Discovery",
+            "note": "Agent",
         },
     )
     created = insert_device(connection, device_payload, actor)
@@ -4278,7 +4918,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
 
             self.serve_static(parsed.path)
         except RequestError as error:
-            self.send_json(error.status, {"error": error.message})
+            self.send_json(error.status, {"error": error.message}, headers=error.headers)
         except Exception as error:  # noqa: BLE001
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
@@ -4336,19 +4976,34 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.CREATED, create_user(connection, payload))
                     return
                 if parsed.path == "/api/admin/discovery/agents":
-                    require_admin_user(connection, self)
-                    self.send_json(HTTPStatus.CREATED, create_discovery_agent(connection, payload))
+                    admin_user = require_admin_user(connection, self)
+                    self.send_json(
+                        HTTPStatus.CREATED,
+                        create_discovery_agent(connection, payload, resolve_actor(self, payload, admin_user)),
+                    )
                     return
                 if (
                     len([part for part in parsed.path.split("/") if part]) == 6
                     and parsed.path.startswith("/api/admin/discovery/agents/")
                     and parsed.path.endswith("/rotate-token")
                 ):
-                    require_admin_user(connection, self)
+                    admin_user = require_admin_user(connection, self)
                     parts = [part for part in parsed.path.split("/") if part]
                     self.send_json(
                         HTTPStatus.OK,
-                        rotate_discovery_agent_token(connection, parts[4]),
+                        rotate_discovery_agent_token(connection, parts[4], resolve_actor(self, payload, admin_user)),
+                    )
+                    return
+                if (
+                    len([part for part in parsed.path.split("/") if part]) == 6
+                    and parsed.path.startswith("/api/admin/discovery/agents/")
+                    and parsed.path.endswith("/revoke-token")
+                ):
+                    admin_user = require_admin_user(connection, self)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    self.send_json(
+                        HTTPStatus.OK,
+                        revoke_discovery_agent_token(connection, parts[4], resolve_actor(self, payload, admin_user)),
                     )
                     return
                 if (
@@ -4450,7 +5105,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
 
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
         except RequestError as error:
-            self.send_json(error.status, {"error": error.message})
+            self.send_json(error.status, {"error": error.message}, headers=error.headers)
         except ValueError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except sqlite3.IntegrityError as error:
@@ -4469,8 +5124,8 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             with connect_db() as connection:
                 if parsed.path == "/api/settings":
-                    require_admin_user(connection, self)
-                    self.send_json(HTTPStatus.OK, update_settings(connection, payload))
+                    admin_user = require_admin_user(connection, self)
+                    self.send_json(HTTPStatus.OK, update_settings(connection, payload, resolve_actor(self, payload, admin_user)))
                     return
                 if parsed.path == "/api/preferences":
                     user = require_authenticated_user(connection, self)
@@ -4485,12 +5140,32 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.OK, build_session_payload(connection, updated_user))
                     return
                 if (
+                    len([part for part in parsed.path.split("/") if part]) == 6
+                    and parsed.path.startswith("/api/admin/discovery/agents/")
+                    and parsed.path.endswith("/data-policy")
+                ):
+                    admin_user = require_admin_user(connection, self)
+                    parts = [part for part in parsed.path.split("/") if part]
+                    self.send_json(
+                        HTTPStatus.OK,
+                        update_discovery_agent_data_policy(
+                            connection,
+                            parts[4],
+                            payload,
+                            resolve_actor(self, payload, admin_user),
+                        ),
+                    )
+                    return
+                if (
                     len([part for part in parsed.path.split("/") if part]) == 5
                     and parsed.path.startswith("/api/admin/discovery/agents/")
                 ):
-                    require_admin_user(connection, self)
+                    admin_user = require_admin_user(connection, self)
                     parts = [part for part in parsed.path.split("/") if part]
-                    self.send_json(HTTPStatus.OK, update_discovery_agent(connection, parts[4], payload))
+                    self.send_json(
+                        HTTPStatus.OK,
+                        update_discovery_agent(connection, parts[4], payload, resolve_actor(self, payload, admin_user)),
+                    )
                     return
                 if len([part for part in parsed.path.split("/") if part]) == 4 and parsed.path.startswith("/api/admin/"):
                     admin_user = require_admin_user(connection, self)
@@ -4556,7 +5231,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
 
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
         except RequestError as error:
-            self.send_json(error.status, {"error": error.message})
+            self.send_json(error.status, {"error": error.message}, headers=error.headers)
         except ValueError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except sqlite3.IntegrityError as error:
@@ -4579,7 +5254,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                 replace_state(connection, payload, actor)
                 self.send_json(HTTPStatus.OK, load_snapshot(connection, user))
         except RequestError as error:
-            self.send_json(error.status, {"error": error.message})
+            self.send_json(error.status, {"error": error.message}, headers=error.headers)
         except ValueError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except sqlite3.IntegrityError as error:
@@ -4678,6 +5353,17 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                         self.send_json(HTTPStatus.OK, {"status": "deleted"})
                         return
 
+                if (
+                    len(parts) == 5
+                    and parts[0] == "api"
+                    and parts[1] == "admin"
+                    and parts[2] == "discovery"
+                    and parts[3] == "agents"
+                ):
+                    admin_user = require_admin_user(connection, self)
+                    self.send_json(HTTPStatus.OK, delete_discovery_agent(connection, parts[4], resolve_actor(self, user=admin_user)))
+                    return
+
                 if parsed.path == "/api/admin/history":
                     user = require_admin_user(connection, self)
                     clear_history(connection, resolve_actor(self, user=user))
@@ -4686,7 +5372,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
 
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "API endpoint не найден."})
         except RequestError as error:
-            self.send_json(error.status, {"error": error.message})
+            self.send_json(error.status, {"error": error.message}, headers=error.headers)
         except sqlite3.IntegrityError as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": map_integrity_error(error)})
         except Exception as error:  # noqa: BLE001
@@ -4697,7 +5383,7 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
             try:
                 require_authenticated_user(connection, self)
             except RequestError as error:
-                self.send_json(error.status, {"error": error.message})
+                self.send_json(error.status, {"error": error.message}, headers=error.headers)
                 return
 
         self.send_response(HTTPStatus.OK)
@@ -4759,13 +5445,24 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def read_json_body(self, *, max_bytes: int | None = None) -> dict:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as error:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "Content-Length is invalid.") from error
         if content_length <= 0:
             return {}
         if max_bytes is not None and content_length > max_bytes:
-            raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "JSON payload is too large.")
+            raise RequestError(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                f"JSON payload is too large. Limit is {max_bytes} bytes.",
+            )
 
         raw_body = self.rfile.read(content_length)
+        if max_bytes is not None and len(raw_body) > max_bytes:
+            raise RequestError(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                f"JSON payload is too large. Limit is {max_bytes} bytes.",
+            )
         try:
             return json.loads(raw_body.decode("utf-8"))
         except json.JSONDecodeError as error:

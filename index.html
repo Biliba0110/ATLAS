@@ -722,6 +722,10 @@
               <input type="checkbox" id="backup-include-preferences" checked>
               <span data-i18n="backup_section_preferences">Пользовательские настройки</span>
             </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="backup-include-discovery" checked>
+              <span data-i18n="backup_section_discovery">Discovery agents</span>
+            </label>
           </div>
           <button type="button" class="action-button" id="export-backup-button" data-i18n="export_backup_button">Экспорт backup</button>
         </label>
@@ -1140,7 +1144,6 @@
                     <option value="host" data-i18n="discovery_agent_kind_host">Host</option>
                     <option value="local" data-i18n="discovery_agent_kind_local">Local</option>
                     <option value="hypervisor" data-i18n="discovery_agent_kind_hypervisor">Hypervisor</option>
-                    <option value="network" data-i18n="discovery_agent_kind_network">Network</option>
                     <option value="external" data-i18n="discovery_agent_kind_external">External</option>
                   </select>
                 </label>
@@ -1214,6 +1217,68 @@
                 </tbody>
               </table>
             </div>
+
+            <form id="discovery-agent-policy-form" class="result-card result-card--muted discovery-agent-policy-card" hidden>
+              <div class="template-editor-heading">
+                <div>
+                  <p class="helper-title" id="discovery-agent-policy-title" data-i18n="discovery_agent_policy_title">Agent Data Policy</p>
+                  <p class="helper-text helper-text--tight" data-i18n="discovery_agent_policy_note">
+                    Agent policy overrides the global Data Policy only for this agent.
+                  </p>
+                </div>
+              </div>
+
+              <label class="discovery-policy-option discovery-agent-policy-default">
+                <input type="checkbox" id="discovery-agent-policy-use-default" checked>
+                <span>
+                  <span class="setting-title" data-i18n="discovery_agent_policy_use_default_title">Use global default</span>
+                  <span class="setting-note" data-i18n="discovery_agent_policy_use_default_note">Keep this agent synced with the global Data Policy.</span>
+                </span>
+              </label>
+
+              <div class="discovery-policy-grid">
+                <label class="discovery-policy-option">
+                  <input type="checkbox" id="discovery-agent-policy-store-runtime">
+                  <span>
+                    <span class="setting-title" data-i18n="discovery_policy_runtime_title">Runtime metadata</span>
+                    <span class="setting-note" data-i18n="discovery_policy_runtime_note">Image, timestamps, phase/status text and resource counters.</span>
+                  </span>
+                </label>
+                <label class="discovery-policy-option">
+                  <input type="checkbox" id="discovery-agent-policy-store-labels">
+                  <span>
+                    <span class="setting-title" data-i18n="discovery_policy_labels_title">Labels and tags</span>
+                    <span class="setting-note" data-i18n="discovery_policy_labels_note">Docker/Kubernetes labels, selectors, owners and tags.</span>
+                  </span>
+                </label>
+                <label class="discovery-policy-option">
+                  <input type="checkbox" id="discovery-agent-policy-store-network">
+                  <span>
+                    <span class="setting-title" data-i18n="discovery_policy_network_title">Network details</span>
+                    <span class="setting-note" data-i18n="discovery_policy_network_note">Internal IPs, networks, pod IPs, cluster IPs and related data.</span>
+                  </span>
+                </label>
+                <label class="discovery-policy-option">
+                  <input type="checkbox" id="discovery-agent-policy-store-raw">
+                  <span>
+                    <span class="setting-title" data-i18n="discovery_policy_raw_title">Store all raw metadata</span>
+                    <span class="setting-note" data-i18n="discovery_policy_raw_note">For debugging only. May store sensitive or noisy metadata.</span>
+                  </span>
+                </label>
+                <label class="discovery-policy-option">
+                  <input type="checkbox" id="discovery-agent-policy-show-preview">
+                  <span>
+                    <span class="setting-title" data-i18n="discovery_policy_visible_title">Visible in preview</span>
+                    <span class="setting-note" data-i18n="discovery_policy_visible_note">Show accepted metadata summary in the discovery preview.</span>
+                  </span>
+                </label>
+              </div>
+
+              <div class="template-editor-actions">
+                <button type="button" class="action-button action-button--ghost" id="cancel-discovery-agent-policy-button" data-i18n="cancel">Отмена</button>
+                <button type="submit" class="action-button" id="save-discovery-agent-policy-button" data-i18n="discovery_agent_policy_save_button">Сохранить policy агента</button>
+              </div>
+            </form>
 
             <div id="discovery-agent-status" class="result-card result-card--muted"></div>
           </div>
@@ -1292,6 +1357,46 @@
                 </tr>
               </tbody>
             </table>
+          </div>
+
+          <div class="template-editor-card template-editor-card--modal discovery-audit-card">
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="discovery_audit_title">Discovery audit</p>
+                <p class="helper-text helper-text--tight" data-i18n="discovery_audit_note">
+                  Security and ingestion events for agents and snapshots.
+                </p>
+              </div>
+            </div>
+
+            <div class="settings-grid discovery-audit-filters">
+              <label class="setting-card registry-filter-card">
+                <span class="setting-title" data-i18n="discovery_audit_event_filter_label">Event type</span>
+                <select id="discovery-audit-event-filter">
+                  <option value="all" data-i18n="discovery_audit_event_filter_all">All events</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="table-wrap discovery-audit-wrap">
+              <table class="discovery-audit-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="table_when">Когда</th>
+                    <th data-i18n="table_status">Статус</th>
+                    <th data-i18n="table_event">Событие</th>
+                    <th data-i18n="discovery_agents_count">Агент</th>
+                    <th data-i18n="table_who">Кто</th>
+                    <th data-i18n="table_comment">Комментарий</th>
+                  </tr>
+                </thead>
+                <tbody id="discovery-audit-table-body">
+                  <tr class="empty-row">
+                    <td colspan="6" data-i18n="empty_discovery_audit">Discovery audit пока пуст.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
 

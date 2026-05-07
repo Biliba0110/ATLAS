@@ -13,6 +13,7 @@ ATLAS is a self-hosted IPAM and lightweight network inventory for home-labs, sma
 - detects IP conflicts
 - keeps IP change history
 - supports multi-user access with roles and access groups
+- accepts secure discovery snapshots from optional push agents
 - imports and exports data with `JSON`, `CSV`, and full `backup`
 
 ## Quick start
@@ -74,6 +75,30 @@ Recommended practice:
 - enable auto-ping only for subnets reachable from the ATLAS server
 - disable it for remote or isolated networks where `ping` is not reliable
 
+## Dynamic discovery
+
+ATLAS v0.3 adds optional push-agent discovery. ATLAS does not scan networks by default:
+agents collect local inventory and push signed snapshots to ATLAS.
+
+Current agent collectors:
+
+- `host`
+- `docker`
+- `kubernetes`
+- `proxmox`
+
+Discovery is preview-first by default. Records are created only after confirmation or when
+explicit create-on-discovery mode is enabled for a trusted agent.
+
+Agent security:
+
+- tokens are shown once and stored as hashes in ATLAS
+- snapshots use `schemaKey`, signature, timestamp, and nonce checks
+- agents can be restricted by allowed IP/CIDR
+- agent definitions are exported without token secrets
+
+See `agent/README.md` for setup.
+
 ## Import, export, and backup
 
 Supported formats:
@@ -103,6 +128,9 @@ Environment variables:
 - `ATLAS_SCAN_TIMEOUT_MS` — timeout for a single ping, default `1000`
 - `ATLAS_SCAN_CONCURRENCY` — parallel ping workers, default `32`
 - `ATLAS_HISTORY_LIMIT` — history entries returned to the UI, default `200`
+- `ATLAS_DISCOVERY_MAX_BODY_BYTES` — max discovery packet size, default `524288`
+- `ATLAS_DISCOVERY_MAX_ITEMS` — max discovery items per packet, default `500`
+- `ATLAS_DISCOVERY_MAX_RAW_BYTES` — max raw metadata per item, default `16384`
 
 Example:
 

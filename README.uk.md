@@ -13,6 +13,7 @@ ATLAS — self-hosted IPAM і легкий реєстр мережі для home
 - визначає конфлікти IP
 - веде історію змін IP
 - підтримує багатокористувацький доступ з ролями та групами доступу
+- приймає безпечні discovery snapshots від опціональних push-агентів
 - імпортує й експортує дані через `JSON`, `CSV` і повний `backup`
 
 ## Швидкий старт
@@ -70,6 +71,30 @@ python3 server.py
 - вмикати auto-ping лише для тих підмереж, які досяжні з сервера ATLAS
 - вимикати його для віддалених або ізольованих мереж, де `ping` не дає надійного результату
 
+## Динамічне виявлення
+
+У v0.3 ATLAS додає опціональне discovery через push-агентів. ATLAS типово не сканує мережу:
+агенти збирають локальний inventory і надсилають підписані snapshots в ATLAS.
+
+Поточні collector'и агента:
+
+- `host`
+- `docker`
+- `kubernetes`
+- `proxmox`
+
+Типово discovery працює в режимі preview. Записи створюються лише після підтвердження
+або при явно ввімкненому create-on-discovery для довіреного агента.
+
+Безпека агентів:
+
+- token показується один раз і зберігається в ATLAS лише як hash
+- snapshots перевіряються через `schemaKey`, signature, timestamp і nonce
+- для агента можна обмежити allowed IP/CIDR
+- definitions агентів експортуються без token-секретів
+
+Налаштування агента описано в `agent/README.md`.
+
 ## Імпорт, експорт і backup
 
 Підтримувані формати:
@@ -99,6 +124,9 @@ ATLAS зберігає спільний стан у серверній `SQLite`.
 - `ATLAS_SCAN_TIMEOUT_MS` — таймаут одного ping, типово `1000`
 - `ATLAS_SCAN_CONCURRENCY` — паралельність ping, типово `32`
 - `ATLAS_HISTORY_LIMIT` — кількість записів історії для UI, типово `200`
+- `ATLAS_DISCOVERY_MAX_BODY_BYTES` — максимальний розмір discovery packet, типово `524288`
+- `ATLAS_DISCOVERY_MAX_ITEMS` — максимум discovery items в одному packet, типово `500`
+- `ATLAS_DISCOVERY_MAX_RAW_BYTES` — максимум raw metadata на об'єкт, типово `16384`
 
 Приклад:
 

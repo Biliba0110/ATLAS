@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import platform
+import random
 import socket
 import ssl
 import subprocess
@@ -22,6 +23,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib import request
@@ -31,12 +33,27 @@ from urllib.parse import quote, urlencode, urlparse
 
 SCHEMA = "atlas.discovery.snapshot.v1"
 AGENT_VERSION = "0.3-mvp"
+DEFAULT_MAX_ITEMS_PER_PACKET = 450
+DEFAULT_MAX_PACKET_BYTES = 480 * 1024
+DEFAULT_MAX_PACKETS_PER_SOURCE = 32
+DEFAULT_BACKOFF_INITIAL_SECONDS = 30
+DEFAULT_BACKOFF_MAX_SECONDS = 900
+DEFAULT_BACKOFF_JITTER = 0.2
+MIN_MAX_ITEMS_PER_PACKET = 1
+MIN_MAX_PACKET_BYTES = 64 * 1024
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("atlas-agent.json")
 DEFAULT_DOCKER_SOCKETS = [
     "/var/run/docker.sock",
     str(Path.home() / ".docker" / "run" / "docker.sock"),
 ]
 KUBERNETES_SERVICE_ACCOUNT_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
+
+
+class AgentRequestError(RuntimeError):
+    def __init__(self, message: str, *, retry_after: int | None = None, status: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.status = status
 
 
 def utc_now_iso() -> str:
@@ -107,6 +124,26 @@ def normalize_interval(value: Any) -> int:
     return interval
 
 
+def normalize_float(value: Any, default: float, *, minimum: float, maximum: float, key: str) -> float:
+    try:
+        number = float(value if value is not None else default)
+    except (TypeError, ValueError) as error:
+        raise SystemExit(f"Config value '{key}' must be a number.") from error
+    if number < minimum or number > maximum:
+        raise SystemExit(f"Config value '{key}' must be between {minimum} and {maximum}.")
+    return number
+
+
+def normalize_positive_int(value: Any, default: int, *, minimum: int, key: str) -> int:
+    try:
+        number = int(value if value is not None else default)
+    except (TypeError, ValueError) as error:
+        raise SystemExit(f"Config value '{key}' must be an integer.") from error
+    if number < minimum:
+        raise SystemExit(f"Config value '{key}' must be at least {minimum}.")
+    return number
+
+
 def validate_atlas_url(config: dict[str, Any]) -> str:
     atlas_url = require_text(config, "atlas_url").rstrip("/")
     parsed = urlparse(atlas_url)
@@ -116,6 +153,59 @@ def validate_atlas_url(config: dict[str, Any]) -> str:
     if not parsed.netloc:
         raise SystemExit("atlas_url must include host and optional port.")
     return atlas_url
+
+
+def parse_retry_after(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = int(text)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds()))
+    return max(0, seconds)
+
+
+def backoff_delay_seconds(
+    config: dict[str, Any],
+    *,
+    interval: int,
+    failures: int,
+    retry_after: int | None = None,
+) -> int:
+    initial = normalize_positive_int(
+        config.get("backoff_initial_seconds"),
+        DEFAULT_BACKOFF_INITIAL_SECONDS,
+        minimum=1,
+        key="backoff_initial_seconds",
+    )
+    maximum = normalize_positive_int(
+        config.get("backoff_max_seconds"),
+        DEFAULT_BACKOFF_MAX_SECONDS,
+        minimum=initial,
+        key="backoff_max_seconds",
+    )
+    jitter = normalize_float(
+        config.get("backoff_jitter"),
+        DEFAULT_BACKOFF_JITTER,
+        minimum=0.0,
+        maximum=1.0,
+        key="backoff_jitter",
+    )
+    failure_count = max(1, int(failures or 1))
+    exponential = initial * (2 ** min(failure_count - 1, 10))
+    delay = min(max(interval, exponential), maximum)
+    if retry_after is not None:
+        delay = min(max(delay, retry_after), maximum)
+        return max(1, int(delay * (1 + random.uniform(0, jitter))))
+    jitter_factor = 1 + random.uniform(-jitter, jitter)
+    return max(1, int(delay * jitter_factor))
 
 
 def read_machine_identity() -> str:
@@ -1034,10 +1124,9 @@ def collect_proxmox_inventory(config: dict[str, Any], observed_at: str) -> dict[
     }
 
 
-def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
-    collectors = normalize_enabled_collectors(config)
-    source_name = str(config.get("source_name") or "agent").strip() or "agent"
-    payload = {
+def build_source_payload(source: str, collectors: list[str], observed_at: str) -> dict[str, Any]:
+    source_name = str(source or "agent").strip() or "agent"
+    return {
         "source": source_name,
         "observedAt": observed_at,
         "host": {},
@@ -1050,13 +1139,30 @@ def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
         "items": [],
     }
 
+
+def finalize_source_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and not metadata.get("collectorErrors"):
+        metadata.pop("collectorErrors", None)
+    return payload
+
+
+def build_source_payloads(config: dict[str, Any], observed_at: str) -> list[dict[str, Any]]:
+    collectors = normalize_enabled_collectors(config)
+    source_name = str(config.get("source_name") or "agent").strip() or "agent"
+    payloads: list[dict[str, Any]] = []
+
     if "host" in collectors:
+        payload = build_source_payload("host", collectors, observed_at)
         host_inventory = collect_host_inventory("host", observed_at)
         payload["host"] = host_inventory["host"]
         payload["items"].append(host_inventory["item"])
         payload["metadata"]["activeSources"].append("host")
+        payload["metadata"]["sourceName"] = source_name
+        payloads.append(finalize_source_payload(payload))
 
     if "docker" in collectors:
+        payload = build_source_payload("docker", collectors, observed_at)
         try:
             docker_inventory = collect_docker_inventory(config, observed_at)
             payload["items"].extend(docker_inventory["items"])
@@ -1064,8 +1170,10 @@ def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
             payload["metadata"]["activeSources"].append("docker")
         except Exception as error:  # noqa: BLE001
             payload["metadata"]["collectorErrors"]["docker"] = limit_text(error, 300)
+        payloads.append(finalize_source_payload(payload))
 
     if "kubernetes" in collectors:
+        payload = build_source_payload("kubernetes", collectors, observed_at)
         try:
             kubernetes_inventory = collect_kubernetes_inventory(config, observed_at)
             payload["items"].extend(kubernetes_inventory["items"])
@@ -1073,8 +1181,10 @@ def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
             payload["metadata"]["activeSources"].append("kubernetes")
         except Exception as error:  # noqa: BLE001
             payload["metadata"]["collectorErrors"]["kubernetes"] = limit_text(error, 300)
+        payloads.append(finalize_source_payload(payload))
 
     if "proxmox" in collectors:
+        payload = build_source_payload("proxmox", collectors, observed_at)
         try:
             proxmox_inventory = collect_proxmox_inventory(config, observed_at)
             payload["items"].extend(proxmox_inventory["items"])
@@ -1082,23 +1192,53 @@ def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
             payload["metadata"]["activeSources"].append("proxmox")
         except Exception as error:  # noqa: BLE001
             payload["metadata"]["collectorErrors"]["proxmox"] = limit_text(error, 300)
+        payloads.append(finalize_source_payload(payload))
 
-    if not payload["metadata"]["collectorErrors"]:
-        payload["metadata"].pop("collectorErrors", None)
+    return payloads or [finalize_source_payload(build_source_payload(source_name, collectors, observed_at))]
+
+
+def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    payloads = build_source_payloads(config, observed_at)
+    collectors = normalize_enabled_collectors(config)
+    source_name = str(config.get("source_name") or "agent").strip() or "agent"
+    payload = build_source_payload(source_name, collectors, observed_at)
+    for source_payload in payloads:
+        if source_payload.get("host"):
+            payload["host"] = source_payload["host"]
+        payload["items"].extend(source_payload.get("items") or [])
+        metadata = source_payload.get("metadata") if isinstance(source_payload.get("metadata"), dict) else {}
+        for source in metadata.get("activeSources") or []:
+            if source not in payload["metadata"]["activeSources"]:
+                payload["metadata"]["activeSources"].append(source)
+        for key, value in metadata.items():
+            if key in {"agentVersion", "collectors", "activeSources"}:
+                continue
+            if key == "collectorErrors" and isinstance(value, dict):
+                payload["metadata"]["collectorErrors"].update(value)
+            else:
+                payload["metadata"][key] = value
     return payload
 
 
-def build_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+def build_snapshot_packet(config: dict[str, Any], payload: dict[str, Any], timestamp: str, run_id: str) -> dict[str, Any]:
+    packet_info = payload.get("_packet")
+    if not isinstance(packet_info, dict):
+        packet_info = {
+            "source": str(payload.get("source") or "agent"),
+            "index": 1,
+            "total": 1,
+        }
+    payload_for_wire = {key: value for key, value in payload.items() if key != "_packet"}
     agent_id = require_text(config, "agent_id")
     token = require_text(config, "agent_token")
-    timestamp = utc_now_iso()
     nonce = uuid.uuid4().hex
-    payload = build_payload(config, timestamp)
     signature_payload = {
         "schema": SCHEMA,
         "timestamp": timestamp,
         "nonce": nonce,
-        "payload": payload,
+        "runId": run_id,
+        "packet": packet_info,
+        "payload": payload_for_wire,
     }
     return {
         "agentId": agent_id,
@@ -1106,9 +1246,94 @@ def build_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         "schemaKey": hmac_sha256_hex(token, f"schema:{SCHEMA}"),
         "timestamp": timestamp,
         "nonce": nonce,
-        "payload": payload,
+        "runId": run_id,
+        "packet": packet_info,
+        "payload": payload_for_wire,
         "signature": hmac_sha256_hex(token, canonical_json(signature_payload)),
     }
+
+
+def clone_payload_with_items(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    cloned = {
+        "source": payload.get("source") or "agent",
+        "observedAt": payload.get("observedAt") or utc_now_iso(),
+        "host": payload.get("host") if isinstance(payload.get("host"), dict) else {},
+        "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        "items": items,
+    }
+    return cloned
+
+
+def chunk_source_payload(payload: dict[str, Any], max_items: int) -> list[dict[str, Any]]:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    if len(items) <= max_items:
+        return [clone_payload_with_items(payload, items)]
+    chunks = []
+    for start in range(0, len(items), max_items):
+        chunk_items = items[start:start + max_items]
+        chunk = clone_payload_with_items(payload, chunk_items)
+        if start > 0:
+            chunk["host"] = {}
+        chunks.append(chunk)
+    return chunks
+
+
+def prepare_packet_payloads(config: dict[str, Any], timestamp: str, run_id: str) -> list[dict[str, Any]]:
+    max_items = normalize_positive_int(
+        config.get("max_items_per_packet"),
+        DEFAULT_MAX_ITEMS_PER_PACKET,
+        minimum=MIN_MAX_ITEMS_PER_PACKET,
+        key="max_items_per_packet",
+    )
+    max_packet_bytes = normalize_positive_int(
+        config.get("max_packet_bytes"),
+        DEFAULT_MAX_PACKET_BYTES,
+        minimum=MIN_MAX_PACKET_BYTES,
+        key="max_packet_bytes",
+    )
+    max_packets_per_source = normalize_positive_int(
+        config.get("max_packets_per_source"),
+        DEFAULT_MAX_PACKETS_PER_SOURCE,
+        minimum=1,
+        key="max_packets_per_source",
+    )
+    prepared_payloads: list[dict[str, Any]] = []
+    for source_payload in build_source_payloads(config, timestamp):
+        source_chunks = chunk_source_payload(source_payload, max_items)
+        if len(source_chunks) > max_packets_per_source:
+            raise RuntimeError(
+                f"Discovery source {source_payload.get('source') or 'agent'} would produce "
+                f"{len(source_chunks)} packets, above max_packets_per_source={max_packets_per_source}."
+            )
+        total = len(source_chunks)
+        for index, chunk in enumerate(source_chunks, start=1):
+            chunk["_packet"] = {
+                "source": str(chunk.get("source") or "agent"),
+                "index": index,
+                "total": total,
+            }
+            packet = build_snapshot_packet(config, chunk, timestamp, run_id)
+            packet_size = len(canonical_json(packet).encode("utf-8"))
+            if packet_size > max_packet_bytes:
+                raise RuntimeError(
+                    f"Discovery packet for source {chunk['_packet']['source']} is {packet_size} bytes, "
+                    f"above max_packet_bytes={max_packet_bytes}. Lower max_items_per_packet or data policy."
+                )
+            prepared_payloads.append(chunk)
+    return prepared_payloads
+
+
+def build_snapshots(config: dict[str, Any]) -> list[dict[str, Any]]:
+    timestamp = utc_now_iso()
+    run_id = uuid.uuid4().hex
+    return [
+        build_snapshot_packet(config, payload, timestamp, run_id)
+        for payload in prepare_packet_payloads(config, timestamp, run_id)
+    ]
+
+
+def build_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    return build_snapshots(config)[0]
 
 
 def post_snapshot(config: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1130,23 +1355,36 @@ def post_snapshot(config: dict[str, Any], snapshot: dict[str, Any]) -> dict[str,
             response_body = response.read().decode("utf-8")
     except HTTPError as error:
         response_body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"ATLAS rejected snapshot: HTTP {error.code}: {response_body}") from error
+        retry_after = parse_retry_after(error.headers.get("Retry-After") if error.headers else "")
+        retry_note = f" Retry-After: {retry_after}s." if retry_after is not None else ""
+        raise AgentRequestError(
+            f"ATLAS rejected snapshot: HTTP {error.code}:{retry_note} {response_body}",
+            retry_after=retry_after,
+            status=error.code,
+        ) from error
     except URLError as error:
-        raise RuntimeError(f"Could not reach ATLAS: {error}") from error
+        raise AgentRequestError(f"Could not reach ATLAS: {error}") from error
     return json.loads(response_body or "{}")
 
 
 def run_once(config: dict[str, Any], *, print_payload: bool) -> None:
-    snapshot = build_snapshot(config)
+    snapshots = build_snapshots(config)
     if print_payload:
-        print(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(snapshots, ensure_ascii=False, indent=2, sort_keys=True))
         return
-    response = post_snapshot(config, snapshot)
+
+    responses = [post_snapshot(config, snapshot) for snapshot in snapshots]
+    received = sum(int(response.get("received", 0)) for response in responses)
+    created = sum(int(response.get("created", 0)) for response in responses)
+    stale = sum(int(response.get("stale", 0)) for response in responses)
+    run_id = responses[0].get("agentRunId") or snapshots[0].get("runId") if responses else ""
     print(
         "Snapshot accepted: "
-        f"{response.get('received', 0)} received, "
-        f"{response.get('created', 0)} created, "
-        f"{response.get('stale', 0)} stale"
+        f"{len(responses)} packets, "
+        f"{received} received, "
+        f"{created} created, "
+        f"{stale} stale"
+        f"{f', run {run_id}' if run_id else ''}"
     )
 
 
@@ -1165,14 +1403,27 @@ def main() -> int:
         run_once(config, print_payload=True)
         return 0
     interval = normalize_interval(config.get("interval", config.get("interval_seconds", 60)))
+    failures = 0
     while True:
         try:
             run_once(config, print_payload=False)
+            failures = 0
+            next_delay = interval
         except Exception as error:  # noqa: BLE001
+            failures += 1
+            retry_after = error.retry_after if isinstance(error, AgentRequestError) else None
+            next_delay = backoff_delay_seconds(
+                config,
+                interval=interval,
+                failures=failures,
+                retry_after=retry_after,
+            )
             print(f"ATLAS agent error: {error}", file=sys.stderr)
+            if not args.once:
+                print(f"ATLAS agent retry in {next_delay}s after {failures} failure(s).", file=sys.stderr)
         if args.once:
             break
-        time.sleep(interval)
+        time.sleep(next_delay)
     return 0
 
 
