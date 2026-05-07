@@ -1,5 +1,7 @@
 # ATLAS Python Agent MVP
 
+Language versions: [English](README.md) | [Українська](README.uk.md) | [Русский](README.ru.md)
+
 The MVP agent collects local host, Docker, Kubernetes, and Proxmox metadata and pushes signed discovery packets to ATLAS.
 Each collection cycle gets one shared `runId`, then the agent sends separate packets by `source`:
 `host`, `docker`, `kubernetes`, `proxmox`, later more sources. ATLAS groups those packets into one discovery run.
