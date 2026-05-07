@@ -97,7 +97,10 @@ Agent security:
 - agents can be restricted by allowed IP/CIDR
 - agent definitions are exported without token secrets
 
-See `agent/README.md` for setup.
+## Agent documentation
+
+The Python agent setup, config fields, collectors, and security notes are documented in
+[agent/README.md](agent/README.md).
 
 ## Import, export, and backup
 

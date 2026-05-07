@@ -93,7 +93,10 @@ python3 server.py
 - для агента можна обмежити allowed IP/CIDR
 - definitions агентів експортуються без token-секретів
 
-Налаштування агента описано в `agent/README.md`.
+## Документація агента
+
+Налаштування Python-агента, поля конфігурації, collector'и та нотатки з безпеки описані в
+[agent/README.uk.md](agent/README.uk.md).
 
 ## Імпорт, експорт і backup
 
