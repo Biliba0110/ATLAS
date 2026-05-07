@@ -4,7 +4,7 @@
 
 ATLAS — self-hosted IPAM и легкий реестр сети для home-lab, небольших команд и растущих внутренних сетей.
 
-![Превью главной страницы ATLAS](docs/assets/atlas-dashboard-preview.svg)
+![Скриншот главной страницы ATLAS](docs/assets/atlas-dashboard-screenshot.svg)
 
 ## Что делает ATLAS
 

@@ -4,7 +4,7 @@ Language versions: [English](README.md) | [Українська](README.uk.md) |
 
 ATLAS is a self-hosted IPAM and lightweight network inventory for home-labs, small teams, and growing internal networks.
 
-![ATLAS dashboard preview](docs/assets/atlas-dashboard-preview.svg)
+![ATLAS dashboard screenshot](docs/assets/atlas-dashboard-screenshot.svg)
 
 ## What ATLAS does
 
