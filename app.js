@@ -40,6 +40,11 @@ const DEFAULT_DISCOVERY_DATA_POLICY = {
   storeRawMetadata: false,
   showMetadataInPreview: false,
 };
+const DISCOVERY_DEFAULT_SEND_INTERVAL_MS = 60 * 1000;
+const DISCOVERY_UP_GRACE_MS = 20 * 1000;
+const DISCOVERY_DOWN_GRACE_MS = 75 * 1000;
+const UP_INTEGRATION_STATUSES = new Set(["running", "online", "active", "up", "ok", "healthy"]);
+const DOWN_INTEGRATION_STATUSES = new Set(["offline", "down", "dead", "stopped", "stale", "source-missing", "source_missing", "error", "unreachable"]);
 
 const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
   {
@@ -288,14 +293,25 @@ const elements = {
   settingsSections: [...document.querySelectorAll("[data-settings-section]")],
   templateTabButtons: [...document.querySelectorAll("[data-template-tab]")],
   templatePanels: [...document.querySelectorAll("[data-template-panel]")],
+  discoveryTabButtons: [...document.querySelectorAll("[data-discovery-tab]")],
+  discoveryPanels: [...document.querySelectorAll("[data-discovery-panel]")],
   openPasswordModalButton: document.getElementById("open-password-modal-button"),
   passwordModal: document.getElementById("password-modal"),
   passwordModalClose: document.getElementById("password-modal-close"),
   passwordStatus: document.getElementById("password-status"),
+  confirmModal: document.getElementById("confirm-modal"),
+  confirmModalEyebrow: document.getElementById("confirm-modal-eyebrow"),
+  confirmModalTitle: document.getElementById("confirm-modal-title"),
+  confirmModalMessage: document.getElementById("confirm-modal-message"),
+  confirmModalInputWrap: document.getElementById("confirm-modal-input-wrap"),
+  confirmModalInputLabel: document.getElementById("confirm-modal-input-label"),
+  confirmModalInput: document.getElementById("confirm-modal-input"),
+  confirmModalActions: document.getElementById("confirm-modal-actions"),
   viewTabs: [...document.querySelectorAll("[data-view-tab]")],
   pageViews: [...document.querySelectorAll("[data-view]")],
   registrySectionTabs: [...document.querySelectorAll("[data-registry-section-tab]")],
   registrySections: [...document.querySelectorAll("[data-registry-section]")],
+  filterToggleButtons: [...document.querySelectorAll("[data-filter-toggle]")],
   statCards: [...document.querySelectorAll("[data-stat-target]")],
   modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
   openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
@@ -389,6 +405,10 @@ const elements = {
   groupsTableWrap: document.getElementById("groups-table-wrap"),
   devicesTableWrap: document.getElementById("devices-table-wrap"),
   servicesTableWrap: document.getElementById("services-table-wrap"),
+  subnetsListToggleButton: document.getElementById("subnets-list-toggle-button"),
+  groupsListToggleButton: document.getElementById("groups-list-toggle-button"),
+  devicesListToggleButton: document.getElementById("devices-list-toggle-button"),
+  servicesListToggleButton: document.getElementById("services-list-toggle-button"),
   servicesTableBody: document.getElementById("services-table-body"),
   subnetsTableBody: document.getElementById("subnets-table-body"),
   groupsTableBody: document.getElementById("groups-table-body"),
@@ -446,14 +466,28 @@ let activeView = "dashboard";
 let activeRegistrySection = "subnets";
 let activeSettingsSection = "profile";
 let activeTemplateSection = "device-types";
+let activeDiscoverySection = "agents";
 let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
+let showAllServicesInRegistry = false;
 const expandedGroupIds = new Set();
 const expandedDiscoveryResultIds = new Set();
+const collapsedDiscoveryGroupIds = new Set();
+const collapsedFilterPanels = {
+  registry: false,
+  history: false,
+};
+const REGISTRY_VISIBLE_ROWS = {
+  default: 8,
+  filtersCollapsed: 12,
+  expanded: 15,
+};
 let isAuthReady = false;
 let interfaceSettingsBaseline = null;
 let modalScrollY = 0;
+let activeDialogResolver = null;
+let dialogOpenedOverModal = false;
 let activeFieldHelpButton = null;
 let isFieldHelpPinned = false;
 let editingSubnetId = "";
@@ -591,27 +625,59 @@ function getDeviceSourceLogoClass(source) {
   return `source-logo--custom source-logo--tone-${hashSourceTone(normalizedSource)}`;
 }
 
-function isAgentManagedRecord(record) {
-  return Boolean(record?.sourceId || record?.lastSeenAt);
-}
-
 function isGeneratedAgentNote(note) {
   const normalizedNote = normalizeMetadataToken(note, "");
   return normalizedNote === "discovery" || normalizedNote === "agent";
+}
+
+function getDiscoveryResultForRecord(record) {
+  if (!record) {
+    return null;
+  }
+  const results = state.admin?.discoveryResults || [];
+  return results.find((result) => (
+    result.matchedDeviceId === record.id
+    || result.matchedServiceId === record.id
+    || (
+      record.source
+      && record.sourceId
+      && result.source === record.source
+      && result.sourceId === record.sourceId
+    )
+  )) || null;
+}
+
+function getLinkedDiscoveryAgentForHost(record) {
+  if (!record?.id) {
+    return null;
+  }
+  return (state.admin?.discoveryAgents || []).find((agent) => agent.linkedHostDeviceId === record.id) || null;
+}
+
+function isAgentManagedRecord(record) {
+  return Boolean(
+    getDiscoveryResultForRecord(record)
+    || getLinkedDiscoveryAgentForHost(record)
+  );
+}
+
+function hasLiveAgentStatus(record) {
+  return Boolean(getDiscoveryResultForRecord(record) || getLinkedDiscoveryAgentForHost(record));
+}
+
+function getRecordLiveLastSeenAt(record) {
+  const linkedResult = getDiscoveryResultForRecord(record);
+  const linkedAgent = getLinkedDiscoveryAgentForHost(record);
+  return record?.lastSeenAt || linkedResult?.lastSeenAt || linkedAgent?.lastSeenAt || "";
 }
 
 function renderRegistrySourceBadges(record) {
   const isAgentRecord = isAgentManagedRecord(record);
   const originLabel = isAgentRecord ? t("registry_source_agent") : t("registry_source_manual");
   const originVariant = isAgentRecord ? "info" : "muted";
-  const source = normalizeMetadataToken(record?.source, "");
-  const sourceLabel = source ? getDeviceSourceLabel(source) : "";
   const badges = [
     `<span class="registry-source-badge registry-source-badge--${originVariant}">${escapeHtml(originLabel)}</span>`,
   ];
-  if (isAgentRecord && sourceLabel) {
-    badges.push(`<span class="registry-source-badge">${escapeHtml(sourceLabel)}</span>`);
-  }
   return `<div class="registry-source-badges">${badges.join("")}</div>`;
 }
 
@@ -635,8 +701,22 @@ function getIntegrationStatusLabel(status) {
   if (!normalizedStatus) {
     return "";
   }
-  const key = `device_integration_status_${normalizedStatus}`;
+  const key = `device_integration_status_${normalizedStatus.replaceAll("-", "_")}`;
   return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedStatus);
+}
+
+function getIntegrationStatusVariant(status) {
+  const normalizedStatus = normalizeMetadataToken(status, "");
+  if (UP_INTEGRATION_STATUSES.has(normalizedStatus)) {
+    return "ok";
+  }
+  if (normalizedStatus === "offline" || normalizedStatus === "down" || normalizedStatus === "dead" || normalizedStatus === "unreachable") {
+    return "danger";
+  }
+  if (normalizedStatus === "stopped" || normalizedStatus === "stale" || normalizedStatus === "source-missing" || normalizedStatus === "source_missing" || normalizedStatus === "pending" || normalizedStatus === "wait") {
+    return "warn";
+  }
+  return "info";
 }
 
 function getServiceProtocolLabel(protocol) {
@@ -727,6 +807,7 @@ function applyLocalizedUi() {
   elements.heroSignature.textContent = preferences.settings.customSignature || t("default_signature");
   syncPasswordToggleButtons();
   syncCrudModalCaptions();
+  syncFilterPanelToggles();
 }
 
 function formatRecordsCount(count) {
@@ -749,6 +830,46 @@ function renderRegistryComment(value) {
     <div class="registry-table__comment" title="${escapeHtml(text)}">
       ${escapeHtml(displayText)}
     </div>
+  `;
+}
+
+function renderDateTimeStack(value) {
+  if (!value) {
+    return escapeHtml(t("no_data"));
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return escapeHtml(String(value));
+  }
+
+  const locale = DATE_LOCALES[getLanguage()] || DATE_LOCALES.ru;
+  const datePart = new Intl.DateTimeFormat(locale, { dateStyle: "short" }).format(date);
+  const timePart = new Intl.DateTimeFormat(locale, { timeStyle: "medium" }).format(date);
+  return `
+    <span>${escapeHtml(datePart)}</span>
+    <span class="secondary-line mono">${escapeHtml(timePart)}</span>
+  `;
+}
+
+function renderServicePorts(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return escapeHtml(t("no_data"));
+  }
+
+  const ports = text
+    .split(/[,;\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (ports.length <= 1) {
+    return escapeHtml(text);
+  }
+
+  return `
+    <span class="service-table__port-stack">
+      ${ports.map((port) => `<span>${escapeHtml(port)}</span>`).join("")}
+    </span>
   `;
 }
 
@@ -910,6 +1031,7 @@ function bindEvents() {
       }
     });
   });
+  elements.confirmModalActions?.addEventListener("click", handleDialogActionClick);
   elements.subnetSelect.addEventListener("change", handleDeviceSubnetChange);
   elements.serviceHostSelect?.addEventListener("change", handleServiceHostChange);
   bindUnifiedAddFormSelects();
@@ -946,6 +1068,11 @@ function bindEvents() {
       setActiveTemplateSection(button.dataset.templateTab);
     });
   });
+  elements.discoveryTabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveDiscoverySection(button.dataset.discoveryTab);
+    });
+  });
   elements.saveServerSettingsButton.addEventListener("click", handleServerSettingsSave);
   elements.addTemplateRuleButton.addEventListener("click", handleAddTemplateRule);
   elements.templateRulesList.addEventListener("click", handleTemplateRuleListClick);
@@ -979,10 +1106,34 @@ function bindEvents() {
   elements.groupsTableBody.addEventListener("click", handleGroupTableActions);
   elements.devicesTableBody.addEventListener("click", handleDeviceTableActions);
   elements.servicesTableBody?.addEventListener("click", handleServiceListActions);
+  elements.subnetsListToggleButton?.addEventListener("click", () => {
+    showAllSubnetsInRegistry = !showAllSubnetsInRegistry;
+    renderSubnetsTable();
+  });
+  elements.groupsListToggleButton?.addEventListener("click", () => {
+    showAllGroupsInRegistry = !showAllGroupsInRegistry;
+    renderGroupsTable();
+  });
+  elements.devicesListToggleButton?.addEventListener("click", () => {
+    showAllDevicesInRegistry = !showAllDevicesInRegistry;
+    renderDevicesTable();
+  });
+  elements.servicesListToggleButton?.addEventListener("click", () => {
+    showAllServicesInRegistry = !showAllServicesInRegistry;
+    renderServicesList();
+  });
   elements.accessGroupsTableBody?.addEventListener("click", handleAccessGroupTableActions);
   elements.usersTableBody?.addEventListener("click", handleUserAdminTableActions);
   elements.discoveryAgentsTableBody?.addEventListener("click", handleDiscoveryAgentTableActions);
-  elements.resetDiscoveryAgentFormButton?.addEventListener("click", () => prepareDiscoveryAgentForm());
+  elements.resetDiscoveryAgentFormButton?.addEventListener("click", () => {
+    clearDiscoveryAgentConfig();
+    prepareDiscoveryAgentForm();
+  });
+  elements.filterToggleButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleFilterPanel(button.dataset.filterToggle);
+    });
+  });
   elements.discoveryAgentForm?.elements.allowedCidrs?.addEventListener("input", autosizeDiscoveryAllowedCidrs);
   elements.copyDiscoveryAgentConfigButton?.addEventListener("click", copyDiscoveryAgentConfig);
   elements.discoveryAgentPolicyForm?.addEventListener("submit", handleDiscoveryAgentPolicySave);
@@ -2568,6 +2719,10 @@ function closeModal(modalId) {
   if (!modal) {
     return;
   }
+  if (modal.id === "confirm-modal") {
+    resolveAtlasDialog(null);
+    return;
+  }
   if (modal.id === "password-modal" && state.auth?.user?.mustChangePassword && elements.passwordModalClose.hidden) {
     return;
   }
@@ -2589,6 +2744,7 @@ function closeModal(modalId) {
     editingGroupId = "";
   }
   if (modal.id === "settings-modal") {
+    clearDiscoveryAgentConfig();
     restoreInterfaceBaseline();
     syncSettingsForm();
     interfaceSettingsBaseline = null;
@@ -2603,6 +2759,157 @@ function closeModal(modalId) {
 
 function getOpenModal() {
   return elements.modalBackdrops.find((modal) => !modal.hidden) || null;
+}
+
+function getOpenModalExcept(modalId) {
+  return elements.modalBackdrops.find((modal) => modal.id !== modalId && !modal.hidden) || null;
+}
+
+function resolveAtlasDialog(result) {
+  if (!elements.confirmModal) {
+    activeDialogResolver?.(result);
+    activeDialogResolver = null;
+    return;
+  }
+
+  elements.confirmModal.hidden = true;
+  if (!dialogOpenedOverModal && !getOpenModalExcept("confirm-modal")) {
+    document.body.classList.remove("modal-open");
+    document.body.style.top = "";
+    window.scrollTo(0, modalScrollY);
+  }
+  dialogOpenedOverModal = false;
+  const resolver = activeDialogResolver;
+  activeDialogResolver = null;
+  resolver?.(result);
+}
+
+function handleDialogActionClick(event) {
+  const button = event.target.closest("[data-dialog-choice]");
+  if (!button) {
+    return;
+  }
+  resolveAtlasDialog({
+    choice: button.dataset.dialogChoice,
+    inputValue: elements.confirmModalInput?.value || "",
+  });
+}
+
+function showAtlasDialog({
+  title = t("dialog_default_title"),
+  message = "",
+  eyebrow = t("dialog_eyebrow"),
+  inputLabel = "",
+  inputValue = "",
+  inputPlaceholder = "",
+  choices = [],
+} = {}) {
+  if (!elements.confirmModal) {
+    return Promise.resolve(null);
+  }
+
+  if (activeDialogResolver) {
+    resolveAtlasDialog(null);
+  }
+
+  const normalizedChoices = choices.length > 0
+    ? choices
+    : [
+      { value: "cancel", label: t("cancel_button"), variant: "ghost" },
+      { value: "confirm", label: t("confirm_button"), variant: "primary" },
+    ];
+
+  elements.confirmModalEyebrow.textContent = eyebrow;
+  elements.confirmModalTitle.textContent = title;
+  elements.confirmModalMessage.textContent = message;
+  elements.confirmModalInputWrap.hidden = !inputLabel;
+  elements.confirmModalInputLabel.textContent = inputLabel || "";
+  elements.confirmModalInput.value = inputValue || "";
+  elements.confirmModalInput.placeholder = inputPlaceholder || "";
+  elements.confirmModalActions.innerHTML = normalizedChoices.map((choice) => {
+    const variantClass = choice.variant === "danger"
+      ? "action-button--danger"
+      : choice.variant === "primary"
+        ? "action-button--primary"
+        : "action-button--ghost";
+    return `
+      <button
+        type="button"
+        class="action-button ${variantClass}"
+        data-dialog-choice="${escapeHtml(choice.value)}"
+      >
+        ${escapeHtml(choice.label)}
+      </button>
+    `;
+  }).join("");
+
+  dialogOpenedOverModal = Boolean(getOpenModalExcept("confirm-modal"));
+  if (!dialogOpenedOverModal) {
+    modalScrollY = window.scrollY || window.pageYOffset || 0;
+    document.body.style.top = `-${modalScrollY}px`;
+  }
+  elements.confirmModal.hidden = false;
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => {
+    if (inputLabel) {
+      elements.confirmModalInput?.focus();
+      elements.confirmModalInput?.select();
+    } else {
+      elements.confirmModalActions?.querySelector("[data-dialog-choice]")?.focus();
+    }
+  }, 0);
+
+  return new Promise((resolve) => {
+    activeDialogResolver = resolve;
+  });
+}
+
+async function showAtlasConfirm(message, {
+  title = t("dialog_default_title"),
+  confirmLabel = t("confirm_button"),
+  cancelLabel = t("cancel_button"),
+  danger = false,
+} = {}) {
+  const result = await showAtlasDialog({
+    title,
+    message,
+    choices: [
+      { value: "cancel", label: cancelLabel, variant: "ghost" },
+      { value: "confirm", label: confirmLabel, variant: danger ? "danger" : "primary" },
+    ],
+  });
+  return result?.choice === "confirm";
+}
+
+async function showAtlasPrompt(message, {
+  title = t("dialog_default_title"),
+  inputLabel = t("dialog_input_label"),
+  inputValue = "",
+  inputPlaceholder = "",
+  confirmLabel = t("confirm_button"),
+  cancelLabel = t("cancel_button"),
+  danger = false,
+} = {}) {
+  const result = await showAtlasDialog({
+    title,
+    message,
+    inputLabel,
+    inputValue,
+    inputPlaceholder,
+    choices: [
+      { value: "cancel", label: cancelLabel, variant: "ghost" },
+      { value: "confirm", label: confirmLabel, variant: danger ? "danger" : "primary" },
+    ],
+  });
+  return result?.choice === "confirm" ? result.inputValue : null;
+}
+
+async function showAtlasChoice(message, {
+  title = t("dialog_default_title"),
+  choices = [],
+} = {}) {
+  const result = await showAtlasDialog({ title, message, choices });
+  return result?.choice || null;
 }
 
 function handleUserMenuToggle(event) {
@@ -2640,6 +2947,7 @@ function handleDocumentClick(event) {
 }
 
 function openSettingsModal(sectionName = activeSettingsSection) {
+  clearDiscoveryAgentConfig();
   interfaceSettingsBaseline = { ...preferences.settings };
   syncSettingsForm();
   renderTemplateEditor();
@@ -2975,6 +3283,9 @@ function setActiveSettingsSection(sectionName) {
   if (activeSettingsSection === "templates") {
     setActiveTemplateSection(activeTemplateSection);
   }
+  if (activeSettingsSection === "discovery") {
+    setActiveDiscoverySection(activeDiscoverySection);
+  }
 }
 
 function setActiveTemplateSection(sectionName) {
@@ -2991,10 +3302,29 @@ function setActiveTemplateSection(sectionName) {
   });
 }
 
+function setActiveDiscoverySection(sectionName) {
+  const allowedSections = ["agents", "received", "audit"];
+  const resolvedSection = allowedSections.includes(sectionName) ? sectionName : "agents";
+  activeDiscoverySection = resolvedSection;
+
+  elements.discoveryTabButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.discoveryTab === activeDiscoverySection);
+    button.setAttribute("aria-selected", button.dataset.discoveryTab === activeDiscoverySection ? "true" : "false");
+  });
+
+  elements.discoveryPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.discoveryPanel !== activeDiscoverySection;
+  });
+}
+
 function handleGlobalKeydown(event) {
   if (event.key === "Escape") {
     closeLimitedSelect();
     hideFieldHelp(true);
+  }
+  if (event.key === "Escape" && elements.confirmModal && !elements.confirmModal.hidden) {
+    closeModal("confirm-modal");
+    return;
   }
   if (event.key === "Escape" && elements.userMenuDropdown && !elements.userMenuDropdown.hidden) {
     closeUserMenu();
@@ -3095,6 +3425,9 @@ async function refreshState(silent = false, forceRender = false) {
     if (shouldSkipFullRender) {
       state.auth = normalizedSnapshot.auth || state.auth;
       state.settings = normalizedSnapshot.settings;
+      if (hasTimeSensitiveAvailabilityRecords()) {
+        renderLiveData();
+      }
       return true;
     }
 
@@ -3225,6 +3558,7 @@ async function handleDeviceSubmit(event) {
         sourceKind: formData.get("sourceKind") || currentDevice?.sourceKind || "",
         sourceId: formData.get("sourceId") || currentDevice?.sourceId || "",
         integrationStatus: formData.get("integrationStatus") || currentDevice?.integrationStatus || "",
+        integrationStatusChangedAt: currentDevice?.integrationStatusChangedAt || "",
         protocol: formData.get("protocol") || currentDevice?.protocol || "",
         serviceUrl: formData.get("serviceUrl") || currentDevice?.serviceUrl || "",
         ports: formData.get("ports") || currentDevice?.ports || "",
@@ -3293,6 +3627,7 @@ async function handleServiceSubmit(event) {
         sourceKind: currentService?.sourceKind || "",
         sourceId: currentService?.sourceId || "",
         integrationStatus: formData.get("integrationStatus"),
+        integrationStatusChangedAt: currentService?.integrationStatusChangedAt || "",
         protocol: formData.get("protocol") || "http",
         accessPort: formData.get("accessPort"),
         serviceUrl: formData.get("serviceUrl"),
@@ -3532,8 +3867,10 @@ async function handleDiscoveryAgentSubmit(event) {
       showDiscoveryAgentConfig(savedAgent, token);
       setDiscoveryAgentStatus(t("discovery_agent_created_with_token"), "ok");
     } else if (!isEditing && response.sharedTokenAgentId) {
+      clearDiscoveryAgentConfig();
       setDiscoveryAgentStatus(t("discovery_agent_created_shared_token"), "ok");
     } else {
+      clearDiscoveryAgentConfig();
       setDiscoveryAgentStatus(t(isEditing ? "discovery_agent_updated" : "discovery_agent_saved"), "ok");
     }
   } catch (error) {
@@ -3616,7 +3953,11 @@ async function handleAccessGroupTableActions(event) {
     return;
   }
 
-  const confirmed = window.confirm(t("delete_access_group_confirm", { name: accessGroup.name }));
+  const confirmed = await showAtlasConfirm(t("delete_access_group_confirm", { name: accessGroup.name }), {
+    title: t("delete_confirm_title"),
+    confirmLabel: t("delete_row"),
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
@@ -3652,7 +3993,11 @@ async function handleUserAdminTableActions(event) {
     if (!user) {
       return;
     }
-    const newPassword = window.prompt(t("reset_password_prompt", { name: user.username }), "");
+    const newPassword = await showAtlasPrompt(t("reset_password_prompt", { name: user.username }), {
+      title: t("reset_password_title"),
+      inputLabel: t("new_password_label"),
+      confirmLabel: t("save_button"),
+    });
     if (newPassword === null) {
       return;
     }
@@ -3678,8 +4023,13 @@ async function handleUserAdminTableActions(event) {
     }
 
     const nextIsActive = !user.isActive;
-    const confirmed = window.confirm(
-      t(nextIsActive ? "enable_user_confirm" : "disable_user_confirm", { name: user.username })
+    const confirmed = await showAtlasConfirm(
+      t(nextIsActive ? "enable_user_confirm" : "disable_user_confirm", { name: user.username }),
+      {
+        title: t(nextIsActive ? "enable_user_title" : "disable_user_title"),
+        confirmLabel: t(nextIsActive ? "enable_button" : "disable_button"),
+        danger: !nextIsActive,
+      },
     );
     if (!confirmed) {
       return;
@@ -3714,7 +4064,11 @@ async function handleUserAdminTableActions(event) {
     return;
   }
 
-  const deleteConfirmed = window.confirm(t("delete_user_confirm", { name: deleteTarget.username }));
+  const deleteConfirmed = await showAtlasConfirm(t("delete_user_confirm", { name: deleteTarget.username }), {
+    title: t("delete_confirm_title"),
+    confirmLabel: t("delete_row"),
+    danger: true,
+  });
   if (!deleteConfirmed) {
     return;
   }
@@ -3749,6 +4103,7 @@ async function handleDiscoveryAgentTableActions(event) {
     if (!agent) {
       return;
     }
+    clearDiscoveryAgentConfig();
     prepareDiscoveryAgentForm(agent);
     elements.discoveryAgentForm?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
@@ -3761,7 +4116,14 @@ async function handleDiscoveryAgentTableActions(event) {
       return;
     }
     const nextEnabled = !agent.enabled;
-    const confirmed = window.confirm(t(nextEnabled ? "discovery_agent_enable_confirm" : "discovery_agent_disable_confirm", { name: agent.name }));
+    const confirmed = await showAtlasConfirm(
+      t(nextEnabled ? "discovery_agent_enable_confirm" : "discovery_agent_disable_confirm", { name: agent.name }),
+      {
+        title: t(nextEnabled ? "discovery_agent_enable_title" : "discovery_agent_disable_title"),
+        confirmLabel: t(nextEnabled ? "discovery_agent_enable_button" : "discovery_agent_disable_button"),
+        danger: !nextEnabled,
+      },
+    );
     if (!confirmed) {
       return;
     }
@@ -3791,7 +4153,11 @@ async function handleDiscoveryAgentTableActions(event) {
     if (!agent) {
       return;
     }
-    const confirmed = window.confirm(t("discovery_agent_rotate_token_confirm", { name: agent.name }));
+    const confirmed = await showAtlasConfirm(t("discovery_agent_rotate_token_confirm", { name: agent.name }), {
+      title: t("discovery_agent_rotate_token_title"),
+      confirmLabel: t("discovery_agent_rotate_token_button"),
+      danger: true,
+    });
     if (!confirmed) {
       return;
     }
@@ -3815,7 +4181,11 @@ async function handleDiscoveryAgentTableActions(event) {
     if (!agent) {
       return;
     }
-    const confirmed = window.confirm(t("discovery_agent_revoke_token_confirm", { name: agent.name }));
+    const confirmed = await showAtlasConfirm(t("discovery_agent_revoke_token_confirm", { name: agent.name }), {
+      title: t("discovery_agent_revoke_token_title"),
+      confirmLabel: t("discovery_agent_revoke_token_button"),
+      danger: true,
+    });
     if (!confirmed) {
       return;
     }
@@ -3842,12 +4212,20 @@ async function handleDiscoveryAgentTableActions(event) {
     if (!agent) {
       return;
     }
-    const confirmed = window.confirm(t("discovery_agent_delete_confirm", { name: agent.name }));
-    if (!confirmed) {
+    const choice = await showAtlasChoice(t("discovery_agent_delete_confirm", { name: agent.name }), {
+      title: t("discovery_agent_delete_title"),
+      choices: [
+        { value: "cancel", label: t("cancel_button"), variant: "ghost" },
+        { value: "agent", label: t("discovery_agent_delete_only_button"), variant: "danger" },
+        { value: "related", label: t("discovery_agent_delete_related_button"), variant: "danger" },
+      ],
+    });
+    if (!choice || choice === "cancel") {
       return;
     }
     try {
-      await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}`, {
+      const query = choice === "related" ? "?mode=with_related" : "";
+      const result = await apiRequest(`/admin/discovery/agents/${encodeURIComponent(agent.id)}${query}`, {
         method: "DELETE",
       });
       if (editingDiscoveryAgentId === agent.id) {
@@ -3861,7 +4239,12 @@ async function handleDiscoveryAgentTableActions(event) {
         elements.discoveryAgentTokenCard.hidden = true;
       }
       await refreshState(true, true);
-      setDiscoveryAgentStatus(t("discovery_agent_deleted", { name: agent.name }), "ok");
+      setDiscoveryAgentStatus(
+        choice === "related"
+          ? t("discovery_agent_deleted_with_related", { name: agent.name, count: result?.deletedRelatedRecords || 0 })
+          : t("discovery_agent_deleted", { name: agent.name }),
+        "ok",
+      );
     } catch (error) {
       setDiscoveryAgentStatus(error.message, "danger");
     }
@@ -4390,7 +4773,11 @@ async function handleImportFile(event) {
     const parsedJson = file.name.toLowerCase().endsWith(".json") ? JSON.parse(text) : null;
 
     if (parsedJson && parsedJson.kind === "atlas-backup") {
-      const confirmed = window.confirm(t("backup_import_confirm"));
+      const confirmed = await showAtlasConfirm(t("backup_import_confirm"), {
+        title: t("backup_import_title"),
+        confirmLabel: t("import_button"),
+        danger: true,
+      });
       if (!confirmed) {
         return;
       }
@@ -4417,7 +4804,18 @@ async function handleImportFile(event) {
         showToast(t("backup_import_discovery_tokens", { count: result.discoveryAgentsNeedTokens }), true);
       }
     } else {
-      const shouldReplace = window.confirm(t("import_confirm_replace"));
+      const importChoice = await showAtlasChoice(t("import_confirm_replace"), {
+        title: t("import_mode_title"),
+        choices: [
+          { value: "cancel", label: t("cancel_button"), variant: "ghost" },
+          { value: "merge", label: t("import_merge_button"), variant: "primary" },
+          { value: "replace", label: t("import_replace_button"), variant: "danger" },
+        ],
+      });
+      if (!importChoice || importChoice === "cancel") {
+        return;
+      }
+      const shouldReplace = importChoice === "replace";
 
       if (parsedJson) {
         importJson(parsedJson, shouldReplace, state);
@@ -4554,6 +4952,7 @@ function importCsv(text, replace, targetState) {
           sourceKind: row.source_kind || row.sourceKind,
           sourceId: row.source_id || row.sourceId,
           integrationStatus: row.integration_status || row.integrationStatus || row.status,
+          integrationStatusChangedAt: row.integration_status_changed_at || row.integrationStatusChangedAt,
           protocol: row.protocol,
           serviceUrl: row.service_url || row.serviceUrl || row.url,
           accessPort: row.access_port || row.accessPort || row.access,
@@ -4570,11 +4969,21 @@ function importCsv(text, replace, targetState) {
 }
 
 async function clearAllData() {
-  const confirmed = window.confirm(t("clear_confirm"));
+  const confirmed = await showAtlasConfirm(t("clear_confirm"), {
+    title: t("clear_database_title"),
+    confirmLabel: t("clear_database_continue_button"),
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
-  const typedConfirmation = window.prompt(t("clear_database_prompt"));
+  const typedConfirmation = await showAtlasPrompt(t("clear_database_prompt"), {
+    title: t("clear_database_title"),
+    inputLabel: t("clear_database_input_label"),
+    inputPlaceholder: "DELETE",
+    confirmLabel: t("clear_database_button"),
+    danger: true,
+  });
   if (typedConfirmation !== "DELETE") {
     showToast(t("clear_database_cancelled"), true);
     return;
@@ -4592,7 +5001,11 @@ async function clearAllData() {
 }
 
 async function clearHistory() {
-  const confirmed = window.confirm(t("clear_history_confirm"));
+  const confirmed = await showAtlasConfirm(t("clear_history_confirm"), {
+    title: t("clear_history_title"),
+    confirmLabel: t("clear_history_button"),
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
@@ -4673,11 +5086,18 @@ async function handleSubnetTableActions(event) {
 
   const linkedDevices = getInventoryDevices().filter((entry) => entry.subnetId === subnetId).length;
   const linkedGroups = state.groups.filter((entry) => entry.subnetId === subnetId).length;
-  const confirmed = window.confirm(t("delete_subnet_confirm", {
-    name: subnet.name,
-    devices: linkedDevices,
-    groups: linkedGroups,
-  }));
+  const confirmed = await showAtlasConfirm(
+    t("delete_subnet_confirm", {
+      name: subnet.name,
+      devices: linkedDevices,
+      groups: linkedGroups,
+    }),
+    {
+      title: t("delete_confirm_title"),
+      confirmLabel: t("delete_row"),
+      danger: true,
+    },
+  );
 
   if (!confirmed) {
     return;
@@ -4781,7 +5201,11 @@ async function handleGroupTableActions(event) {
     return;
   }
 
-  const confirmed = window.confirm(t("delete_group_confirm", { name: group.name }));
+  const confirmed = await showAtlasConfirm(t("delete_group_confirm", { name: group.name }), {
+    title: t("delete_confirm_title"),
+    confirmLabel: t("delete_row"),
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
@@ -4850,7 +5274,11 @@ async function handleDeviceTableActions(event) {
     return;
   }
 
-  const confirmed = window.confirm(t("delete_device_confirm", { name: device.name }));
+  const confirmed = await showAtlasConfirm(t("delete_device_confirm", { name: device.name }), {
+    title: t("delete_confirm_title"),
+    confirmLabel: t("delete_row"),
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
@@ -4867,6 +5295,13 @@ async function handleDeviceTableActions(event) {
 }
 
 async function handleServiceListActions(event) {
+  const toggleButton = event.target.closest("[data-toggle-services-list]");
+  if (toggleButton) {
+    showAllServicesInRegistry = !showAllServicesInRegistry;
+    renderServicesList();
+    return;
+  }
+
   const copyPrivateUrlButton = event.target.closest("[data-copy-private-service-url]");
   const copyPublicUrlButton = event.target.closest("[data-copy-public-service-url]");
   if (copyPrivateUrlButton || copyPublicUrlButton) {
@@ -4913,7 +5348,11 @@ async function handleServiceListActions(event) {
     return;
   }
 
-  const confirmed = window.confirm(t("delete_service_confirm", { name: service.name }));
+  const confirmed = await showAtlasConfirm(t("delete_service_confirm", { name: service.name }), {
+    title: t("delete_confirm_title"),
+    confirmLabel: t("delete_row"),
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
@@ -5242,10 +5681,10 @@ function hideFieldHelp(force = false) {
 
 function getLimitedSelectVisibleCount(selectElement) {
   if (selectElement === elements.serviceSourceSelect) {
-    return 4;
+    return 3;
   }
   if (selectElement === elements.serviceStatusSelect) {
-    return 5;
+    return 3;
   }
   if (selectElement === elements.serviceHostSelect || selectElement === elements.serviceProtocolSelect) {
     return 7;
@@ -5304,7 +5743,15 @@ function closeLimitedSelect() {
 function renderSubnetsTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
   const canManageAutomation = Boolean(state.auth?.capabilities?.canManageServerSettings);
-  elements.subnetsTableWrap?.classList.toggle("table-wrap--capped", showAllSubnetsInRegistry && state.subnets.length > 5);
+  const shouldShowExpand = syncRegistryListWrap(elements.subnetsTableWrap, state.subnets.length, showAllSubnetsInRegistry);
+  syncRegistryListToggleButton(
+    elements.subnetsListToggleButton,
+    shouldShowExpand,
+    showAllSubnetsInRegistry,
+    "show_all_subnets",
+    "show_less_subnets",
+    state.subnets.length,
+  );
   if (state.subnets.length === 0) {
     elements.subnetsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -5319,10 +5766,7 @@ function renderSubnetsTable() {
   const sortedSubnets = state.subnets
     .slice()
     .sort((left, right) => left.rangeStartInt - right.rangeStartInt);
-  const visibleSubnets = showAllSubnetsInRegistry
-    ? sortedSubnets
-    : sortedSubnets.slice(0, 5);
-  const rows = visibleSubnets
+  const rows = sortedSubnets
     .map((subnet) => {
       const pingVisible = isSubnetPingVisible(subnet);
       const assignedCount = countAssignedInSubnet(subnet);
@@ -5375,27 +5819,21 @@ function renderSubnetsTable() {
       `;
     });
 
-  if (sortedSubnets.length > 5) {
-    rows.push(`
-      <tr class="table-expand-row">
-        <td colspan="8">
-          <button type="button" class="link-button table-expand-button" data-toggle-subnets-list>
-            ${escapeHtml(showAllSubnetsInRegistry
-              ? t("show_less_subnets")
-              : t("show_all_subnets", { count: sortedSubnets.length }))}
-          </button>
-        </td>
-      </tr>
-    `);
-  }
-
   elements.subnetsTableBody.innerHTML = rows.join("");
   elements.subnetsCounter.textContent = formatRecordsCount(sortedSubnets.length);
 }
 
 function renderGroupsTable() {
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
-  elements.groupsTableWrap?.classList.toggle("table-wrap--capped", showAllGroupsInRegistry && state.groups.length > 5);
+  const shouldShowExpand = syncRegistryListWrap(elements.groupsTableWrap, state.groups.length, showAllGroupsInRegistry);
+  syncRegistryListToggleButton(
+    elements.groupsListToggleButton,
+    shouldShowExpand,
+    showAllGroupsInRegistry,
+    "show_all_groups",
+    "show_less_groups",
+    state.groups.length,
+  );
   if (state.groups.length === 0) {
     elements.groupsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -5415,10 +5853,7 @@ function renderGroupsTable() {
       }
       return left.rangeStartInt - right.rangeStartInt;
     });
-  const visibleGroups = showAllGroupsInRegistry
-    ? sortedGroups
-    : sortedGroups.slice(0, 5);
-  const rows = visibleGroups
+  const rows = sortedGroups
     .map((group) => {
       const subnet = state.subnets.find((entry) => entry.id === group.subnetId);
       const pingVisible = isSubnetPingVisible(subnet);
@@ -5496,20 +5931,6 @@ function renderGroupsTable() {
         ` : ""}
       `;
     });
-
-  if (sortedGroups.length > 5) {
-    rows.push(`
-      <tr class="table-expand-row">
-        <td colspan="6">
-          <button type="button" class="link-button table-expand-button" data-toggle-groups-list>
-            ${escapeHtml(showAllGroupsInRegistry
-              ? t("show_less_groups")
-              : t("show_all_groups", { count: sortedGroups.length }))}
-          </button>
-        </td>
-      </tr>
-    `);
-  }
 
   elements.groupsTableBody.innerHTML = rows.join("");
   elements.groupsCounter.textContent = formatRecordsCount(sortedGroups.length);
@@ -5657,6 +6078,217 @@ function showDiscoveryAgentConfig(agent, token) {
   }
 }
 
+function clearDiscoveryAgentConfig() {
+  lastDiscoveryAgentConfig = "";
+  if (elements.discoveryAgentConfigSnippet) {
+    elements.discoveryAgentConfigSnippet.value = "";
+  }
+  if (elements.discoveryAgentTokenCard) {
+    elements.discoveryAgentTokenCard.hidden = true;
+  }
+  if (elements.copyDiscoveryAgentConfigButton) {
+    elements.copyDiscoveryAgentConfigButton.disabled = true;
+  }
+}
+
+function syncFilterPanelToggles() {
+  elements.filterToggleButtons.forEach((button) => {
+    const name = button.dataset.filterToggle;
+    const collapsed = Boolean(collapsedFilterPanels[name]);
+    const content = document.getElementById(`${name}-filters-content`);
+    if (content) {
+      content.hidden = collapsed;
+    }
+    button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    button.textContent = t(collapsed ? "filters_expand_button" : "filters_collapse_button");
+  });
+}
+
+function toggleFilterPanel(name) {
+  if (!name || !(name in collapsedFilterPanels)) {
+    return;
+  }
+  collapsedFilterPanels[name] = !collapsedFilterPanels[name];
+  syncFilterPanelToggles();
+  if (name === "registry") {
+    renderSubnetsTable();
+    renderGroupsTable();
+    renderDevicesTable();
+    renderServicesList();
+  }
+}
+
+function getRegistryCompactVisibleRows() {
+  return collapsedFilterPanels.registry
+    ? REGISTRY_VISIBLE_ROWS.filtersCollapsed
+    : REGISTRY_VISIBLE_ROWS.default;
+}
+
+function syncRegistryListWrap(wrapElement, itemCount, isExpanded) {
+  if (!wrapElement) {
+    return false;
+  }
+  const compactRows = getRegistryCompactVisibleRows();
+  const shouldScroll = itemCount > compactRows;
+  wrapElement.classList.toggle("table-wrap--registry-list", shouldScroll);
+  wrapElement.classList.toggle("table-wrap--filters-collapsed", shouldScroll && collapsedFilterPanels.registry);
+  wrapElement.classList.toggle("table-wrap--expanded", shouldScroll && isExpanded);
+  return shouldScroll;
+}
+
+function syncRegistryListToggleButton(buttonElement, shouldShow, isExpanded, expandKey, collapseKey, count) {
+  if (!buttonElement) {
+    return;
+  }
+  buttonElement.hidden = !shouldShow;
+  if (!shouldShow) {
+    buttonElement.textContent = "";
+    return;
+  }
+  buttonElement.textContent = t(isExpanded ? collapseKey : expandKey, { count });
+}
+
+function timestampAgeMs(value) {
+  if (!value) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const parsed = new Date(value).getTime();
+  if (Number.isNaN(parsed)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Date.now() - parsed;
+}
+
+function hasTimeSensitiveAvailabilityRecords() {
+  return state.devices.some((record) => hasLiveAgentStatus(record))
+    || (state.admin?.discoveryAgents || []).some((agent) => agent.lastSeenAt);
+}
+
+function getAvailabilityLabel(stateValue) {
+  const key = `availability_${normalizeMetadataToken(stateValue, "pending")}`;
+  return TRANSLATIONS[getLanguage()]?.[key] || String(stateValue || "pending").toUpperCase();
+}
+
+function getAgentSendIntervalMs(agent) {
+  const intervalSeconds = Number(agent?.reportedIntervalSeconds || 0);
+  if (Number.isFinite(intervalSeconds) && intervalSeconds >= 15) {
+    return intervalSeconds * 1000;
+  }
+  return DISCOVERY_DEFAULT_SEND_INTERVAL_MS;
+}
+
+function getAvailabilityByAge(value, agent = null) {
+  const age = timestampAgeMs(value);
+  if (!Number.isFinite(age)) {
+    return { state: "pending", variant: "warn", label: getAvailabilityLabel("pending") };
+  }
+  const expected = getAgentSendIntervalMs(agent);
+  if (age <= expected + DISCOVERY_UP_GRACE_MS) {
+    return { state: "up", variant: "ok", label: getAvailabilityLabel("up") };
+  }
+  if (age <= (expected * 2) + DISCOVERY_DOWN_GRACE_MS) {
+    return { state: "pending", variant: "warn", label: getAvailabilityLabel("pending") };
+  }
+  return { state: "down", variant: "danger", label: getAvailabilityLabel("down") };
+}
+
+function getDiscoveryFreshness(value, agent = null) {
+  return getAvailabilityByAge(value, agent);
+}
+
+function getDownTransitionAvailability(value, agent = null) {
+  const age = timestampAgeMs(value);
+  if (!Number.isFinite(age)) {
+    return { state: "pending", variant: "warn", label: getAvailabilityLabel("pending") };
+  }
+  const expected = getAgentSendIntervalMs(agent);
+  if (age <= (expected * 2) + DISCOVERY_DOWN_GRACE_MS) {
+    return { state: "pending", variant: "warn", label: getAvailabilityLabel("pending") };
+  }
+  return { state: "down", variant: "danger", label: getAvailabilityLabel("down") };
+}
+
+function getAgentAvailabilityStatus(record) {
+  if (!hasLiveAgentStatus(record)) {
+    return { state: "manual", variant: "info", label: "" };
+  }
+  const normalizedStatus = normalizeMetadataToken(record.integrationStatus, "");
+  const linkedResult = getDiscoveryResultForRecord(record);
+  const linkedAgent = getDiscoveryAgentForRecord(record);
+  const effectiveLastSeenAt = getRecordLiveLastSeenAt(record);
+  const sourceState = normalizeMetadataToken(linkedResult?.state, "");
+  const transitionAt = (sourceState === "stale" || normalizedStatus === "source-missing" || normalizedStatus === "source_missing")
+    ? linkedResult?.updatedAt || record.integrationStatusChangedAt || effectiveLastSeenAt
+    : record.integrationStatusChangedAt || effectiveLastSeenAt;
+  const isDownStatus = DOWN_INTEGRATION_STATUSES.has(normalizedStatus) || sourceState === "stale" || sourceState === "error";
+
+  if (isDownStatus) {
+    return getDownTransitionAvailability(transitionAt, linkedAgent);
+  }
+  if (UP_INTEGRATION_STATUSES.has(normalizedStatus) || (!normalizedStatus && linkedAgent?.lastSeenAt)) {
+    return getAvailabilityByAge(effectiveLastSeenAt, linkedAgent);
+  }
+  const currentStatus = getAvailabilityByAge(effectiveLastSeenAt, linkedAgent);
+  if (currentStatus.state === "down") {
+    return { state: "down", variant: "danger", label: getAvailabilityLabel("down") };
+  }
+  return { state: "pending", variant: "warn", label: getAvailabilityLabel("pending") };
+}
+
+function getDiscoveryAgentForRecord(record) {
+  const linkedResult = getDiscoveryResultForRecord(record);
+  if (!linkedResult) {
+    return getLinkedDiscoveryAgentForHost(record);
+  }
+  return (state.admin?.discoveryAgents || []).find((agent) => agent.id === linkedResult.agentId) || null;
+}
+
+function renderAgentDisabledBadge(record) {
+  const agent = getDiscoveryAgentForRecord(record);
+  if (!agent || agent.enabled) {
+    return "";
+  }
+  return `
+    <span class="status-badge status-badge--muted" title="${escapeHtml(t("agent_status_tooltip"))}">
+      ${escapeHtml(t("discovery_agent_record_disabled"))}
+    </span>
+  `;
+}
+
+function renderDeviceStatusCell(device, registryStatus) {
+  const registryTitle = t("registry_status_tooltip");
+  const registryBadge = `
+    <span class="status-badge status-badge--${registryStatus.variant}" title="${escapeHtml(registryTitle)}">
+      ${escapeHtml(registryStatus.label)}
+    </span>
+  `;
+  if (!hasLiveAgentStatus(device)) {
+    return registryBadge;
+  }
+
+  const disabledBadge = renderAgentDisabledBadge(device);
+  const availability = getAgentAvailabilityStatus(device);
+  const integrationStatus = normalizeMetadataToken(device.integrationStatus, "");
+  const lastReportedStatus = integrationStatus ? getIntegrationStatusLabel(integrationStatus) : "";
+  const agentTitleParts = [
+    t("agent_status_tooltip"),
+    lastReportedStatus ? t("service_last_reported_status", { status: lastReportedStatus }) : "",
+    getRecordLiveLastSeenAt(device) ? formatDateTime(getRecordLiveLastSeenAt(device)) : "",
+  ].filter(Boolean);
+  const agentBadge = `
+    <span class="status-badge status-badge--${availability.variant}" title="${escapeHtml(agentTitleParts.join(" · "))}">
+      ${escapeHtml(availability.label)}
+    </span>
+  `;
+  return `
+    <div class="table-status-stack">
+      ${registryBadge}
+      ${disabledBadge}
+      ${agentBadge}
+    </div>
+  `;
+}
+
 function renderDiscoveryAgentsTable() {
   if (!elements.discoveryAgentsTableBody) {
     return;
@@ -5677,8 +6309,12 @@ function renderDiscoveryAgentsTable() {
     .slice()
     .sort((left, right) => left.name.localeCompare(right.name, "ru"))
     .map((agent) => {
+      const freshness = agent.enabled
+        ? getDiscoveryFreshness(agent.lastSeenAt, agent)
+        : { state: "disabled", variant: "muted", label: t("discovery_agent_status_disabled") };
       const statusBadges = [
-        `<span class="status-badge status-badge--${agent.enabled ? "ok" : "muted"}">${escapeHtml(agent.enabled ? t("discovery_agent_status_enabled") : t("discovery_agent_status_disabled"))}</span>`,
+        `<span class="status-badge status-badge--${agent.enabled ? "info" : "muted"}">${escapeHtml(agent.enabled ? t("discovery_agent_status_enabled") : t("discovery_agent_status_disabled"))}</span>`,
+        `<span class="status-badge status-badge--${freshness.variant}">${escapeHtml(freshness.label)}</span>`,
       ];
       if (agent.lastRejectReason) {
         statusBadges.push(`<span class="status-badge status-badge--warn">${escapeHtml(t("discovery_agent_status_rejected"))}</span>`);
@@ -5692,6 +6328,11 @@ function renderDiscoveryAgentsTable() {
         : agent.lastRejectedAt
           ? `${t("discovery_agent_last_rejected")}: ${formatDateTime(agent.lastRejectedAt)}`
           : t("no_data");
+      const reportedTiming = [
+        Number(agent.reportedIntervalSeconds) > 0
+          ? t("discovery_agent_reported_interval", { interval: Number(agent.reportedIntervalSeconds) })
+          : "",
+      ].filter(Boolean);
       const policyLabel = agent.usesDefaultDataPolicy
         ? t("discovery_agent_policy_default_short")
         : t("discovery_agent_policy_custom_short");
@@ -5699,7 +6340,6 @@ function renderDiscoveryAgentsTable() {
         <tr>
           <td>
             <strong>${escapeHtml(agent.name)}</strong>
-            <div class="secondary-line mono">${escapeHtml(agent.id)}</div>
             <div class="secondary-line">${escapeHtml(getDiscoveryAgentKindLabel(agent.kind))}</div>
           </td>
           <td>
@@ -5711,7 +6351,10 @@ function renderDiscoveryAgentsTable() {
             <div>${escapeHtml(getDiscoveryCreateModeLabel(agent.createMode))}</div>
             <div class="secondary-line">${escapeHtml(policyLabel)}</div>
           </td>
-          <td class="mono">${escapeHtml(lastSeen)}</td>
+          <td>
+            <div class="mono">${escapeHtml(lastSeen)}</div>
+            ${reportedTiming.length ? `<div class="secondary-line">${escapeHtml(reportedTiming.join(" · "))}</div>` : ""}
+          </td>
           <td>
             <div class="discovery-preview-actions discovery-agents-table__actions">
               <button type="button" class="row-button" data-edit-discovery-agent="${escapeHtml(agent.id)}" ${canManage ? "" : "disabled"}>${escapeHtml(t("edit_row"))}</button>
@@ -5813,6 +6456,62 @@ function renderDiscoveryActions(result) {
   `;
 }
 
+function getDiscoveryPreviewGroup(result) {
+  const hostLabel = result.hostName || result.hostDeviceId || (
+    getDiscoveryTargetKind(result) === "device" && normalizeMetadataToken(result.sourceKind, "") === "host"
+      ? result.name
+      : t("no_binding")
+  );
+  const agentLabel = result.agentName || result.agentId || t("no_data");
+  const keyParts = [
+    result.agentId || result.agentName || "agent",
+    result.hostDeviceId || result.hostName || result.name || "unbound",
+  ];
+  return {
+    key: keyParts.map((part) => String(part || "").trim()).join("::"),
+    hostLabel,
+    agentLabel,
+  };
+}
+
+function renderDiscoveryPreviewRow(result) {
+  const sourceLabel = getDeviceSourceLabel(result.source);
+  const sourceKindLabel = result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data");
+  const sourceId = result.sourceId ? `${t("device_source_id_meta", { id: result.sourceId })}` : "";
+  const metadataSummary = renderDiscoveryMetadataSummary(result);
+  const hostLabel = result.hostName || result.hostDeviceId || t("no_binding");
+  const ports = [result.accessPort, result.ports].filter(Boolean).join(" · ") || t("no_data");
+  const isExpanded = expandedDiscoveryResultIds.has(result.id);
+  return `
+    <tr>
+      <td>
+        <span class="status-badge status-badge--${getDiscoveryStateVariant(result.state)}">
+          ${escapeHtml(getDiscoveryStateLabel(result.state))}
+        </span>
+        <div class="secondary-line">${escapeHtml(getDiscoveryTargetLabel(result))}</div>
+      </td>
+      <td>
+        <strong>${escapeHtml(result.name || t("no_data"))}</strong>
+        <div class="secondary-line">${escapeHtml(sourceKindLabel)}</div>
+      </td>
+      <td>
+        <span class="pill">${escapeHtml(sourceLabel)}</span>
+        <div class="secondary-line">${escapeHtml(sourceId || result.agentName || t("no_data"))}</div>
+        ${metadataSummary ? `<div class="secondary-line">${escapeHtml(metadataSummary)}</div>` : ""}
+      </td>
+      <td>${escapeHtml(hostLabel)}</td>
+      <td><div class="discovery-preview-table__ports mono">${escapeHtml(ports)}</div></td>
+      <td class="mono">${escapeHtml(formatDateTime(result.lastSeenAt || result.updatedAt))}</td>
+      <td>${renderDiscoveryActions(result)}</td>
+    </tr>
+    ${isExpanded ? `
+      <tr class="discovery-details-row">
+        <td colspan="7">${renderDiscoveryDetails(result)}</td>
+      </tr>
+    ` : ""}
+  `;
+}
+
 function renderDiscoveryMetadataSummary(result) {
   const receivedCount = result.receivedFields?.length || 0;
   const acceptedCount = result.acceptedFields?.length || 0;
@@ -5845,6 +6544,18 @@ function findDiscoveryLinkTarget(value) {
 }
 
 async function handleDiscoveryPreviewActions(event) {
+  const groupButton = event.target.closest("[data-toggle-discovery-group]");
+  if (groupButton) {
+    const groupId = groupButton.dataset.toggleDiscoveryGroup || "";
+    if (collapsedDiscoveryGroupIds.has(groupId)) {
+      collapsedDiscoveryGroupIds.delete(groupId);
+    } else {
+      collapsedDiscoveryGroupIds.add(groupId);
+    }
+    renderDiscoveryPreview();
+    return;
+  }
+
   const button = event.target.closest("[data-discovery-action]");
   if (!button) {
     return;
@@ -5869,8 +6580,12 @@ async function handleDiscoveryPreviewActions(event) {
     button.disabled = true;
     if (action === "create-service" || action === "create-device") {
       const isService = action === "create-service";
-      const confirmed = window.confirm(
+      const confirmed = await showAtlasConfirm(
         t(isService ? "discovery_create_service_confirm" : "discovery_create_device_confirm", { name: resultName }),
+        {
+          title: t(isService ? "discovery_create_service_title" : "discovery_create_device_title"),
+          confirmLabel: t(isService ? "discovery_action_create_service" : "discovery_action_create_device"),
+        },
       );
       if (!confirmed) {
         return;
@@ -5880,7 +6595,15 @@ async function handleDiscoveryPreviewActions(event) {
         body: JSON.stringify({ targetType: isService ? "service" : "device" }),
       });
     } else if (action === "link") {
-      const targetValue = window.prompt(t("discovery_link_prompt"));
+      const targetValue = await showAtlasPrompt(t("discovery_link_prompt"), {
+        title: t("discovery_link_title"),
+        inputLabel: t("discovery_link_input_label"),
+        inputPlaceholder: t("discovery_link_input_placeholder"),
+        confirmLabel: t("discovery_action_link"),
+      });
+      if (targetValue === null) {
+        return;
+      }
       const target = findDiscoveryLinkTarget(targetValue);
       if (!target) {
         showToast(t("discovery_link_missing"), true);
@@ -6089,43 +6812,42 @@ function renderDiscoveryPreview() {
     return;
   }
 
-  elements.discoveryResultsTableBody.innerHTML = results.map((result) => {
-    const sourceLabel = getDeviceSourceLabel(result.source);
-    const sourceKindLabel = result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data");
-    const sourceId = result.sourceId ? `${t("device_source_id_meta", { id: result.sourceId })}` : "";
-    const metadataSummary = renderDiscoveryMetadataSummary(result);
-    const hostLabel = result.hostName || result.hostDeviceId || t("no_binding");
-    const ports = [result.accessPort, result.ports].filter(Boolean).join(" · ") || t("no_data");
-    const isExpanded = expandedDiscoveryResultIds.has(result.id);
-    return `
-      <tr>
-        <td>
-          <span class="status-badge status-badge--${getDiscoveryStateVariant(result.state)}">
-            ${escapeHtml(getDiscoveryStateLabel(result.state))}
-          </span>
-          <div class="secondary-line">${escapeHtml(getDiscoveryTargetLabel(result))}</div>
-        </td>
-        <td>
-          <strong>${escapeHtml(result.name || t("no_data"))}</strong>
-          <div class="secondary-line">${escapeHtml(sourceKindLabel)}</div>
-        </td>
-        <td>
-          <span class="pill">${escapeHtml(sourceLabel)}</span>
-          <div class="secondary-line">${escapeHtml(sourceId || result.agentName || t("no_data"))}</div>
-          ${metadataSummary ? `<div class="secondary-line">${escapeHtml(metadataSummary)}</div>` : ""}
-        </td>
-        <td>${escapeHtml(hostLabel)}</td>
-        <td><div class="discovery-preview-table__ports mono">${escapeHtml(ports)}</div></td>
-        <td class="mono">${escapeHtml(formatDateTime(result.lastSeenAt || result.updatedAt))}</td>
-        <td>${renderDiscoveryActions(result)}</td>
-      </tr>
-      ${isExpanded ? `
-        <tr class="discovery-details-row">
-          <td colspan="7">${renderDiscoveryDetails(result)}</td>
+  const groupedResults = new Map();
+  results.forEach((result) => {
+    const group = getDiscoveryPreviewGroup(result);
+    if (!groupedResults.has(group.key)) {
+      groupedResults.set(group.key, { ...group, results: [] });
+    }
+    groupedResults.get(group.key).results.push(result);
+  });
+
+  elements.discoveryResultsTableBody.innerHTML = [...groupedResults.values()]
+    .map((group) => {
+      const isCollapsed = collapsedDiscoveryGroupIds.has(group.key);
+      const groupRows = isCollapsed
+        ? ""
+        : group.results.map((result) => renderDiscoveryPreviewRow(result)).join("");
+      return `
+        <tr class="discovery-group-row">
+          <td colspan="7">
+            <button
+              type="button"
+              class="link-button discovery-group-toggle"
+              data-toggle-discovery-group="${escapeHtml(group.key)}"
+              aria-expanded="${isCollapsed ? "false" : "true"}"
+            >
+              ${escapeHtml(isCollapsed ? "+" : "-")}
+              <strong>${escapeHtml(group.hostLabel)}</strong>
+            </button>
+            <span class="secondary-line">
+              ${escapeHtml(group.agentLabel)} · ${escapeHtml(formatRecordsCount(group.results.length))}
+            </span>
+          </td>
         </tr>
-      ` : ""}
-    `;
-  }).join("");
+        ${groupRows}
+      `;
+    })
+    .join("");
 }
 
 function renderUserAccessGroupOptions(selectedIds = []) {
@@ -6208,7 +6930,15 @@ function renderServicesList() {
   elements.servicesCounter.textContent = hasActiveFilter
     ? formatFilteredCount(services.length, getServiceRecords().length)
     : formatRecordsCount(services.length);
-  elements.servicesTableWrap?.classList.toggle("table-wrap--capped", hasActiveFilter || services.length > 5);
+  const shouldShowExpand = syncRegistryListWrap(elements.servicesTableWrap, services.length, showAllServicesInRegistry);
+  syncRegistryListToggleButton(
+    elements.servicesListToggleButton,
+    shouldShowExpand,
+    showAllServicesInRegistry,
+    "show_all_services",
+    "show_less_services",
+    services.length,
+  );
 
   if (services.length === 0) {
     elements.servicesTableBody.innerHTML = `
@@ -6220,13 +6950,24 @@ function renderServicesList() {
   }
 
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
-  elements.servicesTableBody.innerHTML = services.map((service) => {
+  const rows = services.map((service) => {
     const host = resolveDeviceHost(service);
     const status = service.integrationStatus || "";
+    const hasLiveStatus = hasLiveAgentStatus(service);
+    const availability = getAgentAvailabilityStatus(service);
+    const hasAvailabilityWarning = hasLiveStatus && (availability.state === "pending" || availability.state === "down");
+    const hasManualDisplayStatus = Boolean(status && status !== "pending" && status !== "wait");
+    const effectiveStatusLabel = hasManualDisplayStatus
+      ? getIntegrationStatusLabel(status)
+      : t("registry_source_manual");
+    const effectiveStatusVariant = hasManualDisplayStatus
+      ? getIntegrationStatusVariant(status)
+      : "muted";
+    const agentDisabledBadge = renderAgentDisabledBadge(service);
     const source = service.source || "";
-    const hostLabel = host
-      ? `${host.name} · ${host.ip}`
-      : `${t("device_host_orphan")} · ${service.hostDeviceId || t("no_data")}`;
+    const hostName = host ? host.name : t("device_host_orphan");
+    const hostAddress = host ? host.ip : (service.hostDeviceId || t("no_data"));
+    const hostLabel = `${hostName} · ${hostAddress}`;
     const isOrphan = hasMissingHost(service);
     const protocolLabel = getServiceProtocolLabel(service.protocol || "http");
     const accessPort = getServiceAccessPort(service);
@@ -6240,24 +6981,35 @@ function renderServicesList() {
       : "";
     const sourceDetails = [
       service.sourceKind && service.sourceKind !== "service" ? getDeviceSourceKindLabel(service.sourceKind) : "",
-      service.sourceId,
     ].filter(Boolean);
+    const manualTooltip = escapeHtml(t("registry_source_manual_tooltip"));
+    const statusBadges = hasLiveStatus
+      ? `<span class="status-badge status-badge--${availability.variant}" title="${escapeHtml([t("agent_status_tooltip"), getRecordLiveLastSeenAt(service) ? formatDateTime(getRecordLiveLastSeenAt(service)) : ""].filter(Boolean).join(" · "))}">${escapeHtml(availability.label)}</span>`
+      : `
+        <span class="status-badge status-badge--${effectiveStatusVariant}" ${hasManualDisplayStatus ? "" : `title="${manualTooltip}"`}>
+          ${escapeHtml(effectiveStatusLabel)}
+        </span>
+        ${hasManualDisplayStatus ? `<span class="status-badge status-badge--muted" title="${manualTooltip}">${escapeHtml(t("registry_source_manual"))}</span>` : ""}
+      `;
     const note = service.note && !isGeneratedAgentNote(service.note)
       ? renderRegistryComment(service.note)
-      : "";
+      : renderRegistryComment("");
 
     return `
-      <tr>
+      <tr class="${status === "source_missing" || status === "source-missing" ? "registry-row--source-missing" : ""}">
         <td>
           <div class="service-table__name${sourceLogo ? "" : " service-table__name--plain"}">
             ${sourceLogo}
-            <strong>${escapeHtml(service.name)}</strong>
+            <strong title="${escapeHtml(service.name)}">${escapeHtml(service.name)}</strong>
             ${renderRegistrySourceBadges(service)}
             ${sourceDetails.length ? `<div class="secondary-line">${escapeHtml(sourceDetails.join(" · "))}</div>` : ""}
           </div>
         </td>
         <td>
-          <div>${escapeHtml(hostLabel)}</div>
+          <div class="service-table__host" title="${escapeHtml(hostLabel)}">
+            <span>${escapeHtml(hostName)}</span>
+            <span class="secondary-line mono">${escapeHtml(hostAddress)}</span>
+          </div>
           ${isOrphan ? `<span class="status-badge status-badge--warn">${escapeHtml(t("status_orphan"))}</span>` : ""}
         </td>
         <td>
@@ -6267,13 +7019,16 @@ function renderServicesList() {
           </div>
         </td>
         <td><span class="pill service-table__protocol">${escapeHtml(protocolLabel)}</span></td>
-        <td class="mono service-table__ports">${escapeHtml(accessPort || t("no_data"))}</td>
-        <td class="mono service-table__ports">${escapeHtml(service.ports || t("no_data"))}</td>
+        <td class="mono service-table__ports">${renderServicePorts(accessPort)}</td>
+        <td class="mono service-table__ports">${renderServicePorts(service.ports)}</td>
         <td>
-          <span class="status-badge status-badge--${status === "running" ? "ok" : status ? "warn" : "info"}">${escapeHtml(status ? getIntegrationStatusLabel(status) : getDeviceSourceLabel(source))}</span>
+          <div class="table-status-stack">
+            ${agentDisabledBadge}
+            ${statusBadges}
+          </div>
         </td>
-        <td class="service-table__last-seen">${escapeHtml(service.lastSeenAt ? formatDateTime(service.lastSeenAt) : t("no_data"))}</td>
-        <td>${note}</td>
+        <td class="service-table__last-seen">${renderDateTimeStack(service.lastSeenAt)}</td>
+        <td class="service-table__comment-cell">${note}</td>
         <td>
           <div class="service-row-actions">
             <div class="service-row-actions__urls${publicUrl ? "" : " service-row-actions__urls--single"}">
@@ -6288,7 +7043,9 @@ function renderServicesList() {
         </td>
       </tr>
     `;
-  }).join("");
+  });
+
+  elements.servicesTableBody.innerHTML = rows.join("");
 }
 
 function renderDevicesTable() {
@@ -6299,7 +7056,15 @@ function renderDevicesTable() {
   const hasActiveFilter = Boolean(searchTerm || quickFilter !== "all" || groupFilter);
   const allDevices = getInventoryDevices();
   const filteredDevices = allDevices.filter((device) => matchesSearch(device, searchTerm, quickFilter, groupFilter));
-  elements.devicesTableWrap?.classList.toggle("table-wrap--capped", hasActiveFilter || (showAllDevicesInRegistry && filteredDevices.length > 5));
+  const shouldShowExpand = syncRegistryListWrap(elements.devicesTableWrap, filteredDevices.length, showAllDevicesInRegistry);
+  syncRegistryListToggleButton(
+    elements.devicesListToggleButton,
+    shouldShowExpand,
+    showAllDevicesInRegistry,
+    "show_all_devices",
+    "show_less_devices",
+    filteredDevices.length,
+  );
 
   if (filteredDevices.length === 0) {
     const message = searchTerm
@@ -6319,11 +7084,8 @@ function renderDevicesTable() {
   const sortedDevices = filteredDevices
     .slice()
     .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip));
-  const visibleDevices = hasActiveFilter || showAllDevicesInRegistry
-    ? sortedDevices
-    : sortedDevices.slice(0, 5);
 
-  const rows = visibleDevices
+  const rows = sortedDevices
     .map((device) => {
       const subnet = resolveDeviceSubnet(device);
       const group = resolveDeviceGroup(device, subnet);
@@ -6337,7 +7099,7 @@ function renderDevicesTable() {
         ? renderRegistryComment(device.note)
         : "";
       return `
-        <tr>
+        <tr class="${device.integrationStatus === "source_missing" || device.integrationStatus === "source-missing" ? "registry-row--source-missing" : ""}">
           <td>
             <strong>${escapeHtml(device.name)}</strong>
             ${renderRegistrySourceBadges(device)}
@@ -6349,7 +7111,7 @@ function renderDevicesTable() {
           <td>${subnet ? `${escapeHtml(subnet.name)}<br><span class="mono">${escapeHtml(subnet.cidr)}</span>` : escapeHtml(t("no_data"))}</td>
           <td>${groupCell}</td>
           <td>${pingVisible ? pingBadge : ""}</td>
-          <td><span class="status-badge status-badge--${status.variant}">${escapeHtml(status.label)}</span></td>
+          <td>${renderDeviceStatusCell(device, status)}</td>
           <td>
             <div class="table-actions">
               <button type="button" class="row-button" data-copy-ip="${escapeHtml(device.ip)}">${escapeHtml(t("copy_ip_button"))}</button>
@@ -6360,20 +7122,6 @@ function renderDevicesTable() {
         </tr>
       `;
     });
-
-  if (!hasActiveFilter && filteredDevices.length > 5) {
-    rows.push(`
-      <tr class="table-expand-row">
-        <td colspan="9">
-          <button type="button" class="link-button table-expand-button" data-toggle-devices-list>
-            ${escapeHtml(showAllDevicesInRegistry
-              ? t("show_less_devices")
-              : t("show_all_devices", { count: filteredDevices.length }))}
-          </button>
-        </td>
-      </tr>
-    `);
-  }
 
   elements.devicesTableBody.innerHTML = rows.join("");
   elements.devicesCounter.textContent = hasActiveFilter
@@ -6724,6 +7472,9 @@ function renderDashboardAttention() {
 }
 
 function renderDashboardHistory() {
+  if (!elements.dashboardHistoryList) {
+    return;
+  }
   if (state.history.length === 0) {
     elements.dashboardHistoryList.innerHTML = `<li class="mini-list__empty">${escapeHtml(t("empty_history"))}</li>`;
     return;
@@ -6863,6 +7614,8 @@ function normalizeDiscoveryAgent(entry) {
     createMode: String(entry?.createMode || "preview_only").trim(),
     linkedHostDeviceId: String(entry?.linkedHostDeviceId || "").trim(),
     lastSeenAt: entry?.lastSeenAt || "",
+    reportedIntervalSeconds: Number(entry?.reportedIntervalSeconds || 0),
+    reportedTimeoutSeconds: Number(entry?.reportedTimeoutSeconds || 0),
     lastError: String(entry?.lastError || "").trim(),
     lastRemoteAddr: String(entry?.lastRemoteAddr || "").trim(),
     lastRejectedAt: entry?.lastRejectedAt || "",
@@ -7153,6 +7906,7 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups, customDevice
   const sourceKind = normalizeMetadataToken(rawDevice?.sourceKind, "");
   const sourceId = String(rawDevice?.sourceId || "").trim();
   const integrationStatus = normalizeMetadataToken(rawDevice?.integrationStatus, "");
+  const integrationStatusChangedAt = String(rawDevice?.integrationStatusChangedAt || "").trim();
   const protocol = normalizeMetadataToken(rawDevice?.protocol, "");
   const serviceUrl = String(rawDevice?.serviceUrl || "").trim();
   const accessPort = String(rawDevice?.accessPort || "").trim();
@@ -7229,6 +7983,7 @@ function normalizeDevice(rawDevice, subnets, groups = state.groups, customDevice
     sourceKind,
     sourceId,
     integrationStatus,
+    integrationStatusChangedAt,
     protocol,
     serviceUrl,
     accessPort,
@@ -7703,10 +8458,6 @@ function evaluateDeviceStatus(device, subnet) {
     return { label: t("status_orphan"), variant: "warn" };
   }
 
-  if (device.integrationStatus === "stale") {
-    return { label: t("status_stale"), variant: "warn" };
-  }
-
   if (!subnet) {
     return { label: t("status_no_subnet"), variant: "warn" };
   }
@@ -7724,6 +8475,7 @@ function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = ""
   const group = resolveDeviceGroup(device, subnet);
   const pingState = getVisiblePingState(device.ip, subnet);
   const exactIpTerm = normalizeIpSafe(searchTerm);
+  const availability = hasLiveAgentStatus(device) ? getAgentAvailabilityStatus(device) : null;
 
   if (quickFilter === "devices" && isService) {
     return false;
@@ -7743,13 +8495,13 @@ function matchesSearch(device, searchTerm, quickFilter = "all", groupFilter = ""
   if (quickFilter === "orphan-host" && !hasMissingHost(device)) {
     return false;
   }
-  if (quickFilter === "status-running" && device.integrationStatus !== "running") {
+  if (quickFilter === "status-running" && !(availability?.state === "up" || (!availability && device.integrationStatus === "running"))) {
     return false;
   }
-  if (quickFilter === "status-offline" && !(device.integrationStatus === "offline" || pingState?.isReachable === false)) {
+  if (quickFilter === "status-offline" && !(availability?.state === "down" || (!availability && (device.integrationStatus === "offline" || device.integrationStatus === "stopped")) || pingState?.isReachable === false)) {
     return false;
   }
-  if (quickFilter === "status-stale" && device.integrationStatus !== "stale") {
+  if (quickFilter === "status-stale" && !(availability?.state === "pending" || device.integrationStatus === "stale" || device.integrationStatus === "source_missing" || device.integrationStatus === "source-missing")) {
     return false;
   }
   if (quickFilter.startsWith("source-") && device.source !== quickFilter.replace("source-", "")) {

@@ -13,7 +13,8 @@ MVP-агент собирает локальные metadata хоста, Docker, 
 - `atlas_url`: URL ATLAS. В реальном развертывании используйте HTTPS.
 - `agent_id`: ID агента, созданный в ATLAS.
 - `agent_token`: token, который ATLAS показывает один раз.
-- `interval`: интервал snapshot в секундах, минимум `15`.
+- `interval`: как часто агент отправляет данные в ATLAS, в секундах; минимум `15`.
+- `timeout`: HTTP timeout отправки packets в ATLAS, по умолчанию `20`.
 - `source_name`: имя источника пакета, по умолчанию `agent`.
 - `max_items_per_packet`: максимум объектов в одном source packet, по умолчанию `450`.
 - `max_packet_bytes`: локальный лимит безопасности для одного signed packet, по умолчанию `491520`.
@@ -74,6 +75,12 @@ python3 atlas_agent.py --config atlas-agent.json --once --print-payload
 Большие sources делятся на несколько packets с одним `runId` и packet metadata
 (`source`, `index`, `total`). ATLAS группирует их в один discovery run и ждет финальный packet source,
 прежде чем помечать пропавшие объекты как stale.
+Каждый packet также сообщает настройки отправки в `payload.metadata.agentTiming`:
+`sendIntervalSeconds` из config `interval` и `requestTimeoutSeconds` из config `timeout`.
+ATLAS хранит это как read-only runtime info, чтобы было видно, как часто агент отправляет данные.
+В основной таблице агентов ATLAS показывает только интервал отправки. Доступность считается от
+`sendIntervalSeconds`: `UP <= interval + 20 сек.`, `PENDING <= interval * 2 + 75 сек.`,
+дальше `DOWN`.
 
 Если ATLAS недоступен или отклоняет packet, long-running агент использует exponential backoff
 с jitter и учитывает `Retry-After`, возвращенный ATLAS.

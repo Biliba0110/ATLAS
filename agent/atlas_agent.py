@@ -39,6 +39,7 @@ DEFAULT_MAX_PACKETS_PER_SOURCE = 32
 DEFAULT_BACKOFF_INITIAL_SECONDS = 30
 DEFAULT_BACKOFF_MAX_SECONDS = 900
 DEFAULT_BACKOFF_JITTER = 0.2
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 20
 MIN_MAX_ITEMS_PER_PACKET = 1
 MIN_MAX_PACKET_BYTES = 64 * 1024
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("atlas-agent.json")
@@ -122,6 +123,16 @@ def normalize_interval(value: Any) -> int:
     if interval < 15:
         raise SystemExit("Config value 'interval' must be at least 15 seconds.")
     return interval
+
+
+def normalize_request_timeout(value: Any) -> int:
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError) as error:
+        raise SystemExit("Config value 'timeout' must be an integer.") from error
+    if timeout < 2:
+        raise SystemExit("Config value 'timeout' must be at least 2 seconds.")
+    return timeout
 
 
 def normalize_float(value: Any, default: float, *, minimum: float, maximum: float, key: str) -> float:
@@ -1124,7 +1135,14 @@ def collect_proxmox_inventory(config: dict[str, Any], observed_at: str) -> dict[
     }
 
 
-def build_source_payload(source: str, collectors: list[str], observed_at: str) -> dict[str, Any]:
+def agent_timing_metadata(config: dict[str, Any]) -> dict[str, int]:
+    return {
+        "sendIntervalSeconds": normalize_interval(config.get("interval", config.get("interval_seconds", 60))),
+        "requestTimeoutSeconds": normalize_request_timeout(config.get("timeout", DEFAULT_REQUEST_TIMEOUT_SECONDS)),
+    }
+
+
+def build_source_payload(source: str, collectors: list[str], observed_at: str, config: dict[str, Any]) -> dict[str, Any]:
     source_name = str(source or "agent").strip() or "agent"
     return {
         "source": source_name,
@@ -1135,6 +1153,7 @@ def build_source_payload(source: str, collectors: list[str], observed_at: str) -
             "collectors": collectors,
             "activeSources": [],
             "collectorErrors": {},
+            "agentTiming": agent_timing_metadata(config),
         },
         "items": [],
     }
@@ -1153,7 +1172,7 @@ def build_source_payloads(config: dict[str, Any], observed_at: str) -> list[dict
     payloads: list[dict[str, Any]] = []
 
     if "host" in collectors:
-        payload = build_source_payload("host", collectors, observed_at)
+        payload = build_source_payload("host", collectors, observed_at, config)
         host_inventory = collect_host_inventory("host", observed_at)
         payload["host"] = host_inventory["host"]
         payload["items"].append(host_inventory["item"])
@@ -1162,7 +1181,7 @@ def build_source_payloads(config: dict[str, Any], observed_at: str) -> list[dict
         payloads.append(finalize_source_payload(payload))
 
     if "docker" in collectors:
-        payload = build_source_payload("docker", collectors, observed_at)
+        payload = build_source_payload("docker", collectors, observed_at, config)
         try:
             docker_inventory = collect_docker_inventory(config, observed_at)
             payload["items"].extend(docker_inventory["items"])
@@ -1173,7 +1192,7 @@ def build_source_payloads(config: dict[str, Any], observed_at: str) -> list[dict
         payloads.append(finalize_source_payload(payload))
 
     if "kubernetes" in collectors:
-        payload = build_source_payload("kubernetes", collectors, observed_at)
+        payload = build_source_payload("kubernetes", collectors, observed_at, config)
         try:
             kubernetes_inventory = collect_kubernetes_inventory(config, observed_at)
             payload["items"].extend(kubernetes_inventory["items"])
@@ -1184,7 +1203,7 @@ def build_source_payloads(config: dict[str, Any], observed_at: str) -> list[dict
         payloads.append(finalize_source_payload(payload))
 
     if "proxmox" in collectors:
-        payload = build_source_payload("proxmox", collectors, observed_at)
+        payload = build_source_payload("proxmox", collectors, observed_at, config)
         try:
             proxmox_inventory = collect_proxmox_inventory(config, observed_at)
             payload["items"].extend(proxmox_inventory["items"])
@@ -1194,14 +1213,14 @@ def build_source_payloads(config: dict[str, Any], observed_at: str) -> list[dict
             payload["metadata"]["collectorErrors"]["proxmox"] = limit_text(error, 300)
         payloads.append(finalize_source_payload(payload))
 
-    return payloads or [finalize_source_payload(build_source_payload(source_name, collectors, observed_at))]
+    return payloads or [finalize_source_payload(build_source_payload(source_name, collectors, observed_at, config))]
 
 
 def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
     payloads = build_source_payloads(config, observed_at)
     collectors = normalize_enabled_collectors(config)
     source_name = str(config.get("source_name") or "agent").strip() or "agent"
-    payload = build_source_payload(source_name, collectors, observed_at)
+    payload = build_source_payload(source_name, collectors, observed_at, config)
     for source_payload in payloads:
         if source_payload.get("host"):
             payload["host"] = source_payload["host"]
@@ -1211,7 +1230,7 @@ def build_payload(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
             if source not in payload["metadata"]["activeSources"]:
                 payload["metadata"]["activeSources"].append(source)
         for key, value in metadata.items():
-            if key in {"agentVersion", "collectors", "activeSources"}:
+            if key in {"agentVersion", "collectors", "activeSources", "agentTiming"}:
                 continue
             if key == "collectorErrors" and isinstance(value, dict):
                 payload["metadata"]["collectorErrors"].update(value)
@@ -1351,7 +1370,7 @@ def post_snapshot(config: dict[str, Any], snapshot: dict[str, Any]) -> dict[str,
     if not bool(config.get("verify_tls", True)):
         context = ssl._create_unverified_context()  # noqa: SLF001
     try:
-        with request.urlopen(http_request, timeout=int(config.get("timeout", 20)), context=context) as response:
+        with request.urlopen(http_request, timeout=normalize_request_timeout(config.get("timeout", DEFAULT_REQUEST_TIMEOUT_SECONDS)), context=context) as response:
             response_body = response.read().decode("utf-8")
     except HTTPError as error:
         response_body = error.read().decode("utf-8", errors="replace")

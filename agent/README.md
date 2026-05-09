@@ -13,7 +13,8 @@ Copy `atlas-agent.example.json` to `atlas-agent.json` and set:
 - `atlas_url`: ATLAS URL. Use HTTPS in real deployments.
 - `agent_id`: the agent ID created in ATLAS.
 - `agent_token`: token shown once by ATLAS.
-- `interval`: snapshot interval in seconds, minimum `15`.
+- `interval`: how often the agent sends data to ATLAS, in seconds; minimum `15`.
+- `timeout`: HTTP timeout for sending packets to ATLAS, default `20`.
 - `source_name`: package source name, default `agent`.
 - `max_items_per_packet`: max objects in one source packet, default `450`.
 - `max_packet_bytes`: local safety limit for one signed packet, default `491520`.
@@ -75,6 +76,12 @@ python3 atlas_agent.py --config atlas-agent.json --once --print-payload
 Large sources are split into multiple packets with the same `runId` and packet metadata
 (`source`, `index`, `total`). ATLAS groups them into one discovery run and waits for the
 final packet of a source before marking missing objects as stale.
+Each packet also reports the agent's configured send timing in `payload.metadata.agentTiming`:
+`sendIntervalSeconds` from config `interval`, and `requestTimeoutSeconds` from config `timeout`.
+ATLAS stores those as read-only runtime info so you can see how often data is sent.
+The main ATLAS agent table shows only the send interval. Availability is calculated from
+`sendIntervalSeconds`: `UP <= interval + 20s`, `PENDING <= interval * 2 + 75s`,
+then `DOWN`.
 
 When ATLAS is unavailable or rejects a packet, the long-running agent uses exponential
 backoff with jitter and respects `Retry-After` returned by ATLAS.

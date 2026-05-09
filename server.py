@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS devices (
     source_kind TEXT NOT NULL DEFAULT '',
     source_id TEXT NOT NULL DEFAULT '',
     integration_status TEXT NOT NULL DEFAULT '',
+    integration_status_changed_at TEXT NOT NULL DEFAULT '',
     protocol TEXT NOT NULL DEFAULT '',
     service_url TEXT NOT NULL DEFAULT '',
     access_port TEXT NOT NULL DEFAULT '',
@@ -280,6 +281,8 @@ CREATE TABLE IF NOT EXISTS discovery_agents (
     linked_host_device_id TEXT NOT NULL DEFAULT '',
     data_policy TEXT NOT NULL DEFAULT '',
     last_seen_at TEXT NOT NULL DEFAULT '',
+    reported_interval_seconds INTEGER NOT NULL DEFAULT 0,
+    reported_timeout_seconds INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
     last_remote_addr TEXT NOT NULL DEFAULT '',
     last_rejected_at TEXT NOT NULL DEFAULT '',
@@ -732,6 +735,7 @@ def normalize_device_payload(
     source_kind = normalize_slug_value(payload.get("sourceKind"), default="")
     source_id = str(payload.get("sourceId") or "").strip()
     integration_status = normalize_slug_value(payload.get("integrationStatus"), default="")
+    integration_status_changed_at = str(payload.get("integrationStatusChangedAt") or "").strip()
     protocol = normalize_slug_value(payload.get("protocol"), default="")
     service_url = str(payload.get("serviceUrl") or "").strip()
     access_port = normalize_device_ports(payload.get("accessPort"))
@@ -796,6 +800,7 @@ def normalize_device_payload(
         "sourceKind": source_kind,
         "sourceId": source_id,
         "integrationStatus": integration_status,
+        "integrationStatusChangedAt": integration_status_changed_at,
         "protocol": protocol,
         "serviceUrl": service_url,
         "accessPort": access_port,
@@ -824,12 +829,15 @@ def ensure_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "devices", "source_kind", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "source_id", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "integration_status", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "devices", "integration_status_changed_at", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "protocol", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "service_url", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "access_port", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "ports", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "devices", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "discovery_agents", "data_policy", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "discovery_agents", "reported_interval_seconds", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(connection, "discovery_agents", "reported_timeout_seconds", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(connection, "discovery_results", "received_fields", "TEXT NOT NULL DEFAULT '[]'")
     ensure_column(connection, "discovery_results", "accepted_fields", "TEXT NOT NULL DEFAULT '[]'")
     ensure_column(connection, "discovery_results", "visible_fields", "TEXT NOT NULL DEFAULT '[]'")
@@ -1044,6 +1052,7 @@ def device_from_row(row: sqlite3.Row) -> dict:
         "sourceKind": row["source_kind"] or "",
         "sourceId": row["source_id"] or "",
         "integrationStatus": row["integration_status"] or "",
+        "integrationStatusChangedAt": row["integration_status_changed_at"] or "",
         "protocol": row["protocol"] or "",
         "serviceUrl": row["service_url"] or "",
         "accessPort": row["access_port"] or "",
@@ -1120,6 +1129,8 @@ def discovery_agent_from_row(row: sqlite3.Row) -> dict:
         "createMode": row["create_mode"],
         "linkedHostDeviceId": row["linked_host_device_id"] or "",
         "lastSeenAt": row["last_seen_at"] or "",
+        "reportedIntervalSeconds": int(row["reported_interval_seconds"] or 0),
+        "reportedTimeoutSeconds": int(row["reported_timeout_seconds"] or 0),
         "lastError": row["last_error"] or "",
         "lastRemoteAddr": row["last_remote_addr"] or "",
         "lastRejectedAt": row["last_rejected_at"] or "",
@@ -2776,12 +2787,57 @@ def revoke_discovery_agent_token(connection: sqlite3.Connection, agent_id: str, 
     }
 
 
-def delete_discovery_agent(connection: sqlite3.Connection, agent_id: str, actor: str = "system") -> dict:
+def delete_discovery_agent(
+    connection: sqlite3.Connection,
+    agent_id: str,
+    actor: str = "system",
+    *,
+    delete_related_records: bool = False,
+) -> dict:
     row = connection.execute("SELECT id, name FROM discovery_agents WHERE id = ?", (agent_id,)).fetchone()
     if row is None:
         raise RequestError(HTTPStatus.NOT_FOUND, "Discovery agent не найден.")
 
+    linked_rows = connection.execute(
+        """
+        SELECT DISTINCT matched_device_id AS device_id
+        FROM discovery_results
+        WHERE agent_id = ?
+          AND matched_device_id != ''
+        UNION
+        SELECT DISTINCT matched_service_id AS device_id
+        FROM discovery_results
+        WHERE agent_id = ?
+          AND matched_service_id != ''
+        """,
+        (agent_id, agent_id),
+    ).fetchall()
+    linked_ids = sorted({linked_row["device_id"] for linked_row in linked_rows if linked_row["device_id"]})
+    deleted_related_count = 0
     with connection:
+        if delete_related_records and linked_ids:
+            placeholders = ",".join("?" for _ in linked_ids)
+            linked_devices = connection.execute(
+                f"SELECT * FROM devices WHERE id IN ({placeholders})",
+                linked_ids,
+            ).fetchall()
+            for device_row in linked_devices:
+                device = device_from_row(device_row)
+                record_history(
+                    connection,
+                    device_id=device["id"],
+                    device_name=device["name"],
+                    ip=device["ip"],
+                    previous_ip=device["ip"],
+                    action="released",
+                    actor=actor,
+                    note=f"Discovery agent deleted: {row['name']}",
+                )
+            cursor = connection.execute(
+                f"DELETE FROM devices WHERE id IN ({placeholders})",
+                linked_ids,
+            )
+            deleted_related_count = cursor.rowcount
         record_discovery_audit_event(
             connection,
             "agent_deleted",
@@ -2790,13 +2846,23 @@ def delete_discovery_agent(connection: sqlite3.Connection, agent_id: str, actor:
             agent_name=row["name"],
             actor=actor,
             message="Discovery agent deleted.",
+            details={
+                "deleteRelatedRecords": delete_related_records,
+                "deletedRelatedRecords": deleted_related_count,
+            },
         )
         connection.execute("DELETE FROM discovery_agents WHERE id = ?", (agent_id,))
-    bump_revision("discovery-agent-deleted", {"agentId": agent_id})
+    bump_revision(
+        "discovery-agent-deleted",
+        {"agentId": agent_id, "deleteRelatedRecords": delete_related_records, "deletedRelatedRecords": deleted_related_count},
+    )
+    if deleted_related_count:
+        signal_background_scanner(run_scan=True)
     return {
         "status": "deleted",
         "agentId": agent_id,
         "name": row["name"],
+        "deletedRelatedRecords": deleted_related_count,
     }
 
 
@@ -3167,31 +3233,38 @@ def update_discovery_linked_records(
     for linked_id, is_service in linked_updates:
         if not linked_id:
             continue
-        row = connection.execute("SELECT id FROM devices WHERE id = ?", (linked_id,)).fetchone()
+        row = connection.execute(
+            "SELECT id, integration_status, integration_status_changed_at FROM devices WHERE id = ?",
+            (linked_id,),
+        ).fetchone()
         if row is None:
             continue
+        status_changed_at = row["integration_status_changed_at"] or ""
+        if status_value and status_value != (row["integration_status"] or ""):
+            status_changed_at = last_seen_at or utc_now_iso()
         if is_service:
             connection.execute(
                 """
                 UPDATE devices
                 SET integration_status = ?,
+                    integration_status_changed_at = ?,
                     last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at),
                     ports = COALESCE(NULLIF(?, ''), ports),
-                    access_port = COALESCE(NULLIF(?, ''), access_port),
                     service_url = COALESCE(NULLIF(?, ''), service_url)
                 WHERE id = ?
                 """,
-                (status_value, last_seen_at, ports, access_port, service_url, linked_id),
+                (status_value, status_changed_at, last_seen_at, ports, service_url, linked_id),
             )
         else:
             connection.execute(
                 """
                 UPDATE devices
                 SET integration_status = ?,
+                    integration_status_changed_at = ?,
                     last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at)
                 WHERE id = ?
                 """,
-                (status_value, last_seen_at, linked_id),
+                (status_value, status_changed_at, last_seen_at, linked_id),
             )
         updated_count += 1
     return updated_count
@@ -3227,7 +3300,7 @@ def mark_missing_discovery_results_stale(
             connection,
             matched_device_id=row["matched_device_id"] or "",
             matched_service_id=row["matched_service_id"] or "",
-            status="stale",
+            status="source_missing",
         )
         stale_count += 1
     return stale_count
@@ -3252,6 +3325,32 @@ def get_snapshot_active_sources(snapshot: dict) -> set[str]:
     return {source for source in active_sources if source}
 
 
+def normalize_reported_agent_timing(snapshot: dict) -> tuple[int, int]:
+    try:
+        metadata = json.loads(snapshot.get("metadata") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        return 0, 0
+    timing = metadata.get("agentTiming")
+    if not isinstance(timing, dict):
+        return 0, 0
+
+    def parse_seconds(key: str, *, minimum: int = 0, maximum: int = 86400) -> int:
+        try:
+            value = int(timing.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+        if value < minimum or value > maximum:
+            return 0
+        return value
+
+    return (
+        parse_seconds("sendIntervalSeconds", minimum=15) or parse_seconds("intervalSeconds", minimum=15),
+        parse_seconds("requestTimeoutSeconds", minimum=2),
+    )
+
+
 def save_discovery_snapshot(
     connection: sqlite3.Connection,
     agent: dict,
@@ -3267,6 +3366,7 @@ def save_discovery_snapshot(
     created_count = 0
     item_ids: list[str] = []
     seen_source_ids_by_source: dict[str, set[str]] = {}
+    reported_interval_seconds, reported_timeout_seconds = normalize_reported_agent_timing(snapshot)
     discovery_data_policy = get_effective_discovery_agent_policy(connection, agent)
     policy_items = [
         apply_discovery_data_policy_to_item(item, discovery_data_policy)
@@ -3338,6 +3438,9 @@ def save_discovery_snapshot(
 
         for item in policy_items:
             host_device_id = item["hostDeviceId"] or agent.get("linkedHostDeviceId", "")
+            auto_matched_device_id = ""
+            if item["sourceKind"] == "host" and agent.get("linkedHostDeviceId"):
+                auto_matched_device_id = agent.get("linkedHostDeviceId", "")
             existing = connection.execute(
                 """
                 SELECT id, state, matched_device_id, matched_service_id
@@ -3351,6 +3454,8 @@ def save_discovery_snapshot(
                 state = "ignored"
             elif existing and (existing["state"] == "matched" or existing["matched_device_id"] or existing["matched_service_id"]):
                 state = "matched"
+            elif auto_matched_device_id:
+                state = "matched"
             else:
                 state = "new"
             connection.execute(
@@ -3358,9 +3463,9 @@ def save_discovery_snapshot(
                 INSERT INTO discovery_results (
                     id, agent_id, source, source_id, source_kind, host_device_id,
                     name, status, ports, access_port, service_url, last_seen_at,
-                    state, raw, received_fields, accepted_fields, visible_fields,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    matched_device_id, matched_service_id, state, raw,
+                    received_fields, accepted_fields, visible_fields, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id, source, source_id) DO UPDATE SET
                     source_kind = excluded.source_kind,
                     host_device_id = excluded.host_device_id,
@@ -3370,6 +3475,18 @@ def save_discovery_snapshot(
                     access_port = excluded.access_port,
                     service_url = excluded.service_url,
                     last_seen_at = excluded.last_seen_at,
+                    matched_device_id = CASE
+                        WHEN discovery_results.state = 'ignored' THEN discovery_results.matched_device_id
+                        WHEN discovery_results.matched_device_id != '' THEN discovery_results.matched_device_id
+                        WHEN excluded.matched_device_id != '' THEN excluded.matched_device_id
+                        ELSE discovery_results.matched_device_id
+                    END,
+                    matched_service_id = CASE
+                        WHEN discovery_results.state = 'ignored' THEN discovery_results.matched_service_id
+                        WHEN discovery_results.matched_service_id != '' THEN discovery_results.matched_service_id
+                        WHEN excluded.matched_service_id != '' THEN excluded.matched_service_id
+                        ELSE discovery_results.matched_service_id
+                    END,
                     state = CASE
                         WHEN discovery_results.state = 'ignored' THEN 'ignored'
                     ELSE excluded.state
@@ -3393,6 +3510,8 @@ def save_discovery_snapshot(
                     item["accessPort"],
                     item["serviceUrl"],
                     item["lastSeenAt"],
+                    auto_matched_device_id,
+                    "",
                     state,
                     item["raw"],
                     json.dumps(item["receivedFields"], ensure_ascii=False),
@@ -3402,16 +3521,29 @@ def save_discovery_snapshot(
                     now,
                 ),
             )
-            if existing and state == "matched":
+            current_result = get_discovery_result_row(connection, result_id)
+            if current_result["state"] == "matched":
                 update_discovery_linked_records(
                     connection,
-                    matched_device_id=existing["matched_device_id"] or "",
-                    matched_service_id=existing["matched_service_id"] or "",
+                    matched_device_id=current_result["matched_device_id"] or "",
+                    matched_service_id=current_result["matched_service_id"] or "",
                     status=item["status"],
                     last_seen_at=item["lastSeenAt"],
                     ports=item["ports"],
                     access_port=item["accessPort"],
                     service_url=item["serviceUrl"],
+                )
+                enrich_linked_record_from_discovery(
+                    connection,
+                    current_result,
+                    target_id=current_result["matched_device_id"] or "",
+                    target_type="device",
+                )
+                enrich_linked_record_from_discovery(
+                    connection,
+                    current_result,
+                    target_id=current_result["matched_service_id"] or "",
+                    target_type="service",
                 )
             updated_count += 1
             item_ids.append(result_id)
@@ -3459,12 +3591,23 @@ def save_discovery_snapshot(
             """
             UPDATE discovery_agents
             SET last_seen_at = ?,
+                reported_interval_seconds = CASE WHEN ? > 0 THEN ? ELSE reported_interval_seconds END,
+                reported_timeout_seconds = CASE WHEN ? > 0 THEN ? ELSE reported_timeout_seconds END,
                 last_error = '',
                 last_remote_addr = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (now, remote_addr, now, agent["id"]),
+            (
+                now,
+                reported_interval_seconds,
+                reported_interval_seconds,
+                reported_timeout_seconds,
+                reported_timeout_seconds,
+                remote_addr,
+                now,
+                agent["id"],
+            ),
         )
 
     created_count = auto_create_discovery_records(connection, agent, item_ids)
@@ -3664,6 +3807,15 @@ def link_discovery_result(
             result_id,
         ),
     )
+    linked_row = get_discovery_result_row(connection, result_id)
+    enrich_linked_record_from_discovery(
+        connection,
+        linked_row,
+        target_id=target_id,
+        target_type=target_type,
+    )
+    if target_type == "device" and normalize_slug_value(row["source_kind"], default="") == "host":
+        ensure_agent_linked_host(connection, row["agent_id"], target_id)
     connection.commit()
     bump_revision("discovery-result-linked", {"resultId": result_id, "targetId": target_id})
     return get_discovery_result(connection, result_id)
@@ -3678,6 +3830,75 @@ def first_raw_value(raw: dict, keys: list[str]) -> str:
         if text:
             return text
     return ""
+
+
+def enrich_linked_record_from_discovery(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    target_id: str,
+    target_type: str,
+) -> None:
+    if not target_id:
+        return
+    raw = decode_discovery_raw(row)
+    source = row["source"] or "agent"
+    source_kind = row["source_kind"] or target_type
+    source_id = row["source_id"] or ""
+    status_value = normalize_slug_value(row["status"], default="") if row["status"] else ""
+    last_seen_at = row["last_seen_at"] or ""
+
+    if target_type == "device":
+        mac = first_raw_value(raw, ["mac", "macAddress", "mac_address"])
+        connection.execute(
+            """
+            UPDATE devices
+            SET mac = CASE WHEN COALESCE(mac, '') = '' THEN ? ELSE mac END,
+                source = CASE WHEN COALESCE(source, '') = '' THEN ? ELSE source END,
+                source_kind = CASE WHEN COALESCE(source_kind, '') = '' THEN ? ELSE source_kind END,
+                source_id = CASE WHEN COALESCE(source_id, '') = '' THEN ? ELSE source_id END,
+                integration_status = COALESCE(NULLIF(?, ''), integration_status),
+                last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at)
+            WHERE id = ?
+              AND type != 'service'
+            """,
+            (mac, source, source_kind, source_id, status_value, last_seen_at, target_id),
+        )
+        return
+
+    if target_type == "service":
+        protocol = first_raw_value(raw, ["protocol", "scheme"])
+        host_device_id = row["host_device_id"] or row["agent_linked_host_device_id"] or ""
+        connection.execute(
+            """
+            UPDATE devices
+            SET host_device_id = CASE WHEN COALESCE(host_device_id, '') = '' THEN ? ELSE host_device_id END,
+                source = CASE WHEN COALESCE(source, '') = '' THEN ? ELSE source END,
+                source_kind = CASE WHEN COALESCE(source_kind, '') = '' THEN ? ELSE source_kind END,
+                source_id = CASE WHEN COALESCE(source_id, '') = '' THEN ? ELSE source_id END,
+                integration_status = COALESCE(NULLIF(?, ''), integration_status),
+                protocol = COALESCE(NULLIF(?, ''), protocol),
+                service_url = COALESCE(NULLIF(?, ''), service_url),
+                access_port = COALESCE(NULLIF(?, ''), access_port),
+                ports = COALESCE(NULLIF(?, ''), ports),
+                last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at)
+            WHERE id = ?
+              AND type = 'service'
+            """,
+            (
+                host_device_id,
+                source,
+                source_kind,
+                source_id,
+                status_value,
+                protocol,
+                row["service_url"] or "",
+                row["access_port"] or "",
+                row["ports"] or "",
+                last_seen_at,
+                target_id,
+            ),
+        )
 
 
 def discovery_device_type(source_kind: str, raw: dict) -> str:
@@ -3791,7 +4012,7 @@ def create_discovery_result_record(
                 "integrationStatus": row["status"] or "",
                 "protocol": protocol,
                 "serviceUrl": row["service_url"] or "",
-                "accessPort": row["access_port"] or "",
+                "accessPort": "",
                 "ports": row["ports"] or "",
                 "lastSeenAt": row["last_seen_at"] or now,
                 "note": "Agent",
@@ -3899,7 +4120,7 @@ def auto_create_discovery_records(
                 connection,
                 row["id"],
                 {"targetType": target_type},
-                "discovery",
+                f"Agent: {agent.get('name') or agent.get('id') or 'unknown'}",
             )
         except (RequestError, ValueError, sqlite3.IntegrityError):
             continue
@@ -4227,9 +4448,10 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
         """
         INSERT INTO devices (
             id, name, ip, mac, type, subnet_id, host_device_id, source,
-            source_kind, source_id, integration_status, protocol, service_url, access_port, ports, last_seen_at,
+            source_kind, source_id, integration_status, integration_status_changed_at,
+            protocol, service_url, access_port, ports, last_seen_at,
             note, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             device["id"],
@@ -4243,6 +4465,7 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
             device.get("sourceKind", ""),
             device.get("sourceId", ""),
             device.get("integrationStatus", ""),
+            device.get("integrationStatusChangedAt", "") or (device.get("lastSeenAt", "") if device.get("integrationStatus", "") else ""),
             device.get("protocol", ""),
             device.get("serviceUrl", ""),
             device.get("accessPort", ""),
@@ -4275,6 +4498,7 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
         "sourceKind": device.get("sourceKind", ""),
         "sourceId": device.get("sourceId", ""),
         "integrationStatus": device.get("integrationStatus", ""),
+        "integrationStatusChangedAt": device.get("integrationStatusChangedAt", "") or (device.get("lastSeenAt", "") if device.get("integrationStatus", "") else ""),
         "protocol": device.get("protocol", ""),
         "serviceUrl": device.get("serviceUrl", ""),
         "accessPort": device.get("accessPort", ""),
@@ -4352,11 +4576,16 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
         raise RequestError(HTTPStatus.NOT_FOUND, "Устройство не найдено.")
 
     existing_device = device_from_row(existing_row)
+    integration_status_changed_at = device.get("integrationStatusChangedAt", "")
+    if device.get("integrationStatus", "") and device.get("integrationStatus", "") != existing_device.get("integrationStatus", ""):
+        integration_status_changed_at = device.get("lastSeenAt", "") or utc_now_iso()
+    elif not integration_status_changed_at:
+        integration_status_changed_at = existing_device.get("integrationStatusChangedAt", "")
     cursor = connection.execute(
         """
         UPDATE devices
         SET name = ?, ip = ?, mac = ?, type = ?, subnet_id = ?, host_device_id = ?,
-            source = ?, source_kind = ?, source_id = ?, integration_status = ?,
+            source = ?, source_kind = ?, source_id = ?, integration_status = ?, integration_status_changed_at = ?,
             protocol = ?, service_url = ?, access_port = ?, ports = ?, last_seen_at = ?, note = ?
         WHERE id = ?
         """,
@@ -4371,6 +4600,7 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
             device.get("sourceKind", ""),
             device.get("sourceId", ""),
             device.get("integrationStatus", ""),
+            integration_status_changed_at,
             device.get("protocol", ""),
             device.get("serviceUrl", ""),
             device.get("accessPort", ""),
@@ -4434,6 +4664,7 @@ def update_device(connection: sqlite3.Connection, device_id: str, device: dict, 
         "sourceKind": device.get("sourceKind", ""),
         "sourceId": device.get("sourceId", ""),
         "integrationStatus": device.get("integrationStatus", ""),
+        "integrationStatusChangedAt": integration_status_changed_at,
         "protocol": device.get("protocol", ""),
         "serviceUrl": device.get("serviceUrl", ""),
         "accessPort": device.get("accessPort", ""),
@@ -5361,7 +5592,17 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                     and parts[3] == "agents"
                 ):
                     admin_user = require_admin_user(connection, self)
-                    self.send_json(HTTPStatus.OK, delete_discovery_agent(connection, parts[4], resolve_actor(self, user=admin_user)))
+                    query = parse_qs(parsed.query)
+                    delete_related = (query.get("mode") or [""])[0] == "with_related"
+                    self.send_json(
+                        HTTPStatus.OK,
+                        delete_discovery_agent(
+                            connection,
+                            parts[4],
+                            resolve_actor(self, user=admin_user),
+                            delete_related_records=delete_related,
+                        ),
+                    )
                     return
 
                 if parsed.path == "/api/admin/history":

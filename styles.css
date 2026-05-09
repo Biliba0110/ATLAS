@@ -924,6 +924,13 @@ label span {
   letter-spacing: 0;
 }
 
+.row-button {
+  min-height: 34px;
+  padding: 7px 11px;
+  font-size: 0.82rem;
+  line-height: 1.15;
+}
+
 button.stat-card,
 .hero-account-trigger {
   appearance: none;
@@ -1075,7 +1082,7 @@ button.stat-card,
 }
 
 .dashboard-grid--minimal {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   align-items: stretch;
 }
 
@@ -1087,6 +1094,18 @@ button.stat-card,
 .panel {
   min-width: 0;
   padding: 22px;
+}
+
+.panel-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.collapsible-filter-content[hidden] {
+  display: none;
 }
 
 .panel--dashboard-card {
@@ -1558,6 +1577,27 @@ textarea {
   height: 424px;
 }
 
+.table-wrap--registry-list {
+  --registry-visible-rows: 8;
+  max-height: calc(52px + (var(--registry-visible-rows) * 72px));
+  overflow-y: auto;
+}
+
+.table-wrap--registry-list.table-wrap--filters-collapsed {
+  --registry-visible-rows: 12;
+}
+
+.table-wrap--registry-list.table-wrap--expanded {
+  --registry-visible-rows: 15;
+}
+
+.table-wrap--registry-list thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-top);
+}
+
 table {
   width: 100%;
   min-width: 760px;
@@ -1592,6 +1632,16 @@ tbody tr:hover {
   background: var(--table-row-hover);
 }
 
+.registry-row--source-missing {
+  background:
+    linear-gradient(90deg, rgba(255, 184, 107, 0.08), transparent 42%),
+    transparent;
+}
+
+.registry-row--source-missing td {
+  color: color-mix(in srgb, var(--text-soft) 78%, var(--muted));
+}
+
 tbody tr:last-child td {
   border-bottom: none;
 }
@@ -1616,6 +1666,10 @@ tbody tr:last-child td {
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
+}
+
+.registry-source-badges + .registry-table__comment {
+  margin-top: 8px;
 }
 
 .table-row-link,
@@ -1703,14 +1757,30 @@ tbody tr:last-child td {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  max-width: 210px;
+  overflow: hidden;
+}
+
+.service-table__name strong {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .service-table__name .secondary-line {
   grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .service-table__name .registry-source-badges {
   grid-column: 2;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .service-table__name--plain {
@@ -1854,15 +1924,51 @@ tbody tr:last-child td {
 }
 
 .service-table__ports {
-  max-width: 220px;
+  max-width: 240px;
   color: var(--text-soft);
   overflow-wrap: anywhere;
 }
 
+.services-table th:nth-child(6),
+.services-table td:nth-child(6) {
+  width: 126px;
+  max-width: 126px;
+}
+
+.service-table__port-stack {
+  display: grid;
+  gap: 2px;
+}
+
+.service-table__port-stack span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-table__host {
+  max-width: 190px;
+  overflow: hidden;
+}
+
+.service-table__host span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-table__host .secondary-line {
+  margin-top: 2px;
+  font-size: 0.82rem;
+}
+
 .service-table__url {
   display: block;
-  width: 280px;
-  max-width: 280px;
+  width: 240px;
+  max-width: 240px;
   color: var(--text-soft);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1905,7 +2011,8 @@ tbody tr:last-child td {
 .service-row-actions .row-button {
   width: 100%;
   min-width: 0;
-  padding: 9px 10px;
+  padding: 7px 9px;
+  font-size: 0.82rem;
   text-align: center;
   white-space: nowrap;
 }
@@ -1915,9 +2022,14 @@ tbody tr:last-child td {
 }
 
 .service-table__last-seen {
-  width: 132px;
-  max-width: 132px;
-  white-space: nowrap;
+  width: 96px;
+  max-width: 96px;
+  white-space: normal;
+}
+
+.service-table__last-seen .secondary-line {
+  margin-top: 2px;
+  font-size: 0.78rem;
 }
 
 .service-table__comment {
@@ -1936,6 +2048,22 @@ tbody tr:last-child td {
 .services-table td:nth-child(9) {
   width: 174px;
   max-width: 174px;
+}
+
+.service-table__comment-cell .registry-table__comment {
+  margin-top: 0;
+}
+
+.services-table th:nth-child(1),
+.services-table td:nth-child(1) {
+  width: 220px;
+  max-width: 220px;
+}
+
+.services-table th:nth-child(3),
+.services-table td:nth-child(3) {
+  width: 250px;
+  max-width: 250px;
 }
 
 .mono {
@@ -2121,6 +2249,22 @@ tbody tr:last-child td {
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px;
   margin: 14px 0;
+}
+
+.discovery-section-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  margin-bottom: 16px;
+}
+
+.discovery-subpanel {
+  display: grid;
+  gap: 16px;
+}
+
+.discovery-subpanel[hidden] {
+  display: none;
 }
 
 .discovery-summary-card {
@@ -2317,24 +2461,97 @@ tbody tr:last-child td {
   min-width: 1120px;
 }
 
+.discovery-agents-table th:nth-child(1),
+.discovery-agents-table td:nth-child(1) {
+  min-width: 162px;
+}
+
 .discovery-agents-table__acl {
-  max-width: 220px;
+  max-width: 360px;
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .discovery-agents-table__actions {
-  min-width: 430px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-content: stretch;
+  min-width: 288px;
+}
+
+.discovery-agents-table__actions .row-button {
+  width: 100%;
+}
+
+.discovery-preview-wrap {
+  max-height: 560px;
+  overflow: auto;
+}
+
+.discovery-preview-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-top);
 }
 
 .discovery-preview-table {
-  min-width: 1080px;
+  min-width: 860px;
+  table-layout: fixed;
+}
+
+.discovery-preview-table th:nth-child(1),
+.discovery-preview-table td:nth-child(1) {
+  width: 118px;
+}
+
+.discovery-preview-table th:nth-child(3),
+.discovery-preview-table td:nth-child(3) {
+  width: 128px;
+}
+
+.discovery-preview-table th:nth-child(5),
+.discovery-preview-table td:nth-child(5) {
+  width: 132px;
+}
+
+.discovery-preview-table th:nth-child(6),
+.discovery-preview-table td:nth-child(6) {
+  width: 150px;
+}
+
+.discovery-preview-table th:nth-child(7),
+.discovery-preview-table td:nth-child(7) {
+  width: 210px;
+}
+
+.discovery-preview-table td {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  vertical-align: top;
 }
 
 .discovery-preview-table__ports {
-  max-width: 190px;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.discovery-group-row td {
+  padding-top: 12px;
+  padding-bottom: 10px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent),
+    color-mix(in srgb, var(--card-top) 46%, transparent);
+}
+
+.discovery-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 10px;
+  color: var(--text);
+  font-size: 0.95rem;
 }
 
 .discovery-details-row td {
@@ -2425,13 +2642,26 @@ tbody tr:last-child td {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
-  min-width: 260px;
+  min-width: 0;
 }
 
 .discovery-preview-actions .row-button {
   min-height: 34px;
-  padding: 7px 10px;
+  padding: 7px 9px;
   white-space: nowrap;
+}
+
+.discovery-preview-actions.discovery-agents-table__actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-content: stretch;
+  min-width: 394px;
+}
+
+.discovery-preview-actions.discovery-agents-table__actions .row-button {
+  width: 100%;
+  padding-right: 11px;
+  padding-left: 11px;
 }
 
 .setting-card {
@@ -2929,6 +3159,31 @@ body[data-modal-blur="on"] .modal-backdrop {
   width: min(900px, calc(100vw - 36px));
 }
 
+.modal-backdrop--dialog {
+  z-index: 90;
+}
+
+.modal-panel--confirm {
+  width: min(620px, calc(100vw - 36px));
+}
+
+.dialog-input-wrap {
+  margin-top: 18px;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.dialog-actions .action-button {
+  min-height: 42px;
+  padding: 10px 16px;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -2997,7 +3252,7 @@ body[data-modal-blur="on"] .modal-backdrop {
   }
 
   .discovery-preview-table {
-    min-width: 980px;
+    min-width: 860px;
   }
 
   .discovery-agent-form__section,
