@@ -86,9 +86,8 @@
           <div class="hero-console__body">
             <div class="hero-actions">
               <button type="button" class="action-button action-button--primary hero-action--primary" data-open-modal="add-modal" data-i18n="add_button">Добавить</button>
-              <button type="button" class="action-button" id="open-export-button" data-open-modal="export-modal" data-i18n="export_button">Экспорт</button>
+              <button type="button" class="action-button" data-open-modal="integrations-modal" data-i18n="integrations_button">Интеграции</button>
               <button type="button" class="action-button" id="open-settings-button" data-open-modal="settings-modal" data-i18n="settings_button">Настройки</button>
-              <button type="button" class="action-button action-button--ghost" id="import-button" data-i18n="import_button">Импорт</button>
             </div>
           </div>
         </section>
@@ -128,21 +127,68 @@
 
     <section class="page-view page-view--dashboard is-active" data-view="dashboard">
       <div class="dashboard-grid dashboard-grid--minimal">
-        <section class="panel panel--dashboard-card panel--dashboard-summary">
-          <div class="panel-heading">
-            <p class="panel-kicker" data-i18n="dashboard_overview_kicker">Обзор</p>
-            <h2 data-i18n="dashboard_overview_title">Текущее состояние</h2>
-          </div>
+        <div class="dashboard-column">
+          <section class="panel panel--dashboard-card panel--dashboard-actions">
+            <div class="panel-heading">
+              <p class="panel-kicker" data-i18n="dashboard_actions_kicker">Переходы</p>
+              <h2 data-i18n="dashboard_actions_title">Быстрые действия</h2>
+            </div>
 
-          <p class="helper-text dashboard-lead" data-i18n="dashboard_overview_note">
-            Здесь остаются только сигналы, которые помогают быстро понять, что требует внимания прямо сейчас.
-          </p>
+            <div class="dashboard-action-grid">
+              <button type="button" class="action-button action-button--primary" data-open-modal="ip-check-modal" data-i18n="dashboard_ipcheck_title">Быстрая проверка IP</button>
+              <button type="button" class="action-button" data-stat-target="services" data-i18n="services_title">Сервисы</button>
+              <button type="button" class="action-button" data-stat-target="devices" data-i18n="devices_title">Хосты</button>
+              <button type="button" class="action-button action-button--ghost" data-integrations-shortcut="discovery" data-i18n="dashboard_discovery_settings_button">Настройки discovery</button>
+            </div>
+          </section>
 
-          <ul class="mini-list mini-list--tight" id="dashboard-summary-list">
-            <li class="mini-list__empty" data-i18n="dashboard_attention_empty">Сейчас нет предупреждений и проблемных зон.</li>
-          </ul>
-        </section>
+          <section class="panel panel--dashboard-card panel--dashboard-primary">
+            <div class="panel-heading">
+              <p class="panel-kicker" data-i18n="dashboard_ops_kicker">Операции</p>
+              <h2 data-i18n="dashboard_ops_title">Живое состояние</h2>
+            </div>
 
+            <p class="helper-text dashboard-lead" data-i18n="dashboard_ops_note">
+              Агенты, discovery и сервисы в одном месте: видно, что обновляется, что ждет решения и что пропало из живой среды.
+            </p>
+
+            <ul class="mini-list mini-list--ops" id="dashboard-health-list">
+              <li class="mini-list__empty" data-i18n="dashboard_attention_empty">Сейчас нет предупреждений и проблемных зон.</li>
+            </ul>
+          </section>
+
+          <section class="panel panel--dashboard-card panel--dashboard-activity">
+            <div class="panel-heading">
+              <p class="panel-kicker" data-i18n="audit_kicker">Аудит</p>
+              <h2 data-i18n="recent_changes_title">Последние изменения</h2>
+            </div>
+
+            <p class="helper-text dashboard-lead" data-i18n="dashboard_history_note">
+              Последние события помогают быстро понять, кто и что изменил в инфраструктурной базе.
+            </p>
+
+            <ul class="mini-list" id="dashboard-history-list">
+              <li class="mini-list__empty" data-i18n="empty_history">История изменений пока пуста.</li>
+            </ul>
+          </section>
+        </div>
+
+        <div class="dashboard-column">
+          <section class="panel panel--dashboard-card panel--dashboard-summary">
+            <div class="panel-heading">
+              <p class="panel-kicker" data-i18n="dashboard_attention_kicker">Внимание</p>
+              <h2 data-i18n="dashboard_attention_title">Что требует внимания</h2>
+            </div>
+
+            <p class="helper-text dashboard-lead" data-i18n="dashboard_overview_note">
+              Здесь остаются только сигналы, которые помогают быстро понять, что требует внимания прямо сейчас.
+            </p>
+
+            <ul class="mini-list mini-list--tight" id="dashboard-summary-list">
+              <li class="mini-list__empty" data-i18n="dashboard_attention_empty">Сейчас нет предупреждений и проблемных зон.</li>
+            </ul>
+          </section>
+        </div>
       </div>
     </section>
 
@@ -682,115 +728,6 @@
     </div>
   </div>
 
-  <div class="modal-backdrop" id="export-modal" hidden>
-    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
-      <div class="modal-header">
-        <div>
-          <p class="panel-kicker" data-i18n="export_kicker">Экспорт</p>
-          <h2 id="export-modal-title" data-i18n="export_title">Выгрузка данных</h2>
-          <p class="helper-text" data-i18n="export_description">
-            CSV-файлы экспортируются в формате, удобном для Excel: `UTF-8 BOM` и `;` как разделитель.
-          </p>
-        </div>
-        <button type="button" class="action-button action-button--ghost" data-close-modal="export-modal" data-i18n="close_button">Закрыть</button>
-      </div>
-
-      <div class="settings-grid settings-grid--single">
-        <label class="setting-card">
-          <span class="setting-title" data-i18n="full_snapshot_title">Полный снимок</span>
-          <span class="setting-note" data-i18n="full_snapshot_note">JSON с подсетями, группами, хостами, scan-результатами и историей.</span>
-          <button type="button" class="action-button" id="export-json-button" data-i18n="export_json">Экспорт JSON</button>
-        </label>
-
-        <label class="setting-card">
-          <span class="setting-title" data-i18n="backup_export_title">Backup ATLAS</span>
-          <span class="setting-note" data-i18n="backup_export_note">Экспортирует выбранные разделы и позволяет полностью восстановить ATLAS на другом экземпляре.</span>
-          <div class="checkbox-grid">
-            <label class="checkbox-card">
-              <input type="checkbox" id="backup-include-inventory" checked>
-              <span data-i18n="backup_section_inventory">Реестр сети</span>
-            </label>
-            <label class="checkbox-card">
-              <input type="checkbox" id="backup-include-activity" checked>
-              <span data-i18n="backup_section_activity">История и scan</span>
-            </label>
-            <label class="checkbox-card">
-              <input type="checkbox" id="backup-include-system" checked>
-              <span data-i18n="backup_section_system">Системные настройки</span>
-            </label>
-            <label class="checkbox-card">
-              <input type="checkbox" id="backup-include-access" checked>
-              <span data-i18n="backup_section_access">Пользователи и доступ</span>
-            </label>
-            <label class="checkbox-card">
-              <input type="checkbox" id="backup-include-preferences" checked>
-              <span data-i18n="backup_section_preferences">Пользовательские настройки</span>
-            </label>
-            <label class="checkbox-card">
-              <input type="checkbox" id="backup-include-discovery" checked>
-              <span data-i18n="backup_section_discovery">Discovery agents</span>
-            </label>
-          </div>
-          <button type="button" class="action-button" id="export-backup-button" data-i18n="export_backup_button">Экспорт backup</button>
-        </label>
-
-        <div class="setting-card export-table-card">
-          <span class="setting-title" data-i18n="tabular_exports_title">Табличные выгрузки</span>
-          <span class="setting-note" data-i18n="tabular_exports_note">Отдельные CSV по подсетям, диапазонам и хостам.</span>
-          <div class="export-csv-table" role="table" aria-label="CSV exports">
-            <div class="export-csv-table__head" role="row">
-              <span role="columnheader" data-i18n="csv_table_dataset_header">Набор данных</span>
-              <span role="columnheader" data-i18n="csv_table_contents_header">Что входит</span>
-              <span role="columnheader" data-i18n="csv_table_action_header">Действие</span>
-            </div>
-
-            <div class="export-csv-table__row" role="row">
-              <div class="export-csv-table__dataset" role="cell">
-                <span class="export-csv-table__title" data-i18n="export_subnets_csv">Подсети CSV</span>
-                <span class="export-csv-table__note" data-i18n="csv_subnets_note">Подсети, пул, использование, auto-ping и комментарии.</span>
-              </div>
-              <div class="export-csv-table__contents" role="cell">
-                <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
-                <span class="export-csv-table__fields" data-i18n="csv_subnets_fields">CIDR, IP-пул, занятость, auto-ping, описание.</span>
-              </div>
-              <div class="export-csv-table__action" role="cell">
-                <button type="button" class="action-button" id="export-subnets-csv-button" data-i18n="export_subnets_csv">Подсети CSV</button>
-              </div>
-            </div>
-
-            <div class="export-csv-table__row" role="row">
-              <div class="export-csv-table__dataset" role="cell">
-                <span class="export-csv-table__title" data-i18n="export_groups_csv">Диапазоны CSV</span>
-                <span class="export-csv-table__note" data-i18n="csv_groups_note">Группы диапазонов внутри подсетей с их использованием и привязкой.</span>
-              </div>
-              <div class="export-csv-table__contents" role="cell">
-                <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
-                <span class="export-csv-table__fields" data-i18n="csv_groups_fields">Подсеть, диапазон, группа, занято, свободно, комментарий.</span>
-              </div>
-              <div class="export-csv-table__action" role="cell">
-                <button type="button" class="action-button" id="export-groups-csv-button" data-i18n="export_groups_csv">Диапазоны CSV</button>
-              </div>
-            </div>
-
-            <div class="export-csv-table__row" role="row">
-              <div class="export-csv-table__dataset" role="cell">
-                <span class="export-csv-table__title" data-i18n="export_devices_csv">Хосты CSV</span>
-                <span class="export-csv-table__note" data-i18n="csv_devices_note">Полный реестр хостов с IP, MAC, типом, группой и статусом.</span>
-              </div>
-              <div class="export-csv-table__contents" role="cell">
-                <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
-                <span class="export-csv-table__fields" data-i18n="csv_devices_fields">Имя, IP, MAC, тип, подсеть, группа, комментарий, статус.</span>
-              </div>
-              <div class="export-csv-table__action" role="cell">
-                <button type="button" class="action-button" id="export-devices-csv-button" data-i18n="export_devices_csv">Хосты CSV</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <div class="modal-backdrop" id="ip-check-modal" hidden>
     <div class="modal-panel modal-panel--form" role="dialog" aria-modal="true" aria-labelledby="ip-check-modal-title">
       <div class="modal-header">
@@ -852,6 +789,52 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="integrations-modal" hidden>
+    <div class="modal-panel modal-panel--settings" role="dialog" aria-modal="true" aria-labelledby="integrations-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="panel-kicker" data-i18n="integrations_kicker">Интеграции</p>
+          <h2 id="integrations-modal-title" data-i18n="integrations_section_title">Связь и обнаружение</h2>
+          <p class="helper-text" data-i18n="integrations_section_note">
+            Управление источниками данных ATLAS: auto-ping, агенты discovery и будущие SNMP/MQTT/Webhooks.
+          </p>
+        </div>
+        <button type="button" class="action-button action-button--ghost" data-close-modal="integrations-modal" data-i18n="close_button">Закрыть</button>
+      </div>
+
+      <div class="modal-content settings-modal-content">
+        <aside class="settings-sidebar">
+          <button type="button" class="settings-nav-button is-active" data-integrations-tab="automation" data-i18n="integrations_tab_ping">Ping</button>
+          <button type="button" class="settings-nav-button admin-only" data-integrations-tab="discovery" data-i18n="integrations_tab_agents" hidden>Агенты</button>
+          <button type="button" class="settings-nav-button" data-integrations-tab="snmp" data-i18n="integration_future_snmp_title">SNMP</button>
+          <button type="button" class="settings-nav-button" data-integrations-tab="push" data-i18n="integration_future_push_title">Webhooks / API push</button>
+        </aside>
+
+        <div class="settings-sections" id="integrations-sections">
+          <section class="panel panel--modal settings-panel settings-panel--half" data-integrations-section="snmp" hidden>
+            <div class="panel-heading">
+              <p class="panel-kicker" data-i18n="integrations_kicker">Интеграции</p>
+              <h2 data-i18n="integration_future_snmp_title">SNMP</h2>
+              <p class="helper-text helper-text--tight" data-i18n="integration_future_snmp_note">
+                Будущий раздел для сетевого оборудования, интерфейсов, ARP/MAC и LLDP/CDP.
+              </p>
+            </div>
+          </section>
+
+          <section class="panel panel--modal settings-panel settings-panel--half" data-integrations-section="push" hidden>
+            <div class="panel-heading">
+              <p class="panel-kicker" data-i18n="integrations_kicker">Интеграции</p>
+              <h2 data-i18n="integration_future_push_title">Webhooks / API push</h2>
+              <p class="helper-text helper-text--tight" data-i18n="integration_future_push_note">
+                Будущий раздел для внешних систем, MQTT и безопасной отправки событий в ATLAS.
+              </p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="settings-modal" hidden>
     <div class="modal-panel modal-panel--settings" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
       <div class="modal-header">
@@ -859,7 +842,7 @@
           <p class="panel-kicker" data-i18n="settings_button">Настройки</p>
           <h2 id="settings-modal-title" data-i18n="settings_title">Поведение ATLAS</h2>
           <p class="helper-text" data-i18n="settings_description">
-            Язык, подпись, темы оформления, фоновый ping и шаблоны автоподстановки групп.
+            Язык, подпись, темы оформления, шаблоны и параметры администрирования.
           </p>
         </div>
         <button type="button" class="action-button action-button--ghost" data-close-modal="settings-modal" data-i18n="close_button">Закрыть</button>
@@ -869,10 +852,9 @@
         <aside class="settings-sidebar">
           <button type="button" class="settings-nav-button is-active" data-settings-tab="profile" data-i18n="settings_section_profile">Профиль</button>
           <button type="button" class="settings-nav-button" data-settings-tab="interface" data-i18n="settings_section_interface">Интерфейс</button>
-          <button type="button" class="settings-nav-button" data-settings-tab="automation" data-i18n="settings_section_automation">Автоматизация</button>
           <button type="button" class="settings-nav-button" data-settings-tab="templates" data-i18n="settings_section_templates">Шаблоны</button>
-          <button type="button" class="settings-nav-button admin-only" data-settings-tab="discovery" data-i18n="settings_section_discovery" hidden>Discovery</button>
           <button type="button" class="settings-nav-button admin-only" data-settings-tab="administration" data-i18n="settings_section_admin" hidden>Администрирование</button>
+          <button type="button" class="settings-nav-button settings-nav-button--bottom" data-open-modal="about-modal" data-i18n="about_button">О программе</button>
         </aside>
 
         <div class="settings-sections">
@@ -902,7 +884,23 @@
           <div id="profile-settings-status" class="result-card result-card--muted"></div>
         </section>
 
-        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-access-panel" data-settings-section="administration" hidden>
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" data-settings-section="administration" hidden>
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
+            <h2 data-i18n="settings_section_admin">Администрирование</h2>
+          </div>
+
+          <div class="template-section-tabs" role="tablist" aria-label="Administration sections">
+            <button type="button" class="template-section-tab is-active" data-admin-tab="access" data-i18n="admin_tab_access" aria-selected="true">Пользователи и доступ</button>
+            <button type="button" class="template-section-tab" data-admin-tab="import" data-i18n="data_tab_import" aria-selected="false">Импорт</button>
+            <button type="button" class="template-section-tab" data-admin-tab="export" data-i18n="data_tab_export" aria-selected="false">Экспорт</button>
+            <button type="button" class="template-section-tab" data-admin-tab="maintenance" data-i18n="admin_tab_maintenance" aria-selected="false">Обслуживание</button>
+          </div>
+
+          <div class="settings-sections" id="admin-sections"></div>
+        </section>
+
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-access-panel" data-admin-panel="access" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
             <h2 data-i18n="access_groups_title">Группы доступа</h2>
@@ -940,7 +938,7 @@
           </div>
         </section>
 
-        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-users-panel" data-settings-section="administration" hidden>
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-users-panel" data-admin-panel="access" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
             <h2 data-i18n="users_title">Пользователи</h2>
@@ -1071,7 +1069,129 @@
           <div id="interface-settings-status" class="result-card result-card--muted"></div>
         </section>
 
-        <section class="panel panel--modal settings-panel settings-panel--half" data-settings-section="automation" hidden>
+        <section class="panel panel--modal settings-panel settings-panel--half admin-only" data-admin-panel="import" hidden>
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="data_kicker">Данные</p>
+            <h2 data-i18n="import_button">Импорт</h2>
+            <p class="helper-text helper-text--tight" data-i18n="data_section_note">
+              Переносите backup, импортируйте файлы и выгружайте таблицы из одного места.
+            </p>
+          </div>
+
+          <div class="settings-grid settings-grid--single">
+            <div class="setting-card setting-card--action-block">
+              <span class="setting-title" data-i18n="import_button">Импорт</span>
+              <span class="setting-note" data-i18n="data_import_note">JSON/CSV или backup ATLAS. Для backup будет показано подтверждение восстановления.</span>
+              <button type="button" class="action-button" id="import-button" data-i18n="import_button">Импорт</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" data-admin-panel="export" hidden>
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="data_kicker">Данные</p>
+            <h2 data-i18n="export_button">Экспорт</h2>
+            <p class="helper-text helper-text--tight" data-i18n="data_export_note">
+              JSON snapshot, backup ATLAS и CSV-выгрузки реестра.
+            </p>
+          </div>
+
+          <div class="settings-grid settings-grid--single">
+            <label class="setting-card">
+              <span class="setting-title" data-i18n="full_snapshot_title">Полный снимок</span>
+              <span class="setting-note" data-i18n="full_snapshot_note">JSON с подсетями, группами, хостами, scan-результатами и историей.</span>
+              <button type="button" class="action-button" id="export-json-button" data-i18n="export_json">Экспорт JSON</button>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title" data-i18n="backup_export_title">Backup ATLAS</span>
+              <span class="setting-note" data-i18n="backup_export_note">Экспортирует выбранные разделы и позволяет полностью восстановить ATLAS на другом экземпляре.</span>
+              <div class="checkbox-grid">
+                <label class="checkbox-card">
+                  <input type="checkbox" id="backup-include-inventory" checked>
+                  <span data-i18n="backup_section_inventory">Реестр сети</span>
+                </label>
+                <label class="checkbox-card">
+                  <input type="checkbox" id="backup-include-activity" checked>
+                  <span data-i18n="backup_section_activity">История и scan</span>
+                </label>
+                <label class="checkbox-card">
+                  <input type="checkbox" id="backup-include-system" checked>
+                  <span data-i18n="backup_section_system">Системные настройки</span>
+                </label>
+                <label class="checkbox-card">
+                  <input type="checkbox" id="backup-include-access" checked>
+                  <span data-i18n="backup_section_access">Пользователи и доступ</span>
+                </label>
+                <label class="checkbox-card">
+                  <input type="checkbox" id="backup-include-preferences" checked>
+                  <span data-i18n="backup_section_preferences">Пользовательские настройки</span>
+                </label>
+                <label class="checkbox-card">
+                  <input type="checkbox" id="backup-include-discovery" checked>
+                  <span data-i18n="backup_section_discovery">Discovery agents</span>
+                </label>
+              </div>
+              <button type="button" class="action-button" id="export-backup-button" data-i18n="export_backup_button">Экспорт backup</button>
+            </label>
+
+            <div class="setting-card export-table-card">
+              <span class="setting-title" data-i18n="tabular_exports_title">Табличные выгрузки</span>
+              <span class="setting-note" data-i18n="tabular_exports_note">Отдельные CSV по подсетям, диапазонам и хостам.</span>
+              <div class="export-csv-table" role="table" aria-label="CSV exports">
+                <div class="export-csv-table__head" role="row">
+                  <span role="columnheader" data-i18n="csv_table_dataset_header">Набор данных</span>
+                  <span role="columnheader" data-i18n="csv_table_contents_header">Что входит</span>
+                  <span role="columnheader" data-i18n="csv_table_action_header">Действие</span>
+                </div>
+
+                <div class="export-csv-table__row" role="row">
+                  <div class="export-csv-table__dataset" role="cell">
+                    <span class="export-csv-table__title" data-i18n="export_subnets_csv">Подсети CSV</span>
+                    <span class="export-csv-table__note" data-i18n="csv_subnets_note">Подсети, пул, использование, auto-ping и комментарии.</span>
+                  </div>
+                  <div class="export-csv-table__contents" role="cell">
+                    <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
+                    <span class="export-csv-table__fields" data-i18n="csv_subnets_fields">CIDR, IP-пул, занятость, auto-ping, описание.</span>
+                  </div>
+                  <div class="export-csv-table__action" role="cell">
+                    <button type="button" class="action-button" id="export-subnets-csv-button" data-i18n="export_subnets_csv">Подсети CSV</button>
+                  </div>
+                </div>
+
+                <div class="export-csv-table__row" role="row">
+                  <div class="export-csv-table__dataset" role="cell">
+                    <span class="export-csv-table__title" data-i18n="export_groups_csv">Диапазоны CSV</span>
+                    <span class="export-csv-table__note" data-i18n="csv_groups_note">Группы диапазонов внутри подсетей с их использованием и привязкой.</span>
+                  </div>
+                  <div class="export-csv-table__contents" role="cell">
+                    <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
+                    <span class="export-csv-table__fields" data-i18n="csv_groups_fields">Подсеть, диапазон, группа, занято, свободно, комментарий.</span>
+                  </div>
+                  <div class="export-csv-table__action" role="cell">
+                    <button type="button" class="action-button" id="export-groups-csv-button" data-i18n="export_groups_csv">Диапазоны CSV</button>
+                  </div>
+                </div>
+
+                <div class="export-csv-table__row" role="row">
+                  <div class="export-csv-table__dataset" role="cell">
+                    <span class="export-csv-table__title" data-i18n="export_devices_csv">Хосты CSV</span>
+                    <span class="export-csv-table__note" data-i18n="csv_devices_note">Полный реестр хостов с IP, MAC, типом, группой и статусом.</span>
+                  </div>
+                  <div class="export-csv-table__contents" role="cell">
+                    <span class="export-chip" data-i18n="csv_excel_ready_badge">Excel-ready CSV</span>
+                    <span class="export-csv-table__fields" data-i18n="csv_devices_fields">Имя, IP, MAC, тип, подсеть, группа, комментарий, статус.</span>
+                  </div>
+                  <div class="export-csv-table__action" role="cell">
+                    <button type="button" class="action-button" id="export-devices-csv-button" data-i18n="export_devices_csv">Хосты CSV</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel--modal settings-panel settings-panel--half" data-integrations-section="automation" hidden>
           <div class="panel-heading">
             <p class="panel-kicker">Ping</p>
             <h2 data-i18n="background_scan_title">Фоновый auto-ping</h2>
@@ -1111,7 +1231,7 @@
           <div id="server-settings-status" class="result-card result-card--muted"></div>
         </section>
 
-        <section class="panel panel--modal settings-panel settings-panel--full admin-only" data-settings-section="discovery" hidden>
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" data-integrations-section="discovery" hidden>
           <div class="panel-heading panel-heading--split">
             <div>
               <p class="panel-kicker" data-i18n="discovery_kicker">Discovery</p>
@@ -1555,14 +1675,13 @@
           </div>
         </section>
 
-        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="maintenance-panel" data-settings-section="administration" hidden>
+        <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="maintenance-panel" data-admin-panel="maintenance" hidden>
           <div class="panel-heading">
             <p class="panel-kicker" data-i18n="maintenance_kicker">Сервис</p>
             <h2 data-i18n="maintenance_title">Дополнительно</h2>
           </div>
 
           <div class="template-editor-actions">
-            <button type="button" class="action-button action-button--ghost" data-open-modal="about-modal" data-i18n="about_button">О программе</button>
             <button type="button" class="action-button action-button--danger" id="clear-history-button" data-i18n="clear_history_button">Очистить историю</button>
             <button type="button" class="action-button action-button--danger" id="clear-data-button" data-i18n="clear_button">Очистить</button>
           </div>

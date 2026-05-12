@@ -623,25 +623,44 @@ def normalize_optional_text(value: object, max_length: int, field_name: str) -> 
     return text
 
 
-def is_service_ip_duplicate_allowed(
+def get_blocking_ip_duplicate(
     connection: sqlite3.Connection,
     *,
     device_id: str,
     ip: str,
     device_type: str,
     host_device_id: str,
-) -> bool:
-    if device_type != "service" or not host_device_id:
-        return False
+) -> sqlite3.Row | None:
+    if device_type != "service":
+        return connection.execute(
+            """
+            SELECT id, name
+            FROM devices
+            WHERE ip = ?
+              AND id != ?
+              AND NOT (type = 'service' AND host_device_id = ?)
+            LIMIT 1
+            """,
+            (ip, device_id, device_id),
+        ).fetchone()
+
+    if not host_device_id:
+        return connection.execute(
+            "SELECT id, name FROM devices WHERE ip = ? AND id != ? LIMIT 1",
+            (ip, device_id),
+        ).fetchone()
 
     host_row = connection.execute(
         "SELECT id, ip FROM devices WHERE id = ?",
         (host_device_id,),
     ).fetchone()
     if host_row is None or host_row["ip"] != ip:
-        return False
+        return connection.execute(
+            "SELECT id, name FROM devices WHERE ip = ? AND id != ? LIMIT 1",
+            (ip, device_id),
+        ).fetchone()
 
-    conflicting_row = connection.execute(
+    return connection.execute(
         """
         SELECT id, name
         FROM devices
@@ -652,7 +671,6 @@ def is_service_ip_duplicate_allowed(
         """,
         (ip, device_id, host_device_id, host_device_id),
     ).fetchone()
-    return conflicting_row is None
 
 
 def normalize_group_payload(
@@ -767,17 +785,14 @@ def normalize_device_payload(
             raise ValueError("IP устройства не входит в диапазон выбранной группы.")
         subnet_id = group["subnetId"]
 
-    duplicate_ip = connection.execute(
-        "SELECT id, name FROM devices WHERE ip = ? AND id != ? LIMIT 1",
-        (ip, device_id),
-    ).fetchone()
-    if duplicate_ip is not None and not is_service_ip_duplicate_allowed(
+    duplicate_ip = get_blocking_ip_duplicate(
         connection,
         device_id=device_id,
         ip=ip,
         device_type=device_type,
         host_device_id=host_device_id,
-    ):
+    )
+    if duplicate_ip is not None:
         raise ValueError(f"IP {ip} уже назначен устройству {duplicate_ip['name']}.")
 
     if mac:
@@ -1882,6 +1897,8 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
         "customGroupTemplates": [],
         "customDeviceTypes": [],
         "customDeviceSources": [],
+        "dashboardStatOrder": [],
+        "dashboardWidgetColumns": {},
     }
     rows = connection.execute(
         "SELECT key, value FROM user_settings WHERE user_id = ?",
@@ -1892,11 +1909,11 @@ def load_user_preferences(connection: sqlite3.Connection, user_id: str) -> dict:
         raw_value = row["value"]
         if key in {"autoRescanAfterDeviceSave", "modalBlurEnabled"}:
             defaults[key] = raw_value == "1"
-        elif key in {"customGroupTemplates", "customDeviceTypes", "customDeviceSources"}:
+        elif key in {"customGroupTemplates", "customDeviceTypes", "customDeviceSources", "dashboardStatOrder", "dashboardWidgetColumns"}:
             try:
                 defaults[key] = json.loads(raw_value)
             except json.JSONDecodeError:
-                defaults[key] = []
+                defaults[key] = {} if key == "dashboardWidgetColumns" else []
         else:
             defaults[key] = raw_value
     return defaults
@@ -1914,6 +1931,8 @@ def save_user_preferences(connection: sqlite3.Connection, user_id: str, payload:
         "customGroupTemplates",
         "customDeviceTypes",
         "customDeviceSources",
+        "dashboardStatOrder",
+        "dashboardWidgetColumns",
     }
     now = utc_now_iso()
     changed = False
@@ -1925,8 +1944,10 @@ def save_user_preferences(connection: sqlite3.Connection, user_id: str, payload:
         value = payload[key]
         if key in {"autoRescanAfterDeviceSave", "modalBlurEnabled"}:
             stored_value = "1" if bool(value) else "0"
-        elif key in {"customGroupTemplates", "customDeviceTypes", "customDeviceSources"}:
+        elif key in {"customGroupTemplates", "customDeviceTypes", "customDeviceSources", "dashboardStatOrder"}:
             stored_value = json.dumps(value if isinstance(value, list) else [], ensure_ascii=False)
+        elif key == "dashboardWidgetColumns":
+            stored_value = json.dumps(value if isinstance(value, dict) else {}, ensure_ascii=False)
         else:
             stored_value = str(value or "").strip()
 

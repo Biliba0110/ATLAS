@@ -31,7 +31,6 @@ const DEFAULT_SETTINGS = {
   language: "en",
   customSignature: "",
 };
-
 const DEFAULT_DISCOVERY_DATA_POLICY = {
   storeRuntime: true,
   storeLabels: false,
@@ -249,6 +248,20 @@ const preferences = {
   customDeviceSources: [],
 };
 
+const integrationsSectionsHost = document.getElementById("integrations-sections");
+if (integrationsSectionsHost) {
+  document.querySelectorAll("[data-integrations-section]").forEach((section) => {
+    integrationsSectionsHost.appendChild(section);
+  });
+}
+
+const adminSectionsHost = document.getElementById("admin-sections");
+if (adminSectionsHost) {
+  document.querySelectorAll("[data-admin-panel]").forEach((section) => {
+    adminSectionsHost.appendChild(section);
+  });
+}
+
 const elements = {
   authScreen: document.getElementById("auth-screen"),
   authStatus: document.getElementById("auth-status"),
@@ -287,10 +300,16 @@ const elements = {
   openAddButton: document.querySelector('[data-open-modal="add-modal"]'),
   openSettingsButton: document.getElementById("open-settings-button"),
   settingsShortcutButtons: [...document.querySelectorAll("[data-settings-shortcut]")],
+  integrationsShortcutButtons: [...document.querySelectorAll("[data-integrations-shortcut]")],
+  integrationsModal: document.getElementById("integrations-modal"),
+  integrationsNavButtons: [...document.querySelectorAll("[data-integrations-tab]")],
+  integrationsSections: [...document.querySelectorAll("[data-integrations-section]")],
   settingsModal: document.getElementById("settings-modal"),
   closeSettingsButton: document.querySelector('[data-close-modal="settings-modal"]'),
   settingsNavButtons: [...document.querySelectorAll("[data-settings-tab]")],
   settingsSections: [...document.querySelectorAll("[data-settings-section]")],
+  adminTabButtons: [...document.querySelectorAll("[data-admin-tab]")],
+  adminContentPanels: [...document.querySelectorAll("[data-admin-panel]")],
   templateTabButtons: [...document.querySelectorAll("[data-template-tab]")],
   templatePanels: [...document.querySelectorAll("[data-template-panel]")],
   discoveryTabButtons: [...document.querySelectorAll("[data-discovery-tab]")],
@@ -313,6 +332,7 @@ const elements = {
   registrySections: [...document.querySelectorAll("[data-registry-section]")],
   filterToggleButtons: [...document.querySelectorAll("[data-filter-toggle]")],
   statCards: [...document.querySelectorAll("[data-stat-target]")],
+  dashboardHealthList: document.getElementById("dashboard-health-list"),
   modalBackdrops: [...document.querySelectorAll(".modal-backdrop")],
   openModalButtons: [...document.querySelectorAll("[data-open-modal]")],
   closeModalButtons: [...document.querySelectorAll("[data-close-modal]")],
@@ -465,6 +485,8 @@ let groupSuggestionTemplates = DEFAULT_GROUP_SUGGESTION_TEMPLATES;
 let activeView = "dashboard";
 let activeRegistrySection = "subnets";
 let activeSettingsSection = "profile";
+let activeIntegrationsSection = "automation";
+let activeAdminSection = "access";
 let activeTemplateSection = "device-types";
 let activeDiscoverySection = "agents";
 let showAllSubnetsInRegistry = false;
@@ -490,6 +512,7 @@ let activeDialogResolver = null;
 let dialogOpenedOverModal = false;
 let activeFieldHelpButton = null;
 let isFieldHelpPinned = false;
+let suppressDashboardStatClick = false;
 let editingSubnetId = "";
 let editingGroupId = "";
 let editingDeviceId = "";
@@ -1011,6 +1034,10 @@ function bindEvents() {
   });
   elements.statCards.forEach((button) => {
     button.addEventListener("click", () => {
+      if (suppressDashboardStatClick) {
+        suppressDashboardStatClick = false;
+        return;
+      }
       handleStatNavigation(button.dataset.statTarget);
     });
   });
@@ -1058,9 +1085,25 @@ function bindEvents() {
       openSettingsModal(button.dataset.settingsShortcut || "profile");
     });
   });
+  elements.integrationsShortcutButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      closeUserMenu();
+      openIntegrationsModal(button.dataset.integrationsShortcut || "automation");
+    });
+  });
   elements.settingsNavButtons.forEach((button) => {
     button.addEventListener("click", () => {
       setActiveSettingsSection(button.dataset.settingsTab);
+    });
+  });
+  elements.adminTabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveAdminSection(button.dataset.adminTab);
+    });
+  });
+  elements.integrationsNavButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveIntegrationsSection(button.dataset.integrationsTab);
     });
   });
   elements.templateTabButtons.forEach((button) => {
@@ -1148,6 +1191,7 @@ function bindEvents() {
   elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
   elements.historyScopeFilter?.addEventListener("change", renderHistoryTable);
   elements.dashboardAttentionList?.addEventListener("click", handleDashboardAttentionClick);
+  elements.dashboardHealthList?.addEventListener("click", handleDashboardHealthClick);
   elements.missingTypeForm?.addEventListener("submit", handleMissingTypeSubmit);
   document.addEventListener("pointerdown", handleFieldHelpPointerDown, true);
   document.addEventListener("click", handleDocumentClick);
@@ -2671,6 +2715,10 @@ function handleOpenModalRequest(modalId, trigger = null) {
     openSettingsModal();
     return;
   }
+  if (modalId === "integrations-modal") {
+    openIntegrationsModal();
+    return;
+  }
 
   if (modalId === "subnet-modal") {
     prepareSubnetModal();
@@ -2748,6 +2796,9 @@ function closeModal(modalId) {
     restoreInterfaceBaseline();
     syncSettingsForm();
     interfaceSettingsBaseline = null;
+  }
+  if (modal.id === "integrations-modal") {
+    clearDiscoveryAgentConfig();
   }
   hideFieldHelp(true);
   if (!getOpenModal()) {
@@ -2947,6 +2998,10 @@ function handleDocumentClick(event) {
 }
 
 function openSettingsModal(sectionName = activeSettingsSection) {
+  if (sectionName === "automation" || sectionName === "discovery" || sectionName === "integrations") {
+    openIntegrationsModal(sectionName === "integrations" ? "automation" : sectionName);
+    return;
+  }
   clearDiscoveryAgentConfig();
   interfaceSettingsBaseline = { ...preferences.settings };
   syncSettingsForm();
@@ -2959,6 +3014,16 @@ function openSettingsModal(sectionName = activeSettingsSection) {
   renderAdminPanels();
   setActiveSettingsSection(sectionName);
   openModal("settings-modal");
+}
+
+function openIntegrationsModal(sectionName = activeIntegrationsSection) {
+  clearDiscoveryAgentConfig();
+  syncSettingsForm();
+  setServerSettingsStatus(t("ping_server_running", {
+    interval: state.settings?.scanIntervalSeconds || 90,
+  }), "muted");
+  setActiveIntegrationsSection(sectionName);
+  openModal("integrations-modal");
 }
 
 function applyAuthSession(session) {
@@ -3207,6 +3272,7 @@ function renderPermissionAwareUi() {
   });
 
   setActiveSettingsSection(activeSettingsSection);
+  setActiveIntegrationsSection(activeIntegrationsSection);
 }
 
 function renderAdminPanels() {
@@ -3283,7 +3349,58 @@ function setActiveSettingsSection(sectionName) {
   if (activeSettingsSection === "templates") {
     setActiveTemplateSection(activeTemplateSection);
   }
+  if (activeSettingsSection === "administration") {
+    setActiveAdminSection(activeAdminSection);
+  }
   if (activeSettingsSection === "discovery") {
+    setActiveDiscoverySection(activeDiscoverySection);
+  }
+}
+
+function setActiveAdminSection(sectionName) {
+  const isAdmin = Boolean(state.auth?.capabilities?.isAdmin);
+  const allowedSections = ["access", "import", "export", "maintenance"];
+  const resolvedSection = allowedSections.includes(sectionName) ? sectionName : "access";
+  activeAdminSection = resolvedSection;
+
+  elements.adminTabButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.adminTab === activeAdminSection);
+    button.setAttribute("aria-selected", button.dataset.adminTab === activeAdminSection ? "true" : "false");
+    button.hidden = !isAdmin;
+  });
+
+  elements.adminContentPanels.forEach((panel) => {
+    panel.hidden = !isAdmin || panel.dataset.adminPanel !== activeAdminSection;
+  });
+}
+
+function setActiveIntegrationsSection(sectionName) {
+  const isAdmin = Boolean(state.auth?.capabilities?.isAdmin);
+  const allowedSections = ["automation", "discovery", "snmp", "push"];
+  const requestedSection = allowedSections.includes(sectionName) ? sectionName : "automation";
+  const resolvedSection = requestedSection === "discovery" && !isAdmin ? "automation" : requestedSection;
+  activeIntegrationsSection = resolvedSection;
+
+  elements.integrationsNavButtons.forEach((button) => {
+    const isAdminOnly = button.classList.contains("admin-only");
+    if (isAdminOnly && !isAdmin) {
+      button.hidden = true;
+      button.classList.remove("is-active");
+      return;
+    }
+
+    button.hidden = false;
+    button.classList.toggle("is-active", button.dataset.integrationsTab === activeIntegrationsSection);
+  });
+
+  elements.integrationsSections.forEach((section) => {
+    const sectionNameForNode = section.dataset.integrationsSection;
+    const isAdminOnly = section.classList.contains("admin-only");
+    const isActive = sectionNameForNode === activeIntegrationsSection;
+    section.hidden = isAdminOnly ? !isAdmin || !isActive : !isActive;
+  });
+
+  if (activeIntegrationsSection === "discovery") {
     setActiveDiscoverySection(activeDiscoverySection);
   }
 }
@@ -4604,7 +4721,6 @@ function exportJson() {
     JSON.stringify(payload, null, 2),
     "application/json"
   );
-  closeModal("export-modal");
 }
 
 async function exportBackup() {
@@ -4633,7 +4749,6 @@ async function exportBackup() {
       JSON.stringify(backup, null, 2),
       "application/json"
     );
-    closeModal("export-modal");
     showToast(t("backup_export_done"));
   } catch (error) {
     showToast(error.message || t("server_data_load_failed"), true);
@@ -4669,7 +4784,6 @@ function exportSubnetsCsv() {
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
-  closeModal("export-modal");
 }
 
 function exportGroupsCsv() {
@@ -4704,7 +4818,6 @@ function exportGroupsCsv() {
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
-  closeModal("export-modal");
 }
 
 function exportDevicesCsv() {
@@ -4757,7 +4870,6 @@ function exportDevicesCsv() {
     toCsv(rows),
     "text/csv;charset=utf-8"
   );
-  closeModal("export-modal");
 }
 
 async function handleImportFile(event) {
@@ -7225,8 +7337,71 @@ function renderStats() {
 }
 
 function renderDashboardPanels() {
+  renderDashboardHealth();
   renderDashboardAttention();
   renderDashboardHistory();
+}
+
+function renderDashboardHealth() {
+  if (!elements.dashboardHealthList) {
+    return;
+  }
+
+  const agents = state.admin?.discoveryAgents || [];
+  const enabledAgents = agents.filter((agent) => agent.enabled);
+  const agentStates = enabledAgents.map((agent) => getDiscoveryFreshness(agent.lastSeenAt, agent));
+  const agentUp = agentStates.filter((status) => status.state === "up").length;
+  const agentPending = agentStates.filter((status) => status.state === "pending").length;
+  const agentDown = agentStates.filter((status) => status.state === "down").length;
+  const disabledAgents = agents.length - enabledAgents.length;
+
+  const discoveryResults = state.admin?.discoveryResults || [];
+  const discoveryNew = discoveryResults.filter((result) => result.state === "new").length;
+  const discoveryStale = discoveryResults.filter((result) => result.state === "stale").length;
+  const discoveryMatched = discoveryResults.filter((result) => result.state === "matched").length;
+
+  const services = getServiceRecords();
+  const liveServices = services.filter(hasLiveAgentStatus);
+  const liveStates = liveServices.map((service) => getAgentAvailabilityStatus(service));
+  const servicesUp = liveStates.filter((status) => status.state === "up").length;
+  const servicesPending = liveStates.filter((status) => status.state === "pending").length;
+  const servicesDown = liveStates.filter((status) => status.state === "down").length;
+
+  const cards = [
+    {
+      title: t("dashboard_health_agents_title"),
+      value: `${agentUp}/${enabledAgents.length}`,
+      note: t("dashboard_health_agents_note", { pending: agentPending, down: agentDown, disabled: disabledAgents }),
+      tone: agentDown > 0 ? "danger" : agentPending > 0 ? "warn" : "ok",
+      action: "discovery",
+    },
+    {
+      title: t("dashboard_health_discovery_title"),
+      value: String(discoveryNew),
+      note: t("dashboard_health_discovery_note", { matched: discoveryMatched, stale: discoveryStale }),
+      tone: discoveryStale > 0 ? "warn" : discoveryNew > 0 ? "info" : "ok",
+      action: "discovery",
+    },
+    {
+      title: t("dashboard_health_services_title"),
+      value: `${servicesUp}/${liveServices.length}`,
+      note: t("dashboard_health_services_note", { pending: servicesPending, down: servicesDown }),
+      tone: servicesDown > 0 ? "danger" : servicesPending > 0 ? "warn" : "ok",
+      action: "services",
+    },
+  ];
+
+  elements.dashboardHealthList.innerHTML = cards
+    .map((card) => `
+      <li>
+        <button type="button" class="mini-item mini-item--attention mini-item--${escapeHtml(card.tone)} dashboard-health-card" data-dashboard-health-action="${escapeHtml(card.action)}">
+          <span class="mini-title">${escapeHtml(card.title)}</span>
+          <span class="mini-value">${escapeHtml(card.value)}</span>
+          <span class="mini-meta">${escapeHtml(card.note)}</span>
+        </button>
+      </li>
+    `)
+    .join("");
 }
 
 function renderDashboardAttentionDetails(lines, emptyLabel) {
@@ -7239,6 +7414,24 @@ function renderDashboardAttentionDetails(lines, emptyLabel) {
       ${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}
     </ul>
   `;
+}
+
+function handleDashboardHealthClick(event) {
+  const button = event.target.closest("[data-dashboard-health-action]");
+  if (!button) {
+    return;
+  }
+
+  const action = button.dataset.dashboardHealthAction;
+  if (action === "discovery") {
+    openIntegrationsModal("discovery");
+    return;
+  }
+  if (action === "services") {
+    setActiveView("registry");
+    setActiveRegistrySection("services");
+    document.getElementById("registry-panel-services")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 function getDevicesMissingType() {
@@ -7377,10 +7570,6 @@ function renderDashboardAttention() {
     .filter(({ freeCount }) => freeCount > 0 && freeCount <= 2)
     .map(({ group, freeCount }) => `${group.name} · ${formatGroupRange(group, true)} · ${t("free_short", { count: freeCount })}`);
 
-  const automationExcluded = state.subnets
-    .filter((subnet) => !subnet.scanEnabled)
-    .map((subnet) => `${subnet.name} · ${subnet.cidr}`);
-
   const missingTypeDevices = getDevicesMissingType()
     .map((device) => `${device.name} · ${device.ip}${device.unknownType ? ` · ${t("missing_type_raw_value", { value: device.unknownType })}` : ""}`);
   const orphanDevices = state.devices
@@ -7389,8 +7578,54 @@ function renderDashboardAttention() {
   const staleDiscovery = (state.admin?.discoveryResults || [])
     .filter((result) => result.state === "stale")
     .map((result) => `${result.name} · ${getDeviceSourceLabel(result.source)} · ${formatDateTime(result.lastSeenAt || result.updatedAt)}`);
+  const agentIssues = (state.admin?.discoveryAgents || [])
+    .filter((agent) => agent.enabled)
+    .map((agent) => ({ agent, freshness: getDiscoveryFreshness(agent.lastSeenAt, agent) }))
+    .filter(({ freshness, agent }) => freshness.state !== "up" || agent.lastError || agent.lastRejectReason)
+    .map(({ agent, freshness }) => `${agent.name} · ${freshness.label}${agent.lastError ? ` · ${agent.lastError}` : ""}${agent.lastRejectReason ? ` · ${agent.lastRejectReason}` : ""}`);
+  const unavailableServices = getServiceRecords()
+    .filter(hasLiveAgentStatus)
+    .map((service) => ({ service, availability: getAgentAvailabilityStatus(service) }))
+    .filter(({ availability }) => availability.state === "down")
+    .map(({ service }) => `${service.name} · ${resolveDeviceHost(service)?.name || t("no_binding")}`);
+  const pendingServices = getServiceRecords()
+    .filter(hasLiveAgentStatus)
+    .map((service) => ({ service, availability: getAgentAvailabilityStatus(service) }))
+    .filter(({ availability }) => availability.state === "pending")
+    .map(({ service }) => `${service.name} · ${resolveDeviceHost(service)?.name || t("no_binding")}`);
+  const newDiscovery = (state.admin?.discoveryResults || [])
+    .filter((result) => result.state === "new")
+    .map((result) => `${result.name} · ${getDeviceSourceLabel(result.source)} · ${result.agentName || t("no_data")}`);
 
   const items = [
+    {
+      value: agentIssues.length,
+      title: t("dashboard_attention_agents_title"),
+      note: t("dashboard_attention_agents_note"),
+      tone: agentIssues.length > 0 ? "danger" : "ok",
+      details: agentIssues,
+    },
+    {
+      value: unavailableServices.length,
+      title: t("dashboard_attention_services_down_title"),
+      note: t("dashboard_attention_services_down_note"),
+      tone: unavailableServices.length > 0 ? "danger" : "ok",
+      details: unavailableServices,
+    },
+    {
+      value: pendingServices.length,
+      title: t("dashboard_attention_services_pending_title"),
+      note: t("dashboard_attention_services_pending_note"),
+      tone: pendingServices.length > 0 ? "warn" : "ok",
+      details: pendingServices,
+    },
+    {
+      value: newDiscovery.length,
+      title: t("dashboard_attention_discovery_new_title"),
+      note: t("dashboard_attention_discovery_new_note"),
+      tone: newDiscovery.length > 0 ? "info" : "ok",
+      details: newDiscovery,
+    },
     {
       value: conflictEntries.length,
       title: t("dashboard_attention_conflicts_title"),
@@ -7442,13 +7677,6 @@ function renderDashboardAttention() {
       note: t("dashboard_attention_stale_note"),
       tone: staleDiscovery.length > 0 ? "warn" : "ok",
       details: staleDiscovery,
-    },
-    {
-      value: automationExcluded.length,
-      title: t("dashboard_attention_automation_title"),
-      note: t("dashboard_attention_automation_note"),
-      tone: automationExcluded.length > 0 ? "info" : "ok",
-      details: automationExcluded,
     },
   ];
 
