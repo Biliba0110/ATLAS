@@ -1,73 +1,182 @@
-# ATLAS Python Agent MVP
+# ATLAS Python Discovery Agent
 
 Language versions: [English](README.md) | [Українська](README.uk.md) | [Русский](README.ru.md)
 
-The MVP agent collects local host, Docker, Kubernetes, and Proxmox metadata and pushes signed discovery packets to ATLAS.
-Each collection cycle gets one shared `runId`, then the agent sends separate packets by `source`:
-`host`, `docker`, `kubernetes`, `proxmox`, later more sources. ATLAS groups those packets into one discovery run.
+The ATLAS agent is a dependency-free Python collector that sends signed discovery snapshots to ATLAS over outbound HTTP(S).
 
-## Config
+It does not scan networks. It reads local or API-provided inventory from enabled collectors and pushes it to ATLAS.
 
-Copy `atlas-agent.example.json` to `atlas-agent.json` and set:
+## Requirements
 
-- `atlas_url`: ATLAS URL. Use HTTPS in real deployments.
-- `agent_id`: the agent ID created in ATLAS.
-- `agent_token`: token shown once by ATLAS.
-- `interval`: how often the agent sends data to ATLAS, in seconds; minimum `15`.
-- `timeout`: HTTP timeout for sending packets to ATLAS, default `20`.
-- `source_name`: package source name, default `agent`.
-- `max_items_per_packet`: max objects in one source packet, default `450`.
-- `max_packet_bytes`: local safety limit for one signed packet, default `491520`.
-- `max_packets_per_source`: safety limit for chunks from one source, default `32`.
-- `backoff_initial_seconds`: first error backoff base, default `30`.
-- `backoff_max_seconds`: max error backoff, default `900`.
-- `backoff_jitter`: random delay spread from `0.0` to `1.0`, default `0.2`.
-- `enabled_collectors`: collectors to run, for example `["host", "docker", "kubernetes", "proxmox"]`.
-- `docker_socket`: Docker Unix socket path. Defaults can auto-detect `/var/run/docker.sock`
-  and Docker Desktop's `~/.docker/run/docker.sock`.
-- `docker_host`: optional Docker TCP endpoint. Use only when explicitly needed.
-- `kubernetes_api_url`: Kubernetes API URL. In-cluster agents can usually omit it.
-- `kubernetes_token` or `kubernetes_token_file`: service account token.
-- `kubernetes_ca_cert`: CA file for the Kubernetes API.
-- `kubernetes_namespaces`: namespaces to collect, for example `["default", "apps"]`.
-- `kubernetes_all_namespaces`: collect across all namespaces if the token allows it.
-- `proxmox_api_url`: Proxmox API URL, for example `https://pve.local:8006`.
-- `proxmox_token_id` and `proxmox_token_secret`: Proxmox API token stored only in the agent config.
-- `proxmox_nodes`: optional node allow-list, for example `["pve1", "pve2"]`; empty means all visible nodes.
-- `proxmox_include_ipv6`: send IPv6 guest addresses; default is `false`.
-- `proxmox_verify_tls`: verify Proxmox TLS certificates.
+- Python `3.10+`
+- outbound access from the agent host to `atlas_url`
+- an agent record created in ATLAS
+- collector-specific access when enabled:
+  - Docker socket or Docker API
+  - Kubernetes API token
+  - Proxmox API token
 
-For local testing with `http://127.0.0.1:4173`, set `allow_insecure_http` to `true`.
+The agent uses only Python standard library modules.
 
-## ATLAS setup
+## How Discovery Packets Work
 
-1. Open ATLAS as an admin.
-2. Go to Integrations -> Discovery -> Agents & Policy.
-3. Create an agent and choose the collectors you need.
-4. Copy the generated config while the token is visible.
-5. Put the config on the server that will run the agent.
-6. Keep `agent_id` unique per server, even if several agents share one token.
+Each collection cycle creates one `runId`. The agent then sends separate packets by source:
 
-ATLAS stores only the token hash. If the config is lost, rotate the token and update the agent config.
+- `host`
+- `docker`
+- `kubernetes`
+- `proxmox`
 
-Docker socket access is powerful. Treat it as local root-level access and prefer running
-the agent next to Docker instead of exposing Docker TCP ports.
+Large sources are split into chunks with packet metadata:
 
-Proxmox tokens should be read-only and scoped to the minimum permissions needed for VM/LXC
-inventory. The agent tries QEMU guest agent network data first, then VM/LXC config metadata,
-and does not probe guest networks.
+- `source`
+- `index`
+- `total`
 
-The agent does not collect SNMP, MQTT, or manual IoT inventory. Those are planned as separate
-ATLAS integration settings, not as agent collectors.
+ATLAS groups packets with the same `runId` into one discovery run. Every packet is signed with the agent token and includes timestamp and nonce checks.
 
-## Collector recipes
+## Setup In ATLAS
 
-Keep `host` enabled in almost every config. It identifies the server running the agent and gives
-ATLAS a stable parent for services, containers, VM/LXC, and future map links.
+1. Sign in as an admin.
+2. Open `Integrations -> Discovery -> Agents`.
+3. Create an agent.
+4. Choose a clear name, type, allowed IP/CIDR if needed, and data policy.
+5. Copy the generated config while the token is visible.
+6. Save it on the machine that will run the agent as `atlas-agent.json`.
 
-### Host only
+ATLAS stores only the token hash. If the token is lost, rotate it in ATLAS and update `agent_token` in the config.
 
-Use this when you only want the server itself to report basic inventory.
+Keep `agent_id` unique per reporting machine. Multiple agents may share a token only when each machine has its own agent record and `agent_id`.
+
+## Minimal Config
+
+Copy the example:
+
+```bash
+cp atlas-agent.example.json atlas-agent.json
+```
+
+Minimal host-only config:
+
+```json
+{
+  "atlas_url": "https://atlas.example.local:4173",
+  "agent_id": "paste-agent-id-from-atlas",
+  "agent_token": "paste-agent-token-shown-once",
+  "interval": 60,
+  "enabled_collectors": ["host"]
+}
+```
+
+For local ATLAS testing with plain HTTP:
+
+```json
+{
+  "atlas_url": "http://127.0.0.1:4173",
+  "allow_insecure_http": true,
+  "verify_tls": false
+}
+```
+
+Use HTTPS and TLS verification for real deployments.
+
+## Full Config Reference
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `atlas_url` | required | ATLAS base URL. HTTPS is required unless `allow_insecure_http` is true. |
+| `agent_id` | required | Agent ID from ATLAS. |
+| `agent_token` | required | Agent token shown once by ATLAS. |
+| `interval` / `interval_seconds` | `60` | Send interval in seconds. Minimum `15`. |
+| `timeout` | `20` | Timeout for posting snapshots to ATLAS. Minimum `2`. |
+| `source_name` | `agent` | Human source label used for combined legacy payloads. Source packets still use collector names. |
+| `verify_tls` | `true` | Verify ATLAS TLS certificate. |
+| `allow_insecure_http` | `false` | Allow `http://` ATLAS URL for local testing. |
+| `enabled_collectors` | `["host"]` | List or comma-separated string. Supported: `host`, `docker`, `kubernetes`, `proxmox`. |
+| `max_items_per_packet` | `450` | Local chunk size before splitting one source into several packets. |
+| `max_packet_bytes` | `491520` | Local max signed packet size. |
+| `max_packets_per_source` | `32` | Local safety limit for chunks from one source. |
+| `backoff_initial_seconds` | `30` | Initial retry backoff after an error. |
+| `backoff_max_seconds` | `900` | Maximum retry backoff. |
+| `backoff_jitter` | `0.2` | Random jitter ratio from `0.0` to `1.0`. |
+| `docker_socket` | auto | Docker Unix socket. Auto-detects `/var/run/docker.sock` and Docker Desktop `~/.docker/run/docker.sock`. |
+| `docker_host` | empty | Optional Docker HTTP(S) API endpoint. Use with care. |
+| `docker_timeout` | `timeout` or `10` | Docker API timeout. |
+| `kubernetes_api_url` | in-cluster env | Kubernetes API URL. In-cluster agents can use service environment variables. |
+| `kubernetes_allow_insecure_http` | `false` | Allow HTTP Kubernetes API URL. Lab only. |
+| `kubernetes_token` | empty | Kubernetes bearer token. |
+| `kubernetes_token_file` | service account token | Path to token file. |
+| `kubernetes_ca_cert` | service account CA | CA certificate path. |
+| `kubernetes_namespaces` | service namespace or `default` | Namespaces to collect. String or list. |
+| `kubernetes_all_namespaces` | `false` | Collect all namespaces. Requires permissions. |
+| `kubernetes_verify_tls` | `verify_tls` | Verify Kubernetes TLS. |
+| `kubernetes_timeout` | `timeout` or `20` | Kubernetes API timeout. |
+| `kubernetes_limit` | `500` | Kubernetes API list limit. |
+| `proxmox_api_url` | required for Proxmox | Proxmox API URL, usually `https://pve-host:8006`. |
+| `proxmox_allow_insecure_http` | `false` | Allow HTTP Proxmox URL. Lab only. |
+| `proxmox_token_id` | required for Proxmox | Full token id, for example `atlas@pve!discovery`. |
+| `proxmox_token_secret` | required for Proxmox | Proxmox token secret. |
+| `proxmox_nodes` | `[]` | Optional node allow-list. Empty means all visible nodes. |
+| `proxmox_include_ipv6` | `false` | Include guest IPv6 addresses. |
+| `proxmox_verify_tls` | `verify_tls` | Verify Proxmox TLS certificate. |
+| `proxmox_ca_cert` | empty | Optional Proxmox CA certificate path. |
+| `proxmox_timeout` | `timeout` or `20` | Proxmox API timeout. |
+
+## Run
+
+Send one snapshot and exit:
+
+```bash
+python3 atlas_agent.py --config atlas-agent.json --once
+```
+
+Print signed packets without sending them:
+
+```bash
+python3 atlas_agent.py --config atlas-agent.json --once --print-payload
+```
+
+Run continuously:
+
+```bash
+python3 atlas_agent.py --config atlas-agent.json
+```
+
+The long-running mode sleeps for `interval` seconds after successful runs. On errors it uses exponential backoff with jitter and respects `Retry-After` from ATLAS.
+
+## systemd Example
+
+Example layout:
+
+- script: `/opt/atlas-agent/atlas_agent.py`
+- config: `/etc/atlas-agent.json`
+- service user: `atlas-agent`
+
+Service file:
+
+```ini
+[Unit]
+Description=ATLAS Discovery Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas-agent
+Group=atlas-agent
+ExecStart=/usr/bin/python3 /opt/atlas-agent/atlas_agent.py --config /etc/atlas-agent.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+If the Docker collector uses `/var/run/docker.sock`, the service user must be allowed to access that socket, usually by membership in the `docker` group. Treat that as powerful local access.
+
+## Collector: Host
+
+Recommended in almost every config:
 
 ```json
 {
@@ -75,19 +184,22 @@ Use this when you only want the server itself to report basic inventory.
 }
 ```
 
-Required fields:
+Collects:
 
-- `atlas_url`
-- `agent_id`
-- `agent_token`
-- `enabled_collectors`
+- hostname and FQDN
+- primary IPv4
+- MAC
+- OS name from `/etc/os-release`, macOS, or Windows where available
+- kernel label
+- machine architecture
+- ATLAS agent version
+- Docker and Docker Compose versions when CLI commands are available
 
-The host collector sends hostname, FQDN, primary IP, MAC, system/machine,
-agent version, and send interval.
+The host collector gives ATLAS a stable device identity and helps merge local host data with Proxmox hardware data for the same node.
 
-### Docker host
+## Collector: Docker
 
-Use this when the agent runs on the same server as Docker.
+Use when the agent runs on a Docker host:
 
 ```json
 {
@@ -97,68 +209,24 @@ Use this when the agent runs on the same server as Docker.
 }
 ```
 
-What to configure:
+Collects:
 
-- `docker_socket`: best option for Linux servers. Usually `/var/run/docker.sock`.
-- `docker_host`: optional TCP/HTTP endpoint. Use only inside trusted networks and only when you
-  explicitly expose Docker API.
+- Docker version and API version
+- Docker Compose version when available
+- containers from `/containers/json?all=1`
+- inspect data for each container
+- container name, image, state, created/started/finished timestamps
+- exposed and published ports
+- labels
+- networks, container IP, MAC, and network id
 
-Security note: Docker socket access is effectively root-level local access. Prefer local socket
-over Docker TCP. Do not expose Docker TCP to the internet.
+Source IDs prefer stable container names (`docker:name:<name>`) so recreated containers can update existing discovery records instead of creating duplicates.
 
-Docker sends containers, name, image, status, labels if policy allows them, exposed/published ports,
-networks/IPs if policy allows them, timestamps, and last seen. ATLAS uses stable container names for
-source tracking, so a container recreated by Watchtower should replace the old discovery object
-instead of creating a duplicate.
+Security note: Docker socket access is effectively root-level local access. Prefer the local Unix socket and do not expose Docker TCP to untrusted networks.
 
-### Proxmox / PVE
+## Collector: Kubernetes
 
-Use this when the agent can reach a Proxmox API. The agent may run directly on a PVE node or on
-another trusted server that can access `https://pve-host:8006`.
-
-```json
-{
-  "enabled_collectors": ["host", "proxmox"],
-  "proxmox_api_url": "https://pve.example.local:8006",
-  "proxmox_token_id": "atlas@pve!discovery",
-  "proxmox_token_secret": "paste-proxmox-token-secret",
-  "proxmox_nodes": [],
-  "proxmox_include_ipv6": false,
-  "proxmox_verify_tls": true,
-  "proxmox_timeout": 10
-}
-```
-
-Where to get the Proxmox values:
-
-1. In Proxmox, create a dedicated user, for example `atlas@pve`, or use an existing restricted user.
-2. Create an API token for that user, for example token name `discovery`.
-3. The full token id becomes `atlas@pve!discovery`.
-4. Copy the token secret once and paste it into `proxmox_token_secret`.
-5. Set `proxmox_api_url` to the PVE API URL, usually `https://<pve-host-or-ip>:8006`.
-
-Recommended Proxmox permissions:
-
-- read-only access is enough;
-- scope it to the datacenter or only the nodes ATLAS should see;
-- the collector reads cluster resources, VM/LXC status, VMID, node, name, type, and IPs when
-  guest agent or config metadata makes them available.
-
-Common PVE notes:
-
-- If Proxmox uses a self-signed certificate, either install the CA and set `proxmox_ca_cert`,
-  or temporarily set `proxmox_verify_tls` to `false` for lab use.
-- `proxmox_nodes: []` means all nodes visible to the token.
-- `proxmox_nodes: ["pve1"]` limits collection to selected nodes.
-- Guest IPs are best when QEMU Guest Agent is enabled in the VM and installed inside the guest OS.
-- By default, the Proxmox collector does not send IPv6 and skips guest interfaces such as `docker0`,
-  `br-*`, `veth*`, and `cni0` to avoid storing internal Docker/CNI addresses from inside a VM.
-
-### Kubernetes
-
-Use this when the agent runs inside a Kubernetes cluster or on a host that can reach the Kubernetes API.
-
-In-cluster config:
+In-cluster example:
 
 ```json
 {
@@ -173,7 +241,7 @@ In-cluster config:
 }
 ```
 
-Out-of-cluster config:
+Out-of-cluster example:
 
 ```json
 {
@@ -186,26 +254,84 @@ Out-of-cluster config:
 }
 ```
 
-The Kubernetes token needs read permissions for:
+Collects:
 
-- pods
-- services
-- namespaces you want to collect
+- Kubernetes server version
+- Pods
+- Services
+- namespace/name, UID, labels, owners
+- Pod phase, Pod IP, host IP, node name
+- container images, readiness count, restart count, start time
+- Service type, ClusterIP, external IPs, selectors, ports
 
-For all namespaces, set:
+Permissions needed:
+
+- `get/list` Pods
+- `get/list` Services
+- in each configured namespace, or cluster-wide when `kubernetes_all_namespaces` is true
+
+Prefer explicit `kubernetes_namespaces` unless you really need cluster-wide discovery.
+
+## Collector: Proxmox
+
+Example:
 
 ```json
 {
-  "kubernetes_all_namespaces": true
+  "enabled_collectors": ["host", "proxmox"],
+  "proxmox_api_url": "https://pve.example.local:8006",
+  "proxmox_token_id": "atlas@pve!discovery",
+  "proxmox_token_secret": "paste-proxmox-token-secret",
+  "proxmox_nodes": [],
+  "proxmox_include_ipv6": false,
+  "proxmox_verify_tls": true,
+  "proxmox_timeout": 10
 }
 ```
 
-Only do that if the service account has the needed permissions and you really want cluster-wide
-visibility. Otherwise prefer explicit `kubernetes_namespaces`.
+How to create the Proxmox token:
 
-### Mixed host
+1. Create or choose a restricted Proxmox user, for example `atlas@pve`.
+2. Create an API token, for example `discovery`.
+3. Use the full token id: `atlas@pve!discovery`.
+4. Copy the token secret into `proxmox_token_secret`.
+5. Give the token read-only permissions for the nodes/VMs/LXCs ATLAS should see.
 
-You can combine collectors when one server has multiple roles:
+Collects hypervisor/node data:
+
+- node name and status
+- Proxmox version formatted as `Proxmox Virtual Environment <version>`
+- kernel formatted as `Linux <release>`
+- CPU usage, CPU model, socket/core count
+- RAM usage
+- load average
+- physical disk list and sizes
+
+Collects VM/LXC data:
+
+- node, VMID, type, template flag, status, tags
+- vCPU/RAM/disk allocation
+- configured disks
+- MAC address
+- guest IPs from QEMU Guest Agent when available
+- fallback IP/MAC from VM/LXC config where available
+- VM OS/kernel from QEMU Guest Agent `get-osinfo` when available
+- LXC OS label from `ostype` where available
+
+Guest IP notes:
+
+- For VMs, install and enable QEMU Guest Agent for best IP and OS results.
+- The collector ignores internal guest interfaces such as `lo`, `docker0`, `br-*`, `veth*`, `cni0`, `flannel*`, and similar CNI/Docker interfaces.
+- IPv6 guest addresses are skipped unless `proxmox_include_ipv6` is true.
+
+TLS notes:
+
+- Prefer installing the Proxmox CA and setting `proxmox_ca_cert`.
+- For lab-only self-signed setups, `proxmox_verify_tls: false` works but is less safe.
+
+## Mixed Collectors
+
+You can combine collectors:
 
 ```json
 {
@@ -213,68 +339,60 @@ You can combine collectors when one server has multiple roles:
 }
 ```
 
-Collector choice controls what the agent collects. The ATLAS “agent type” is only a UI description:
-`Hypervisor` can still be remote, and `External` can still collect Docker or Proxmox if the config
-enables those collectors.
+Collectors define what is collected. The agent type selected in ATLAS is a UI classification and does not restrict the local config by itself.
 
-## Run
+## Data Policy In ATLAS
 
-```bash
-python3 atlas_agent.py --config atlas-agent.json --once
-```
+ATLAS can store different amounts of metadata depending on discovery policy:
 
-Print a signed snapshot without sending:
+- runtime data
+- labels
+- network data
+- raw metadata
+- preview visibility
+- create-on-discovery behavior
+
+If a value appears in `--print-payload` but not in the UI, check the agent or global discovery data policy in ATLAS.
+
+The Debug view can reveal stored raw fields and lets you move fields between visible and hidden lists per entity.
+
+## Troubleshooting
+
+Use `--print-payload` first:
 
 ```bash
 python3 atlas_agent.py --config atlas-agent.json --once --print-payload
 ```
 
-`--print-payload` prints the list of signed source packets that would be sent in the same run.
+Common issues:
 
-Large sources are split into multiple packets with the same `runId` and packet metadata
-(`source`, `index`, `total`). ATLAS groups them into one discovery run and waits for the
-final packet of a source before marking missing objects as stale.
-Each packet also reports the agent's configured send timing in `payload.metadata.agentTiming`:
-`sendIntervalSeconds` from config `interval`, and `requestTimeoutSeconds` from config `timeout`.
-ATLAS stores those as read-only runtime info so you can see how often data is sent.
-The main ATLAS agent table shows only the send interval. Availability is calculated from
-`sendIntervalSeconds`: `UP <= interval + 20s`, `PENDING <= interval * 2 + 75s`,
-then `DOWN`.
+- `atlas_url must use https`: use HTTPS, or set `allow_insecure_http: true` only for local testing.
+- `Config value 'agent_token' is required`: the token was not copied into config.
+- `ATLAS rejected snapshot: HTTP 401/403`: wrong token, revoked token, wrong agent id, or IP/CIDR restriction.
+- `Docker socket was not found`: set `docker_socket`, run on the Docker host, or check permissions.
+- `Kubernetes token was not found`: set `kubernetes_token`, `kubernetes_token_file`, or run in-cluster with a mounted service account.
+- `Proxmox API returned HTTP 401/403`: check token id, token secret, and Proxmox permissions.
+- no VM IPs from Proxmox: install/enable QEMU Guest Agent or configure static IP metadata in Proxmox where possible.
+- packet too large: lower `max_items_per_packet` or reduce raw metadata policy in ATLAS.
 
-When ATLAS is unavailable or rejects a packet, the long-running agent uses exponential
-backoff with jitter and respects `Retry-After` returned by ATLAS.
+## Security Notes
 
-## Shared Tokens
+- Keep `atlas-agent.json` private. It contains secrets.
+- Use HTTPS for ATLAS and API endpoints.
+- Use read-only Proxmox tokens.
+- Scope Kubernetes service accounts to the namespaces you need.
+- Treat Docker socket access as privileged local access.
+- Rotate an agent token if a config was exposed.
+- Use allowed IP/CIDR restrictions in ATLAS when agents have stable egress addresses.
 
-Multiple servers may use the same token only when each server has a unique `agent_id` in ATLAS.
-This lets ATLAS separate stale/orphan state per server while still allowing token groups such as
-`internal` or `external`.
+## Not Implemented In This Agent
 
-## Current Collectors
+These are intentionally separate from the current Python agent:
 
-- `host`: hostname, FQDN, primary IP, MAC, system/machine.
-- `docker`: containers, status, exposed/published ports, labels, networks/IP, image,
-  created/started timestamps, and last seen.
-- `kubernetes`: Pods and Services with namespace/name, status, labels, ports, pod IP,
-  node/host IP, images, owners, Service type/ClusterIP/external IPs, and last seen.
-- `proxmox`: PVE node/hypervisor resources with CPU/RAM/load/kernel/PVE version, plus
-  VM/LXC resources with node, VMID, status, name, type, RAM, allocated disks, MAC,
-  and primary IP when available from guest agent or config metadata.
+- SNMP polling
+- MQTT integration
+- generic port scanning
+- full hardware inventory via SSH
+- manual IoT object management
 
-## Planned separately
-
-These are intentionally not part of the current agent:
-
-- `snmp`: planned as an ATLAS-side integration with explicit targets and encrypted credentials.
-- `mqtt`: planned as a communication/integration channel.
-- `iot`: remains an ATLAS object model; data should arrive through future integrations.
-
-Possible future agent collectors:
-
-- `podman`
-- `libvirt` / `kvm`
-- `lxc`
-- `esxi`
-- `xcp-ng`
-- `services`
-- `hardware`
+Possible future collectors may include Podman, libvirt/KVM, ESXi, XCP-ng, service checks, or deeper hardware inventory.
