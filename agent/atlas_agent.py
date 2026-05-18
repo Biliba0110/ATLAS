@@ -67,6 +67,18 @@ PROXMOX_IGNORED_GUEST_INTERFACE_PREFIXES = (
 )
 PROXMOX_VM_DISK_KEY_PREFIXES = ("ide", "sata", "scsi", "virtio")
 PROXMOX_LXC_DISK_KEY_PREFIXES = ("rootfs", "mp")
+PROXMOX_LXC_OS_LABELS = {
+    "alpine": "Alpine Linux",
+    "archlinux": "Arch Linux",
+    "centos": "CentOS",
+    "debian": "Debian",
+    "devuan": "Devuan",
+    "fedora": "Fedora Linux",
+    "gentoo": "Gentoo Linux",
+    "nixos": "NixOS",
+    "opensuse": "openSUSE",
+    "ubuntu": "Ubuntu",
+}
 
 
 class AgentRequestError(RuntimeError):
@@ -288,6 +300,88 @@ def run_command(command: list[str]) -> str:
     return completed.stdout.strip()
 
 
+def strip_wrapped_quotes(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return text
+
+
+def parse_os_release_text(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        result[key.strip()] = strip_wrapped_quotes(value)
+    return result
+
+
+def read_os_release_info() -> dict[str, str]:
+    for path in [Path("/etc/os-release"), Path("/usr/lib/os-release")]:
+        try:
+            data = parse_os_release_text(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if data:
+            return data
+    return {}
+
+
+def format_host_os() -> str:
+    os_release = read_os_release_info()
+    pretty_name = limit_text(os_release.get("PRETTY_NAME"), 120)
+    if pretty_name:
+        return pretty_name
+    name = limit_text(os_release.get("NAME"), 80)
+    version = limit_text(os_release.get("VERSION_ID") or os_release.get("VERSION"), 80)
+    if name:
+        return " ".join(part for part in [name, version] if part)
+    system = platform.system()
+    if system == "Darwin":
+        mac_version = platform.mac_ver()[0]
+        return " ".join(part for part in ["macOS", mac_version] if part)
+    if system == "Windows":
+        return " ".join(part for part in ["Windows", platform.version()] if part)
+    return system
+
+
+def format_host_kernel() -> str:
+    return " ".join(part for part in [platform.system(), platform.release()] if part)
+
+
+def parse_version_from_command_output(output: str) -> str:
+    text = str(output or "").strip()
+    if not text:
+        return ""
+    for token in text.replace(",", " ").split():
+        candidate = token.strip().lstrip("v")
+        if candidate and candidate[0].isdigit():
+            return candidate
+    return ""
+
+
+def docker_cli_version() -> str:
+    output = run_command(["docker", "version", "--format", "{{.Server.Version}}"])
+    if output:
+        return limit_text(output.splitlines()[0], 80)
+    output = run_command(["docker", "--version"])
+    return limit_text(parse_version_from_command_output(output), 80)
+
+
+def docker_compose_cli_version() -> str:
+    output = run_command(["docker", "compose", "version", "--short"])
+    if not output:
+        output = run_command(["docker-compose", "version", "--short"])
+    if output:
+        return limit_text(output.splitlines()[0].lstrip("v"), 80)
+    output = run_command(["docker", "compose", "version"])
+    if not output:
+        output = run_command(["docker-compose", "version"])
+    return limit_text(parse_version_from_command_output(output), 80)
+
+
 def get_primary_ip_from_system() -> str:
     system = platform.system().lower()
     if system == "darwin":
@@ -378,10 +472,18 @@ def collect_host_inventory(source_name: str, observed_at: str) -> dict[str, Any]
         "fqdn": fqdn,
         "primaryIp": primary_ip,
         "mac": mac,
+        "os": format_host_os(),
+        "kernel": format_host_kernel(),
         "system": platform.system(),
         "machine": platform.machine(),
         "agentVersion": AGENT_VERSION,
     }
+    docker_version = docker_cli_version()
+    docker_compose_version = docker_compose_cli_version()
+    if docker_version:
+        system["dockerVersion"] = docker_version
+    if docker_compose_version:
+        system["dockerComposeVersion"] = docker_compose_version
     raw = {key: value for key, value in system.items() if value}
     return {
         "host": raw,
@@ -582,6 +684,8 @@ def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str
 
 def collect_docker_inventory(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
     version = docker_request(config, "/version")
+    docker_version = limit_text(version.get("Version"), 80) if isinstance(version, dict) else ""
+    compose_version = docker_compose_cli_version()
     query = urlencode({"all": "1"})
     containers = docker_request(config, f"/containers/json?{query}")
     if not isinstance(containers, list):
@@ -602,8 +706,9 @@ def collect_docker_inventory(config: dict[str, Any], observed_at: str) -> dict[s
     return {
         "source": "docker",
         "metadata": {
-            "dockerVersion": limit_text(version.get("Version"), 80) if isinstance(version, dict) else "",
+            "dockerVersion": docker_version,
             "dockerApiVersion": limit_text(version.get("ApiVersion"), 80) if isinstance(version, dict) else "",
+            "dockerComposeVersion": compose_version,
             "containerCount": len(items),
         },
         "items": items,
@@ -874,6 +979,7 @@ def kubernetes_service_item(service: dict[str, Any], observed_at: str) -> dict[s
 
 def collect_kubernetes_inventory(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
     version = kubernetes_request(config, "/version")
+    kubernetes_version = limit_text(str(version.get("gitVersion") or "").lstrip("v"), 80) if isinstance(version, dict) else ""
     pods = kubernetes_list(config, "pods")
     services = kubernetes_list(config, "services")
     items = [
@@ -883,6 +989,7 @@ def collect_kubernetes_inventory(config: dict[str, Any], observed_at: str) -> di
     return {
         "source": "kubernetes",
         "metadata": {
+            "kubernetesVersion": kubernetes_version,
             "kubernetesGitVersion": limit_text(version.get("gitVersion"), 80) if isinstance(version, dict) else "",
             "namespaceScope": "all" if kubernetes_namespaces(config) is None else ",".join(kubernetes_namespaces(config) or []),
             "podCount": len(pods),
@@ -1000,6 +1107,45 @@ def proxmox_nested_number(data: Any, *path: str) -> Any:
             return None
         current = current.get(key)
     return proxmox_first_number(current)
+
+
+def proxmox_version_number(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/" in text:
+        parts = [part.strip() for part in text.split("/") if part.strip()]
+        if len(parts) >= 2 and parts[1][0].isdigit():
+            return limit_text(parts[1], 80)
+    return limit_text(text.lstrip("v"), 80)
+
+
+def proxmox_os_label(value: Any) -> str:
+    version = proxmox_version_number(value)
+    return f"Proxmox Virtual Environment {version}" if version else "Proxmox Virtual Environment"
+
+
+def proxmox_kernel_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parts = text.split()
+    if len(parts) >= 2 and parts[0].lower() == "linux":
+        return limit_text(f"{parts[0]} {parts[1]}", 120)
+    return limit_text(text, 120)
+
+
+def proxmox_config_os_label(config_data: Any, source_kind: str) -> str:
+    if not isinstance(config_data, dict):
+        return ""
+    os_type = str(config_data.get("ostype") or "").strip().lower()
+    if not os_type:
+        return ""
+    if source_kind == "lxc":
+        return PROXMOX_LXC_OS_LABELS.get(os_type, os_type.upper() if len(os_type) <= 4 else os_type.title())
+    if os_type.startswith("win"):
+        return "Windows"
+    return ""
 
 
 def proxmox_size_to_bytes(value: Any) -> int | None:
@@ -1246,10 +1392,40 @@ def proxmox_extract_guest_agent_mac(data: Any) -> str:
     return ""
 
 
+def proxmox_extract_guest_osinfo(data: Any) -> dict[str, str]:
+    if not isinstance(data, dict):
+        return {}
+    info = data.get("result") if isinstance(data.get("result"), dict) else data
+    if not isinstance(info, dict):
+        return {}
+    pretty_name = (
+        info.get("pretty-name")
+        or info.get("prettyName")
+        or info.get("pretty_name")
+    )
+    name = info.get("name") or info.get("id")
+    version = info.get("version") or info.get("version-id") or info.get("versionId")
+    os_label = limit_text(pretty_name or " ".join(str(part).strip() for part in [name, version] if str(part or "").strip()), 160)
+    kernel_label = proxmox_kernel_label(
+        info.get("kernel-release")
+        or info.get("kernelRelease")
+        or info.get("kernel-version")
+        or info.get("kernelVersion")
+    )
+    result: dict[str, str] = {}
+    if os_label:
+        result["os"] = os_label
+    if kernel_label:
+        result["kernel"] = kernel_label
+    return result
+
+
 def proxmox_guest_network(config: dict[str, Any], node: str, vmid: str, source_kind: str) -> dict[str, Any]:
     ips: list[str] = []
     mac = ""
     disks: list[dict[str, Any]] = []
+    os_label = ""
+    kernel_label = ""
     encoded_node = quote(node, safe="")
     encoded_vmid = quote(vmid, safe="")
     allow_ipv6 = bool(config.get("proxmox_include_ipv6", False))
@@ -1265,6 +1441,16 @@ def proxmox_guest_network(config: dict[str, Any], node: str, vmid: str, source_k
             mac = proxmox_extract_guest_agent_mac(agent_data)
         except Exception:
             pass
+        try:
+            osinfo_data = proxmox_request(
+                config,
+                f"/nodes/{encoded_node}/qemu/{encoded_vmid}/agent/get-osinfo",
+            )
+            osinfo = proxmox_extract_guest_osinfo(osinfo_data)
+            os_label = osinfo.get("os", "")
+            kernel_label = osinfo.get("kernel", "")
+        except Exception:
+            pass
 
     try:
         config_type = "qemu" if source_kind == "vm" else "lxc"
@@ -1274,10 +1460,12 @@ def proxmox_guest_network(config: dict[str, Any], node: str, vmid: str, source_k
         if not mac:
             mac = proxmox_extract_mac_from_config(config_data)
         disks = proxmox_extract_disks_from_config(config_data, source_kind)
+        if not os_label:
+            os_label = proxmox_config_os_label(config_data, source_kind)
     except Exception:
         pass
 
-    return {"ips": ips, "mac": mac, "disks": disks}
+    return {"ips": ips, "mac": mac, "disks": disks, "os": os_label, "kernel": kernel_label}
 
 
 def proxmox_guest_config_disks(config: dict[str, Any], node: str, vmid: str, source_kind: str) -> list[dict[str, Any]]:
@@ -1349,10 +1537,14 @@ def proxmox_node_item_from_resource(config: dict[str, Any], resource: dict[str, 
     loadavg = status_data.get("loadavg") if isinstance(status_data.get("loadavg"), list) else []
     disks = proxmox_node_disks(config, node)
     disk_total = sum(int(disk.get("size") or 0) for disk in disks)
+    pve_version = limit_text(status_data.get("pveversion"), 120)
+    kernel_version = limit_text(status_data.get("kversion"), 160)
     raw = {
         "node": node,
         "type": "hypervisor",
         "statusText": limit_text(resource.get("status") or status_data.get("status"), 80),
+        "os": proxmox_os_label(pve_version),
+        "kernel": proxmox_kernel_label(kernel_version),
         "cpu": proxmox_first_number(status_data.get("cpu"), resource.get("cpu")),
         "cpus": proxmox_first_number(cpu_info.get("cpus"), resource.get("maxcpu")),
         "cpuModel": limit_text(cpu_info.get("model"), 180),
@@ -1369,8 +1561,8 @@ def proxmox_node_item_from_resource(config: dict[str, Any], resource: dict[str, 
         ),
         "disks": disks,
         "loadAverage": ", ".join(limit_text(item, 20) for item in loadavg[:3]),
-        "kernelVersion": limit_text(status_data.get("kversion"), 160),
-        "pveVersion": limit_text(status_data.get("pveversion"), 120),
+        "kernelVersion": kernel_version,
+        "pveVersion": pve_version,
     }
     raw.update(proxmox_disk_metadata_fields(disks))
     raw = {key: value for key, value in raw.items() if value != "" and value != [] and value is not None}
@@ -1415,6 +1607,8 @@ def proxmox_item_from_resource(config: dict[str, Any], resource: dict[str, Any],
         "primaryIp": ips[0] if ips else "",
         "ips": ips,
         "mac": guest_network["mac"],
+        "os": guest_network.get("os"),
+        "kernel": guest_network.get("kernel"),
         "statusText": limit_text(resource.get("status"), 80),
         "template": is_template,
         "tags": limit_text(resource.get("tags"), 300),

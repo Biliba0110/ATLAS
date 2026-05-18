@@ -39,6 +39,16 @@ const DEFAULT_DISCOVERY_DATA_POLICY = {
   storeRawMetadata: false,
   showMetadataInPreview: false,
 };
+const NAVIGATION_HASH_OPTIONS = {
+  views: new Set(["dashboard", "registry", "history"]),
+  registry: new Set(["subnets", "groups", "devices", "services"]),
+  settings: new Set(["profile", "interface", "templates", "administration"]),
+  integrations: new Set(["automation", "discovery", "snmp", "push"]),
+  admin: new Set(["access", "import", "export", "maintenance"]),
+  template: new Set(["device-types", "group-suggestions", "device-sources"]),
+  discovery: new Set(["agents", "received", "audit", "debug"]),
+  modals: new Set(["settings", "integrations"]),
+};
 const DISCOVERY_DEFAULT_SEND_INTERVAL_MS = 60 * 1000;
 const DISCOVERY_UP_GRACE_MS = 20 * 1000;
 const DISCOVERY_DOWN_GRACE_MS = 75 * 1000;
@@ -435,6 +445,9 @@ const elements = {
   discoveryStaleCleanupButton: document.getElementById("discovery-stale-cleanup-button"),
   discoveryAuditEventFilter: document.getElementById("discovery-audit-event-filter"),
   discoveryAuditTableBody: document.getElementById("discovery-audit-table-body"),
+  discoveryDebugAgentFilter: document.getElementById("discovery-debug-agent-filter"),
+  discoveryDebugKindFilter: document.getElementById("discovery-debug-kind-filter"),
+  discoveryDebugTableBody: document.getElementById("discovery-debug-table-body"),
   userAccessGroupOptions: document.getElementById("user-access-group-options"),
   adminPanels: [...document.querySelectorAll(".admin-only")],
   passwordToggleButtons: [...document.querySelectorAll("[data-password-toggle]")],
@@ -506,6 +519,8 @@ let activeIntegrationsSection = "automation";
 let activeAdminSection = "access";
 let activeTemplateSection = "device-types";
 let activeDiscoverySection = "agents";
+let discoveryDebugAgentFilter = "all";
+let discoveryDebugKindFilter = "all";
 let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
@@ -519,6 +534,9 @@ const expandedDiscoveryResultIds = new Set();
 const expandedDiscoveryGroupIds = new Set();
 const expandedDiscoveryHardwareIds = new Set();
 const expandedRegistryDiscoveryKeys = new Set();
+const expandedDiscoveryDebugIds = new Set();
+const discoveryDebugFieldOptions = new Map();
+const openDiscoveryDebugFieldLists = new Set();
 const collapsedFilterPanels = {
   registry: false,
   history: false,
@@ -540,6 +558,8 @@ let dialogOpenedOverModal = false;
 let activeFieldHelpButton = null;
 let isFieldHelpPinned = false;
 let suppressDashboardStatClick = false;
+let isApplyingNavigationState = false;
+let isNavigationBootstrapping = true;
 const resultStatusTimers = new WeakMap();
 let discoveryAgentConfigTimer = null;
 let editingSubnetId = "";
@@ -682,11 +702,18 @@ function isGeneratedAgentNote(note) {
   return normalizedNote === "discovery" || normalizedNote === "agent";
 }
 
-function getDiscoveryResultForRecord(record) {
+function getRawDiscoveryResults() {
+  return state.admin?.discoveryResults || [];
+}
+
+function getDisplayDiscoveryResults() {
+  return mergeDiscoveryHardwareResults(getRawDiscoveryResults());
+}
+
+function findDiscoveryResultForRecord(record, results) {
   if (!record) {
     return null;
   }
-  const results = state.admin?.discoveryResults || [];
   return results.find((result) => (
     result.matchedDeviceId === record.id
     || result.matchedServiceId === record.id
@@ -699,6 +726,17 @@ function getDiscoveryResultForRecord(record) {
   )) || null;
 }
 
+function getDiscoveryResultForRecord(record, results = null) {
+  const displayResults = results || getDisplayDiscoveryResults();
+  const displayResult = findDiscoveryResultForRecord(record, displayResults);
+  if (displayResult || results) {
+    return displayResult;
+  }
+
+  const rawResult = findDiscoveryResultForRecord(record, getRawDiscoveryResults());
+  return getDisplayHostResultForHypervisorResult(rawResult, displayResults) || rawResult;
+}
+
 function getLinkedDiscoveryAgentForHost(record) {
   if (!record?.id) {
     return null;
@@ -706,11 +744,10 @@ function getLinkedDiscoveryAgentForHost(record) {
   return (state.admin?.discoveryAgents || []).find((agent) => agent.linkedHostDeviceId === record.id) || null;
 }
 
-function getDirectHostDiscoveryResultForRecord(record) {
+function getDirectHostDiscoveryResultForRecord(record, results = getRawDiscoveryResults()) {
   if (!record?.id || record.type === "service") {
     return null;
   }
-  const results = state.admin?.discoveryResults || [];
   return results.find((result) => (
     result.matchedDeviceId === record.id
     && normalizeMetadataToken(result.sourceKind, "") === "host"
@@ -721,15 +758,29 @@ function hasDirectHostAgent(record) {
   return Boolean(getLinkedDiscoveryAgentForHost(record) || getDirectHostDiscoveryResultForRecord(record));
 }
 
-function getHypervisorDiscoveryResultForRecord(record) {
+function getHypervisorDiscoveryResultForRecord(record, results = getRawDiscoveryResults()) {
   if (!record?.id || record.type === "service") {
     return null;
   }
-  const results = state.admin?.discoveryResults || [];
   return results.find((result) => (
     result.matchedDeviceId === record.id
     && normalizeMetadataToken(result.source, "") === "proxmox"
     && ["vm", "lxc", "hypervisor"].includes(normalizeMetadataToken(result.sourceKind, ""))
+  )) || null;
+}
+
+function getDisplayHostResultForHypervisorResult(hypervisorResult, results = getDisplayDiscoveryResults()) {
+  if (!isProxmoxHypervisorResult(hypervisorResult)) {
+    return null;
+  }
+  const nodeName = getProxmoxNodeName(hypervisorResult);
+  if (!nodeName) {
+    return null;
+  }
+  return results.find((result) => (
+    normalizeMetadataToken(result.sourceKind, "") === "host"
+    && result.agentId === hypervisorResult.agentId
+    && String(result.name || result.hostName || "").trim().toLowerCase() === nodeName
   )) || null;
 }
 
@@ -740,16 +791,28 @@ function getRegistryDiscoveryKey(record) {
   return `${record.type === "service" ? "service" : "device"}:${record.id}`;
 }
 
-function getRegistryDiscoveryDetailsResult(record) {
+function getRegistryDiscoveryDetailsResult(record, displayResults = getDisplayDiscoveryResults()) {
   if (!record?.id) {
     return null;
   }
 
   if (record.type === "service") {
-    return getDiscoveryResultForRecord(record);
+    return findDiscoveryResultForRecord(record, displayResults)
+      || findDiscoveryResultForRecord(record, getRawDiscoveryResults());
   }
 
-  const hostResult = getDirectHostDiscoveryResultForRecord(record) || getDiscoveryResultForRecord(record);
+  const displayResult = findDiscoveryResultForRecord(record, displayResults);
+  if (displayResult) {
+    return displayResult;
+  }
+
+  const rawResult = findDiscoveryResultForRecord(record, getRawDiscoveryResults());
+  const displayHostResult = getDisplayHostResultForHypervisorResult(rawResult, displayResults);
+  if (displayHostResult) {
+    return displayHostResult;
+  }
+
+  const hostResult = getDirectHostDiscoveryResultForRecord(record) || rawResult;
   const hypervisorResult = getHypervisorDiscoveryResultForRecord(record);
   if (hostResult && hypervisorResult && hostResult.id !== hypervisorResult.id) {
     return {
@@ -760,9 +823,9 @@ function getRegistryDiscoveryDetailsResult(record) {
   return hostResult || hypervisorResult;
 }
 
-function renderRegistryDiscoveryName(record, attributeName) {
+function renderRegistryDiscoveryName(record, attributeName, discoveryResults = getDisplayDiscoveryResults()) {
   const name = escapeHtml(record.name || t("no_data"));
-  const result = getRegistryDiscoveryDetailsResult(record);
+  const result = getRegistryDiscoveryDetailsResult(record, discoveryResults);
   if (!result) {
     return `<strong title="${name}">${name}</strong>`;
   }
@@ -779,13 +842,13 @@ function renderRegistryDiscoveryName(record, attributeName) {
   `;
 }
 
-function renderRegistryDiscoveryDetailsRow(record, colspan) {
+function renderRegistryDiscoveryDetailsRow(record, colspan, discoveryResults = getDisplayDiscoveryResults()) {
   const key = getRegistryDiscoveryKey(record);
   if (!key || !expandedRegistryDiscoveryKeys.has(key)) {
     return "";
   }
 
-  const result = getRegistryDiscoveryDetailsResult(record);
+  const result = getRegistryDiscoveryDetailsResult(record, discoveryResults);
   if (!result) {
     expandedRegistryDiscoveryKeys.delete(key);
     return "";
@@ -903,6 +966,12 @@ function getDeviceSourceKindLabel(sourceKind) {
   const normalizedKind = normalizeMetadataToken(sourceKind, "");
   const key = `device_source_kind_${normalizedKind}`;
   return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedKind);
+}
+
+function shouldShowDiscoverySourceKind(result) {
+  const source = normalizeMetadataToken(result?.source, "");
+  const sourceKind = normalizeMetadataToken(result?.sourceKind, "");
+  return Boolean(sourceKind && sourceKind !== source);
 }
 
 function getIntegrationStatusLabel(status) {
@@ -1047,16 +1116,18 @@ function revealExpandedContent(targetGetter, options = {}) {
         return;
       }
 
-      target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+      target.scrollIntoView({ behavior: "smooth", block: options.block || "nearest", inline: "nearest" });
 
       requestAnimationFrame(() => {
         const rect = target.getBoundingClientRect();
-        const margin = 28;
+        const margin = Number.isFinite(Number(options.margin)) ? Number(options.margin) : 28;
         const extraDown = Math.max(0, Number(options.extraDown || 0));
         const bottomOverflow = Math.max(0, rect.bottom - window.innerHeight + margin);
         if (bottomOverflow > 0 || extraDown > 0) {
+          const maxScroll = Math.max(0, Number(options.maxScroll ?? 420));
+          const scrollDistance = bottomOverflow + extraDown;
           window.scrollBy({
-            top: Math.min(bottomOverflow + extraDown, 420),
+            top: maxScroll > 0 ? Math.min(scrollDistance, maxScroll) : scrollDistance,
             behavior: "smooth",
           });
         } else if (rect.top < margin) {
@@ -1068,6 +1139,41 @@ function revealExpandedContent(targetGetter, options = {}) {
       });
     });
   });
+}
+
+function getRegistrySectionPanel(sectionName) {
+  return document.getElementById(`registry-panel-${sectionName}`);
+}
+
+function getRegistrySectionListWrap(sectionName) {
+  if (sectionName === "devices") {
+    return elements.devicesTableWrap;
+  }
+  if (sectionName === "services") {
+    return elements.servicesTableWrap;
+  }
+  if (sectionName === "groups") {
+    return elements.groupsTableWrap;
+  }
+  if (sectionName === "subnets") {
+    return elements.subnetsTableWrap;
+  }
+  return null;
+}
+
+function revealRegistrySectionList(sectionName, options = {}) {
+  revealExpandedContent(
+    () => getRegistrySectionListWrap(sectionName) || getRegistrySectionPanel(sectionName),
+    {
+      block: options.block || "start",
+      extraDown: options.extraDown ?? 0,
+      maxScroll: options.maxScroll ?? 1200,
+    },
+  );
+}
+
+function revealListStart(targetGetter) {
+  revealExpandedContent(targetGetter, { block: "start", extraDown: 0, maxScroll: 1200 });
 }
 
 function renderRegistryComment(value) {
@@ -1209,6 +1315,191 @@ function persistCachedInterfaceSettings(settings) {
   }
 }
 
+function getAllowedNavigationValue(params, paramKey, optionKey, fallback) {
+  const value = String(params.get(paramKey) || "").trim();
+  const allowed = NAVIGATION_HASH_OPTIONS[optionKey || paramKey];
+  return allowed?.has(value) ? value : fallback;
+}
+
+function createDefaultNavigationState() {
+  return {
+    view: activeView,
+    registry: activeRegistrySection,
+    settings: activeSettingsSection,
+    integrations: activeIntegrationsSection,
+    admin: activeAdminSection,
+    template: activeTemplateSection,
+    discovery: activeDiscoverySection,
+    modal: "",
+  };
+}
+
+function decodeHashPart(value) {
+  try {
+    return decodeURIComponent(String(value || "").trim());
+  } catch {
+    return String(value || "").trim();
+  }
+}
+
+function readRouteNavigationState(rawHash) {
+  const parts = String(rawHash || "")
+    .replace(/^\/+/, "")
+    .split("/")
+    .map(decodeHashPart)
+    .filter(Boolean);
+  const state = createDefaultNavigationState();
+  const [root, first, second] = parts;
+
+  if (NAVIGATION_HASH_OPTIONS.views.has(root)) {
+    state.view = root;
+    if (root === "registry" && NAVIGATION_HASH_OPTIONS.registry.has(first)) {
+      state.registry = first;
+    }
+    return state;
+  }
+
+  if (root === "settings") {
+    state.modal = "settings";
+    state.view = activeView || "dashboard";
+    state.settings = NAVIGATION_HASH_OPTIONS.settings.has(first) ? first : "profile";
+    if (state.settings === "templates" && NAVIGATION_HASH_OPTIONS.template.has(second)) {
+      state.template = second;
+    }
+    if (state.settings === "administration" && NAVIGATION_HASH_OPTIONS.admin.has(second)) {
+      state.admin = second;
+    }
+    return state;
+  }
+
+  if (root === "integrations") {
+    state.modal = "integrations";
+    state.view = activeView || "dashboard";
+    state.integrations = NAVIGATION_HASH_OPTIONS.integrations.has(first) ? first : "automation";
+    if (state.integrations === "discovery" && NAVIGATION_HASH_OPTIONS.discovery.has(second)) {
+      state.discovery = second;
+    }
+    return state;
+  }
+
+  return state;
+}
+
+function readQueryNavigationState(rawHash) {
+  const params = new URLSearchParams(rawHash);
+  const state = createDefaultNavigationState();
+  state.view = getAllowedNavigationValue(params, "view", "views", state.view);
+  state.registry = getAllowedNavigationValue(params, "registry", "registry", state.registry);
+  state.settings = getAllowedNavigationValue(params, "settings", "settings", state.settings);
+  state.integrations = getAllowedNavigationValue(params, "integrations", "integrations", state.integrations);
+  state.admin = getAllowedNavigationValue(params, "admin", "admin", state.admin);
+  state.template = getAllowedNavigationValue(params, "template", "template", state.template);
+  state.discovery = getAllowedNavigationValue(params, "discovery", "discovery", state.discovery);
+  state.modal = getAllowedNavigationValue(params, "modal", "modals", state.modal);
+  return state;
+}
+
+function readNavigationStateFromHash() {
+  const rawHash = String(window.location.hash || "").replace(/^#/, "");
+  if (!rawHash) {
+    return createDefaultNavigationState();
+  }
+  return rawHash.includes("=")
+    ? readQueryNavigationState(rawHash)
+    : readRouteNavigationState(rawHash);
+}
+
+function applyNavigationSections(navigationState) {
+  activeView = navigationState.view || activeView;
+  activeRegistrySection = navigationState.registry || activeRegistrySection;
+  activeSettingsSection = navigationState.settings || activeSettingsSection;
+  activeIntegrationsSection = navigationState.integrations || activeIntegrationsSection;
+  activeAdminSection = navigationState.admin || activeAdminSection;
+  activeTemplateSection = navigationState.template || activeTemplateSection;
+  activeDiscoverySection = navigationState.discovery || activeDiscoverySection;
+}
+
+function getNavigationModalName(modal = getOpenModal()) {
+  if (modal?.id === "settings-modal") {
+    return "settings";
+  }
+  if (modal?.id === "integrations-modal") {
+    return "integrations";
+  }
+  return "";
+}
+
+function encodeHashPart(value) {
+  return encodeURIComponent(String(value || "").trim());
+}
+
+function buildNavigationHash(modalName) {
+  if (modalName === "settings") {
+    const parts = ["settings", activeSettingsSection];
+    if (activeSettingsSection === "templates") {
+      parts.push(activeTemplateSection);
+    }
+    if (activeSettingsSection === "administration") {
+      parts.push(activeAdminSection);
+    }
+    return `#/${parts.map(encodeHashPart).join("/")}`;
+  }
+
+  if (modalName === "integrations") {
+    const parts = ["integrations", activeIntegrationsSection];
+    if (activeIntegrationsSection === "discovery") {
+      parts.push(activeDiscoverySection);
+    }
+    return `#/${parts.map(encodeHashPart).join("/")}`;
+  }
+
+  if (activeView === "registry") {
+    return `#/registry/${encodeHashPart(activeRegistrySection)}`;
+  }
+
+  return `#/${encodeHashPart(activeView || "dashboard")}`;
+}
+
+function updateNavigationHash(modalOverride = null) {
+  if (isApplyingNavigationState || isNavigationBootstrapping) {
+    return;
+  }
+
+  const modalName = typeof modalOverride === "string" ? modalOverride : getNavigationModalName();
+  const nextHash = buildNavigationHash(modalName);
+  if (window.location.hash !== nextHash) {
+    window.history.replaceState(null, "", nextHash);
+  }
+}
+
+function restoreNavigationFromHash({ restoreModal = false } = {}) {
+  const navigationState = readNavigationStateFromHash();
+  isApplyingNavigationState = true;
+  try {
+    applyNavigationSections(navigationState);
+    setActiveView(activeView);
+    setActiveRegistrySection(activeRegistrySection);
+    setActiveSettingsSection(activeSettingsSection);
+    setActiveAdminSection(activeAdminSection);
+    setActiveTemplateSection(activeTemplateSection);
+    setActiveIntegrationsSection(activeIntegrationsSection);
+    setActiveDiscoverySection(activeDiscoverySection);
+    if (restoreModal && state.auth?.authenticated) {
+      const currentModal = getOpenModal();
+      if (!navigationState.modal && ["settings-modal", "integrations-modal"].includes(currentModal?.id)) {
+        closeModal(currentModal.id);
+      } else if (navigationState.modal === "settings") {
+        openSettingsModal(activeSettingsSection);
+      } else if (navigationState.modal === "integrations") {
+        openIntegrationsModal(activeIntegrationsSection);
+      }
+    }
+  } finally {
+    isApplyingNavigationState = false;
+  }
+  updateNavigationHash();
+}
+
 function normalizeBoolean(value, fallback = true) {
   if (typeof value === "boolean") {
     return value;
@@ -1218,8 +1509,14 @@ function normalizeBoolean(value, fallback = true) {
 
 async function initialize() {
   preferences.settings = loadCachedInterfaceSettings();
+  applyNavigationSections(readNavigationStateFromHash());
   bindEvents();
-  setActiveView(activeView);
+  isApplyingNavigationState = true;
+  try {
+    setActiveView(activeView);
+  } finally {
+    isApplyingNavigationState = false;
+  }
   applyVisualSettings();
   applyLocalizedUi();
   renderAll();
@@ -1253,7 +1550,11 @@ function bindEvents() {
   });
   elements.registrySectionTabs.forEach((button) => {
     button.addEventListener("click", () => {
-      setActiveRegistrySection(button.dataset.registrySectionTab);
+      const sectionName = button.dataset.registrySectionTab;
+      setActiveRegistrySection(sectionName);
+      if (sectionName === "devices" || sectionName === "services") {
+        revealRegistrySectionList(sectionName, { extraDown: 110 });
+      }
     });
   });
   elements.statCards.forEach((button) => {
@@ -1376,34 +1677,42 @@ function bindEvents() {
   elements.subnetsListToggleButton?.addEventListener("click", () => {
     showAllSubnetsInRegistry = !showAllSubnetsInRegistry;
     renderSubnetsTable();
+    revealRegistrySectionList("subnets");
   });
   elements.groupsListToggleButton?.addEventListener("click", () => {
     showAllGroupsInRegistry = !showAllGroupsInRegistry;
     renderGroupsTable();
+    revealRegistrySectionList("groups");
   });
   elements.devicesListToggleButton?.addEventListener("click", () => {
     showAllDevicesInRegistry = !showAllDevicesInRegistry;
     renderDevicesTable();
+    revealRegistrySectionList("devices");
   });
   elements.servicesListToggleButton?.addEventListener("click", () => {
     showAllServicesInRegistry = !showAllServicesInRegistry;
     renderServicesList();
+    revealRegistrySectionList("services");
   });
   elements.accessGroupsListToggleButton?.addEventListener("click", () => {
     showAllAccessGroups = !showAllAccessGroups;
     renderAccessGroupsTable();
+    revealListStart(() => elements.accessGroupsTableWrap);
   });
   elements.usersListToggleButton?.addEventListener("click", () => {
     showAllUsers = !showAllUsers;
     renderUsersTable();
+    revealListStart(() => elements.usersTableWrap);
   });
   elements.automationSubnetsListToggleButton?.addEventListener("click", () => {
     showAllAutomationSubnets = !showAllAutomationSubnets;
     renderSubnetScanSettings();
+    revealListStart(() => elements.settingsSubnetScanList);
   });
   elements.discoveryAgentsListToggleButton?.addEventListener("click", () => {
     showAllDiscoveryAgents = !showAllDiscoveryAgents;
     renderDiscoveryAgentsTable();
+    revealListStart(() => elements.discoveryAgentsTableWrap);
   });
   elements.accessGroupsTableBody?.addEventListener("click", handleAccessGroupTableActions);
   elements.usersTableBody?.addEventListener("click", handleUserAdminTableActions);
@@ -1431,6 +1740,10 @@ function bindEvents() {
   elements.discoveryResultsTableBody?.addEventListener("click", handleDiscoveryPreviewActions);
   elements.discoveryStaleCleanupButton?.addEventListener("click", handleDiscoveryStaleCleanup);
   elements.discoveryAuditEventFilter?.addEventListener("change", renderDiscoveryAudit);
+  elements.discoveryDebugAgentFilter?.addEventListener("change", handleDiscoveryDebugFilterChange);
+  elements.discoveryDebugKindFilter?.addEventListener("change", handleDiscoveryDebugFilterChange);
+  elements.discoveryDebugTableBody?.addEventListener("click", handleDiscoveryDebugActions);
+  elements.discoveryDebugTableBody?.addEventListener("change", handleDiscoveryDebugActions);
   elements.historySearchInput?.addEventListener("input", renderHistoryTable);
   elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
   elements.historyScopeFilter?.addEventListener("change", renderHistoryTable);
@@ -1441,6 +1754,7 @@ function bindEvents() {
   document.addEventListener("click", handleDocumentClick);
   window.addEventListener("focus", () => refreshState(true));
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener("hashchange", () => restoreNavigationFromHash({ restoreModal: state.auth?.authenticated }));
 }
 
 async function loadGroupSuggestionTemplates() {
@@ -1472,6 +1786,7 @@ async function restoreSession() {
     applyAuthSession(session);
 
     if (!session?.authenticated) {
+      isNavigationBootstrapping = false;
       openAuthScreen(session);
       return;
     }
@@ -1479,6 +1794,7 @@ async function restoreSession() {
     await finishAuthenticatedBootstrap();
   } catch (error) {
     console.error(error);
+    isNavigationBootstrapping = false;
     openAuthScreen();
     showToast(error.message || t("server_unavailable"), true);
   }
@@ -1491,6 +1807,8 @@ async function finishAuthenticatedBootstrap() {
     return;
   }
   closeAuthScreen();
+  isNavigationBootstrapping = false;
+  restoreNavigationFromHash({ restoreModal: true });
   connectLiveStream();
   if (pollIntervalId) {
     window.clearInterval(pollIntervalId);
@@ -3069,6 +3387,9 @@ function closeModal(modalId) {
     document.body.style.top = "";
     window.scrollTo(0, modalScrollY);
   }
+  if (modal.id === "settings-modal" || modal.id === "integrations-modal") {
+    updateNavigationHash("");
+  }
 }
 
 function getOpenModal() {
@@ -3277,6 +3598,7 @@ function openSettingsModal(sectionName = activeSettingsSection) {
   renderAdminPanels();
   setActiveSettingsSection(sectionName);
   openModal("settings-modal");
+  updateNavigationHash("settings");
 }
 
 function openIntegrationsModal(sectionName = activeIntegrationsSection) {
@@ -3287,6 +3609,7 @@ function openIntegrationsModal(sectionName = activeIntegrationsSection) {
   }), "muted");
   setActiveIntegrationsSection(sectionName);
   openModal("integrations-modal");
+  updateNavigationHash("integrations");
 }
 
 function applyAuthSession(session) {
@@ -3574,6 +3897,7 @@ function renderAdminPanels() {
   renderDiscoveryAgentsTable();
   renderDiscoveryPreview();
   renderDiscoveryAudit();
+  renderDiscoveryDebug();
   if (!preserveUserForm) {
     const editingUser = editingUserId
       ? (state.admin?.users || []).find((entry) => entry.id === editingUserId) || null
@@ -3618,6 +3942,7 @@ function setActiveSettingsSection(sectionName) {
   if (activeSettingsSection === "discovery") {
     setActiveDiscoverySection(activeDiscoverySection);
   }
+  updateNavigationHash();
 }
 
 function setActiveAdminSection(sectionName) {
@@ -3635,6 +3960,7 @@ function setActiveAdminSection(sectionName) {
   elements.adminContentPanels.forEach((panel) => {
     panel.hidden = !isAdmin || panel.dataset.adminPanel !== activeAdminSection;
   });
+  updateNavigationHash();
 }
 
 function setActiveIntegrationsSection(sectionName) {
@@ -3666,6 +3992,7 @@ function setActiveIntegrationsSection(sectionName) {
   if (activeIntegrationsSection === "discovery") {
     setActiveDiscoverySection(activeDiscoverySection);
   }
+  updateNavigationHash();
 }
 
 function setActiveTemplateSection(sectionName) {
@@ -3680,10 +4007,11 @@ function setActiveTemplateSection(sectionName) {
   elements.templatePanels.forEach((panel) => {
     panel.hidden = panel.dataset.templatePanel !== activeTemplateSection;
   });
+  updateNavigationHash();
 }
 
 function setActiveDiscoverySection(sectionName) {
-  const allowedSections = ["agents", "received", "audit"];
+  const allowedSections = ["agents", "received", "audit", "debug"];
   const resolvedSection = allowedSections.includes(sectionName) ? sectionName : "agents";
   activeDiscoverySection = resolvedSection;
 
@@ -3695,6 +4023,7 @@ function setActiveDiscoverySection(sectionName) {
   elements.discoveryPanels.forEach((panel) => {
     panel.hidden = panel.dataset.discoveryPanel !== activeDiscoverySection;
   });
+  updateNavigationHash();
 }
 
 function handleGlobalKeydown(event) {
@@ -3729,6 +4058,7 @@ function setActiveView(viewName) {
   });
 
   syncRegistrySections();
+  updateNavigationHash();
 }
 
 function setActiveRegistrySection(sectionName) {
@@ -3736,6 +4066,7 @@ function setActiveRegistrySection(sectionName) {
     ? sectionName
     : "subnets";
   syncRegistrySections();
+  updateNavigationHash();
 }
 
 function getRegistryFilterMode() {
@@ -4047,12 +4378,12 @@ function handleStatNavigation(target) {
     case "occupied":
       setActiveView("registry");
       setActiveRegistrySection("devices");
-      document.getElementById("registry-panel-devices")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      revealRegistrySectionList("devices", { extraDown: 110 });
       return;
     case "services":
       setActiveView("registry");
       setActiveRegistrySection("services");
-      document.getElementById("registry-panel-services")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      revealRegistrySectionList("services", { extraDown: 110 });
       return;
     case "available":
       setActiveView("registry");
@@ -5396,6 +5727,7 @@ async function handleSubnetTableActions(event) {
   if (toggleButton) {
     showAllSubnetsInRegistry = !showAllSubnetsInRegistry;
     renderSubnetsTable();
+    revealRegistrySectionList("subnets");
     return;
   }
 
@@ -5523,6 +5855,7 @@ async function handleGroupTableActions(event) {
   if (toggleListButton) {
     showAllGroupsInRegistry = !showAllGroupsInRegistry;
     renderGroupsTable();
+    revealRegistrySectionList("groups");
     return;
   }
 
@@ -5600,6 +5933,7 @@ async function handleDeviceTableActions(event) {
   if (toggleButton) {
     showAllDevicesInRegistry = !showAllDevicesInRegistry;
     renderDevicesTable();
+    revealRegistrySectionList("devices");
     return;
   }
 
@@ -5633,7 +5967,10 @@ async function handleDeviceTableActions(event) {
     }
     renderDevicesTable();
     if (willExpand) {
-      revealExpandedContent(() => document.querySelector(`[data-expanded-registry-discovery="${cssEscape(key)}"]`));
+      revealExpandedContent(
+        () => document.querySelector(`[data-expanded-registry-discovery="${cssEscape(key)}"]`),
+        { extraDown: 130 },
+      );
     }
     return;
   }
@@ -5695,6 +6032,7 @@ async function handleServiceListActions(event) {
   if (toggleButton) {
     showAllServicesInRegistry = !showAllServicesInRegistry;
     renderServicesList();
+    revealRegistrySectionList("services");
     return;
   }
 
@@ -5715,7 +6053,10 @@ async function handleServiceListActions(event) {
     }
     renderServicesList();
     if (willExpand) {
-      revealExpandedContent(() => document.querySelector(`[data-expanded-registry-discovery="${cssEscape(key)}"]`));
+      revealExpandedContent(
+        () => document.querySelector(`[data-expanded-registry-discovery="${cssEscape(key)}"]`),
+        { extraDown: 130 },
+      );
     }
     return;
   }
@@ -7236,7 +7577,7 @@ async function handleDiscoveryPreviewActions(event) {
 }
 
 async function handleDiscoveryStaleCleanup() {
-  const staleCount = (state.admin?.discoveryResults || []).filter(isStaleDiscoveryResult).length;
+  const staleCount = getDisplayDiscoveryResults().filter(isStaleDiscoveryResult).length;
   if (staleCount === 0) {
     showToast(t("discovery_bulk_cleanup_stale_empty"));
     return;
@@ -7364,42 +7705,384 @@ function renderDiscoveryAudit() {
     .join("");
 }
 
+function renderDiscoveryDebugFieldList(fields, limit = 8) {
+  const uniqueFields = getUniqueDiscoveryDebugFields(fields);
+  if (uniqueFields.length === 0) {
+    return t("no_data");
+  }
+  const visibleFields = uniqueFields.slice(0, limit);
+  const suffix = uniqueFields.length > visibleFields.length
+    ? ` +${uniqueFields.length - visibleFields.length}`
+    : "";
+  return `${visibleFields.join(", ")}${suffix}`;
+}
+
+function getUniqueDiscoveryDebugFields(fields) {
+  return [...new Set((fields || []).map((field) => String(field || "").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, getLanguage(), { sensitivity: "base" }));
+}
+
+function getDiscoveryDebugHiddenFields(result) {
+  const visible = new Set(result.visibleFields || []);
+  const displayed = new Set(getDiscoveryVisibleMetadataEntries(result).map(([key]) => key));
+  const acceptedButNotVisible = (result.acceptedFields || []).filter((field) => !visible.has(field));
+  const visibleButSummarizedAway = Object.keys(result.visibleRaw || {}).filter((field) => !displayed.has(field));
+  return [...new Set([...acceptedButNotVisible, ...visibleButSummarizedAway])];
+}
+
+function formatDiscoveryDebugHardwareField(field) {
+  return `hardware.${field}`;
+}
+
+function getDiscoveryDebugHardwareFields(result) {
+  if (!result.hardwareRaw || typeof result.hardwareRaw !== "object") {
+    return [];
+  }
+  return Object.keys(result.hardwareRaw).map(formatDiscoveryDebugHardwareField);
+}
+
+function getDiscoveryDebugHardwareDisplayedFields(result) {
+  return getDiscoveryHardwareMetadataEntries(result)
+    .map(([field]) => formatDiscoveryDebugHardwareField(field));
+}
+
+function getDiscoveryDebugFieldCount(result, fieldName) {
+  const hardwareFieldName = `hardware${fieldName[0].toUpperCase()}${fieldName.slice(1)}`;
+  return getUniqueDiscoveryDebugFields([
+    ...(result[fieldName] || []),
+    ...((result[hardwareFieldName] || []).map(formatDiscoveryDebugHardwareField)),
+  ]).length;
+}
+
+function getDiscoveryDebugOptions(resultId) {
+  const existingOptions = discoveryDebugFieldOptions.get(resultId);
+  if (existingOptions) {
+    if (!(existingOptions.selected instanceof Set)) {
+      existingOptions.selected = new Set();
+    }
+    if (!(existingOptions.known instanceof Set)) {
+      existingOptions.known = new Set();
+    }
+    return existingOptions;
+  }
+  const options = {
+    selected: new Set(),
+    known: new Set(),
+  };
+  discoveryDebugFieldOptions.set(resultId, options);
+  return options;
+}
+
+function getDiscoveryDebugSelectedFieldSet(resultId, fields, defaultSelectedFields) {
+  const options = getDiscoveryDebugOptions(resultId);
+  const selected = options.selected;
+  const known = options.known;
+  const currentFields = new Set(fields);
+  const defaultSelected = new Set(defaultSelectedFields);
+  fields.forEach((field) => {
+    if (!known.has(field)) {
+      known.add(field);
+      if (defaultSelected.has(field)) {
+        selected.add(field);
+      }
+    }
+  });
+  [...known].forEach((field) => {
+    if (!currentFields.has(field)) {
+      known.delete(field);
+      selected.delete(field);
+    }
+  });
+  return selected;
+}
+
+function renderDiscoveryDebugFilterOptions(results) {
+  if (elements.discoveryDebugAgentFilter) {
+    const previousAgent = discoveryDebugAgentFilter;
+    const agents = new Map();
+    results.forEach((result) => {
+      const agentId = result.agentId || "";
+      if (!agentId) {
+        return;
+      }
+      const agentLabel = result.agentName || agentId;
+      agents.set(agentId, agentLabel);
+    });
+    elements.discoveryDebugAgentFilter.innerHTML = [
+      `<option value="all">${escapeHtml(t("discovery_debug_filter_all_agents"))}</option>`,
+      ...[...agents.entries()]
+        .sort(([, leftLabel], [, rightLabel]) => leftLabel.localeCompare(rightLabel, getLanguage()))
+        .map(([agentId, label]) => `<option value="${escapeHtml(agentId)}">${escapeHtml(label)}</option>`),
+    ].join("");
+    discoveryDebugAgentFilter = previousAgent !== "all" && !agents.has(previousAgent) ? "all" : previousAgent;
+    elements.discoveryDebugAgentFilter.value = discoveryDebugAgentFilter;
+  }
+
+  if (elements.discoveryDebugKindFilter) {
+    elements.discoveryDebugKindFilter.value = discoveryDebugKindFilter;
+  }
+}
+
+function getFilteredDiscoveryDebugResults(results) {
+  return results.filter((result) => {
+    if (discoveryDebugAgentFilter !== "all" && result.agentId !== discoveryDebugAgentFilter) {
+      return false;
+    }
+    if (discoveryDebugKindFilter !== "all" && getDiscoveryTargetKind(result) !== discoveryDebugKindFilter) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function renderDiscoveryDebugDetails(result) {
+  const hiddenFields = getUniqueDiscoveryDebugFields(getDiscoveryDebugHiddenFields(result));
+  const visibleRawKeys = getUniqueDiscoveryDebugFields(Object.keys(result.visibleRaw || {}));
+  const hardwareFields = getDiscoveryDebugHardwareFields(result);
+  const allFields = getUniqueDiscoveryDebugFields([...hiddenFields, ...visibleRawKeys, ...hardwareFields]);
+  const defaultSelectedFields = [
+    ...getDiscoveryVisibleMetadataEntries(result).map(([key]) => key),
+    ...getDiscoveryDebugHardwareDisplayedFields(result),
+  ];
+  return `
+    <div class="discovery-debug-panel">
+      ${renderDiscoveryDebugFieldSelector(result.id, allFields, defaultSelectedFields)}
+    </div>
+  `;
+}
+
+function renderDiscoveryDebugFieldGroup(resultId, titleKey, fields, checked) {
+  const sortedFields = getUniqueDiscoveryDebugFields(fields);
+  return `
+    <div class="discovery-debug-field-group">
+      <div class="discovery-debug-field-group__header">
+        <span>${escapeHtml(t(titleKey))}</span>
+        <strong>${escapeHtml(String(fields.length))}</strong>
+      </div>
+      <div class="discovery-debug-field-grid">
+        ${fields.length > 0
+          ? sortedFields.map((field) => `
+              <label class="discovery-debug-field-option">
+                <input
+                  type="checkbox"
+                  data-discovery-debug-field-name="${escapeHtml(field)}"
+                  data-discovery-debug-result="${escapeHtml(resultId)}"
+                  ${checked ? "checked" : ""}
+                >
+                <span>${escapeHtml(field)}</span>
+              </label>
+            `).join("")
+          : `<div class="secondary-line">${escapeHtml(t("no_data"))}</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderDiscoveryDebugFieldSelector(resultId, fields, defaultSelectedFields) {
+  const selected = getDiscoveryDebugSelectedFieldSet(resultId, fields, defaultSelectedFields);
+  const displayedFields = fields.filter((field) => selected.has(field));
+  const hiddenFields = fields.filter((field) => !selected.has(field));
+  const detailsKey = `${resultId}:fields`;
+  return `
+    <details class="discovery-debug-field-picker" data-discovery-debug-fields="${escapeHtml(resultId)}" ${openDiscoveryDebugFieldLists.has(detailsKey) ? "open" : ""}>
+      <summary>
+        <span>${escapeHtml(t("discovery_debug_fields_title"))}</span>
+        <strong>${escapeHtml(String(displayedFields.length))}/${escapeHtml(String(fields.length))}</strong>
+      </summary>
+      <div class="discovery-debug-field-picker__content discovery-debug-field-picker__content--split">
+        ${renderDiscoveryDebugFieldGroup(resultId, "discovery_debug_hidden_fields", hiddenFields, false)}
+        ${renderDiscoveryDebugFieldGroup(resultId, "discovery_debug_displayed_fields", displayedFields, true)}
+      </div>
+    </details>
+  `;
+}
+
+function renderDiscoveryDebug() {
+  if (!elements.discoveryDebugTableBody) {
+    return;
+  }
+
+  const results = getDisplayDiscoveryResults();
+  renderDiscoveryDebugFilterOptions(results);
+  const filteredResults = getFilteredDiscoveryDebugResults(results);
+  if (filteredResults.length === 0) {
+    elements.discoveryDebugTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="4">${escapeHtml(results.length ? t("no_results") : t("empty_discovery_debug"))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.discoveryDebugTableBody.innerHTML = filteredResults
+    .slice()
+    .sort((left, right) => String(right.updatedAt || right.lastSeenAt).localeCompare(String(left.updatedAt || left.lastSeenAt)))
+    .map((result) => {
+      const isExpanded = expandedDiscoveryDebugIds.has(result.id);
+      const objectLabel = [
+        result.name || t("no_data"),
+        result.hostName && result.hostName !== result.name ? result.hostName : "",
+      ].filter(Boolean).join(" · ");
+      const sourceLabel = [
+        getDeviceSourceLabel(result.source),
+        result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : "",
+      ].filter(Boolean).join(" · ");
+      return `
+        <tr>
+          <td>
+            <button type="button" class="link-button table-row-link discovery-debug-entity" data-toggle-discovery-debug="${escapeHtml(result.id)}" aria-expanded="${isExpanded ? "true" : "false"}">
+              ${escapeHtml(isExpanded ? "-" : "+")}
+              <strong>${escapeHtml(objectLabel)}</strong>
+            </button>
+            <div class="secondary-line mono">${escapeHtml(result.sourceId || result.id || t("no_data"))}</div>
+          </td>
+          <td>${escapeHtml(sourceLabel || t("no_data"))}</td>
+          <td>
+            <span class="status-badge status-badge--${getDiscoveryStateVariant(result.state)}">${escapeHtml(getDiscoveryStateLabel(result.state))}</span>
+            <div class="secondary-line">${escapeHtml(formatDateTime(result.lastSeenAt || result.updatedAt))}</div>
+          </td>
+          <td>
+            <div class="discovery-debug-counts">
+              <span>${escapeHtml(t("discovery_details_received_fields"))}: <strong>${escapeHtml(String(getDiscoveryDebugFieldCount(result, "receivedFields")))}</strong></span>
+              <span>${escapeHtml(t("discovery_details_accepted_fields"))}: <strong>${escapeHtml(String(getDiscoveryDebugFieldCount(result, "acceptedFields")))}</strong></span>
+              <span>${escapeHtml(t("discovery_details_visible_fields"))}: <strong>${escapeHtml(String(getDiscoveryDebugFieldCount(result, "visibleFields")))}</strong></span>
+            </div>
+          </td>
+        </tr>
+        ${isExpanded ? `
+          <tr class="discovery-debug-details-row" data-expanded-discovery-debug="${escapeHtml(result.id)}">
+            <td colspan="4">${renderDiscoveryDebugDetails(result)}</td>
+          </tr>
+        ` : ""}
+      `;
+    })
+    .join("");
+}
+
+function handleDiscoveryDebugFilterChange() {
+  discoveryDebugAgentFilter = elements.discoveryDebugAgentFilter?.value || "all";
+  discoveryDebugKindFilter = elements.discoveryDebugKindFilter?.value || "all";
+  renderDiscoveryDebug();
+}
+
+function handleDiscoveryDebugActions(event) {
+  const fieldPickerSummary = event.target.closest(".discovery-debug-field-picker summary");
+  if (fieldPickerSummary && event.type === "click") {
+    const picker = fieldPickerSummary.closest("[data-discovery-debug-fields]");
+    const resultId = picker?.dataset.discoveryDebugFields || "";
+    if (resultId) {
+      const detailsKey = `${resultId}:fields`;
+      requestAnimationFrame(() => {
+        if (picker.open) {
+          openDiscoveryDebugFieldLists.add(detailsKey);
+        } else {
+          openDiscoveryDebugFieldLists.delete(detailsKey);
+        }
+      });
+    }
+    return;
+  }
+
+  const toggleButton = event.target.closest("[data-toggle-discovery-debug]");
+  if (toggleButton && event.type === "click") {
+    const resultId = toggleButton.dataset.toggleDiscoveryDebug || "";
+    const willExpand = !expandedDiscoveryDebugIds.has(resultId);
+    if (willExpand) {
+      expandedDiscoveryDebugIds.add(resultId);
+      openDiscoveryDebugFieldLists.add(`${resultId}:fields`);
+    } else {
+      expandedDiscoveryDebugIds.delete(resultId);
+    }
+    renderDiscoveryDebug();
+    if (willExpand) {
+      revealExpandedContent(
+        () => document.querySelector(`[data-expanded-discovery-debug="${cssEscape(resultId)}"]`),
+        { extraDown: 110 },
+      );
+    }
+    return;
+  }
+
+  const fieldToggle = event.target.closest("[data-discovery-debug-field-name]");
+  if (fieldToggle && event.type === "change") {
+    const resultId = fieldToggle.dataset.discoveryDebugResult || "";
+    const fieldName = fieldToggle.dataset.discoveryDebugFieldName || "";
+    const options = getDiscoveryDebugOptions(resultId);
+    const selected = options.selected;
+    if (fieldName && selected instanceof Set) {
+      if (fieldToggle.checked) {
+        selected.add(fieldName);
+      } else {
+        selected.delete(fieldName);
+      }
+      openDiscoveryDebugFieldLists.add(`${resultId}:fields`);
+      renderDiscoveryDebug();
+    }
+  }
+}
+
 const DISCOVERY_VISIBLE_METADATA_PRIORITY = [
-  "primaryIp",
-  "ip",
-  "mac",
   "hostname",
   "fqdn",
+  "namespace",
   "node",
+  "nodeName",
   "vmid",
+  "uid",
+  "containerId",
+  "image",
+  "images",
   "type",
   "proxmoxType",
+  "template",
+  "tags",
   "statusText",
-  "uptime",
-  "cpu",
-  "cpus",
+  "phase",
+  "dockerState",
+  "containersReady",
+  "restartCount",
+  "primaryIp",
+  "ip",
+  "ips",
+  "podIP",
+  "hostIP",
+  "clusterIP",
+  "externalIPs",
+  "mac",
+  "networks",
+  "loadBalancer",
+  "os",
+  "kernel",
   "cpuModel",
   "sockets",
-  "ram",
+  "cpus",
+  "loadAverage",
+  "cpu",
   "ramUsage",
+  "ram",
   "memory",
   "maxMemory",
   "diskCount",
-  ...Array.from({ length: 16 }, (_, index) => `disk${index + 1}`),
+  "diskTotal",
   "diskSummary",
-  "diskUsage",
+  ...Array.from({ length: 16 }, (_, index) => `disk${index + 1}`),
   "disks",
+  "diskUsage",
   "disk",
   "maxDisk",
-  "loadAverage",
+  "uptime",
+  "dockerVersion",
+  "dockerComposeVersion",
+  "kubernetesVersion",
+  "kubernetesGitVersion",
   "kernelVersion",
   "pveVersion",
   "system",
   "machine",
   "agentVersion",
-  "tags",
-  "containerId",
-  "image",
+  "selector",
+  "labels",
+  "owners",
 ];
 
 function formatBytesValue(value) {
@@ -7428,10 +8111,67 @@ function formatDiscoveryDiskDescriptor(value) {
 function formatDiscoveryMetadataKey(key) {
   const diskMatch = String(key).match(/^disk(\d+)$/);
   if (diskMatch) {
-    return `disk ${diskMatch[1]}`;
+    return `Disk ${diskMatch[1]}`;
   }
-  if (key === "ram") {
-    return "RAM";
+  const labels = {
+    agentVersion: "Agent",
+    clusterIP: "Cluster IP",
+    containerId: "Container ID",
+    containersReady: "Containers ready",
+    cpu: "CPU usage",
+    cpuModel: "CPU",
+    cpus: "CPU cores",
+    created: "Created",
+    disk: "Disk used",
+    diskCount: "Disks",
+    diskSummary: "Disks",
+    diskTotal: "Disk total",
+    diskUsage: "Disk usage",
+    dockerState: "Docker state",
+    dockerComposeVersion: "Docker Compose",
+    dockerVersion: "Docker",
+    externalIPs: "External IPs",
+    finishedAt: "Finished",
+    fqdn: "FQDN",
+    hostIP: "Host IP",
+    image: "Image",
+    images: "Images",
+    ip: "IP",
+    ips: "IPs",
+    kernel: "Kernel",
+    kernelVersion: "Kernel version",
+    kubernetesGitVersion: "Kubernetes build",
+    kubernetesVersion: "Kubernetes",
+    loadBalancer: "Load balancer",
+    loadAverage: "Load average",
+    labels: "Labels",
+    machine: "Architecture",
+    mac: "MAC",
+    maxDisk: "Disk total",
+    maxMemory: "RAM total",
+    memory: "RAM used",
+    namespace: "Namespace",
+    networks: "Networks",
+    nodeName: "Node",
+    os: "OS",
+    owners: "Owners",
+    phase: "Phase",
+    primaryIp: "Primary IP",
+    proxmoxType: "Proxmox type",
+    pveVersion: "PVE version",
+    podIP: "Pod IP",
+    ram: "RAM",
+    ramUsage: "RAM usage",
+    restartCount: "Restarts",
+    selector: "Selector",
+    sourceKind: "Source type",
+    startedAt: "Started",
+    statusText: "Status",
+    template: "Template",
+    vmid: "VMID",
+  };
+  if (Object.prototype.hasOwnProperty.call(labels, key)) {
+    return labels[key];
   }
   return key;
 }
@@ -7540,17 +8280,50 @@ function isProxmoxHypervisorResult(result) {
     && normalizeMetadataToken(result?.sourceKind, "") === "hypervisor";
 }
 
+function isProxmoxHardwareResult(result) {
+  return normalizeMetadataToken(result?.source, "") === "proxmox"
+    && ["vm", "lxc", "hypervisor"].includes(normalizeMetadataToken(result?.sourceKind, ""));
+}
+
 function getProxmoxNodeName(result) {
   return String(result?.visibleRaw?.node || result?.name || result?.hostName || "").trim().toLowerCase();
+}
+
+function attachDiscoveryHardwareResult(hostResult, hardwareResult, hiddenIds) {
+  if (!hostResult || !hardwareResult || hostResult.id === hardwareResult.id || hiddenIds.has(hardwareResult.id)) {
+    return;
+  }
+  hostResult.hardwareRaw = {
+    ...(hostResult.hardwareRaw || {}),
+    ...(hardwareResult.visibleRaw || {}),
+  };
+  hostResult.hardwareReceivedFields = getUniqueDiscoveryDebugFields([
+    ...(hostResult.hardwareReceivedFields || []),
+    ...(hardwareResult.receivedFields || []),
+  ]);
+  hostResult.hardwareAcceptedFields = getUniqueDiscoveryDebugFields([
+    ...(hostResult.hardwareAcceptedFields || []),
+    ...(hardwareResult.acceptedFields || []),
+  ]);
+  hostResult.hardwareVisibleFields = getUniqueDiscoveryDebugFields([
+    ...(hostResult.hardwareVisibleFields || []),
+    ...(hardwareResult.visibleFields || []),
+  ]);
+  hiddenIds.add(hardwareResult.id);
 }
 
 function mergeDiscoveryHardwareResults(results) {
   const mergedResults = results.map((result) => ({ ...result }));
   const hostByNode = new Map();
+  const hostByDeviceId = new Map();
   mergedResults.forEach((result) => {
     const sourceKind = normalizeMetadataToken(result.sourceKind, "");
     if (sourceKind !== "host") {
       return;
+    }
+    if (result.matchedDeviceId) {
+      hostByDeviceId.set(`${result.agentId}::${result.matchedDeviceId}`, result);
+      hostByDeviceId.set(result.matchedDeviceId, result);
     }
     const nodeName = String(result.name || result.hostName || "").trim().toLowerCase();
     if (nodeName) {
@@ -7560,6 +8333,16 @@ function mergeDiscoveryHardwareResults(results) {
 
   const hiddenIds = new Set();
   mergedResults.forEach((result) => {
+    if (!isProxmoxHardwareResult(result)) {
+      return;
+    }
+    const hostByDevice = result.matchedDeviceId
+      ? hostByDeviceId.get(`${result.agentId}::${result.matchedDeviceId}`) || hostByDeviceId.get(result.matchedDeviceId)
+      : null;
+    if (hostByDevice) {
+      attachDiscoveryHardwareResult(hostByDevice, result, hiddenIds);
+      return;
+    }
     if (!isProxmoxHypervisorResult(result)) {
       return;
     }
@@ -7568,8 +8351,7 @@ function mergeDiscoveryHardwareResults(results) {
     if (!hostResult) {
       return;
     }
-    hostResult.hardwareRaw = result.visibleRaw || {};
-    hiddenIds.add(result.id);
+    attachDiscoveryHardwareResult(hostResult, result, hiddenIds);
   });
   return mergedResults.filter((result) => !hiddenIds.has(result.id));
 }
@@ -7612,6 +8394,12 @@ function getDiscoveryVisibleMetadataEntries(result) {
   hiddenWhenSummarized.add("python");
   hiddenWhenSummarized.add("platform");
   hiddenWhenSummarized.add("release");
+  if (raw.os) {
+    hiddenWhenSummarized.add("pveVersion");
+  }
+  if (raw.kernel) {
+    hiddenWhenSummarized.add("kernelVersion");
+  }
   if (Object.keys(raw).some((key) => /^disk\d+$/.test(key))) {
     hiddenWhenSummarized.add("diskCount");
     hiddenWhenSummarized.add("diskTotal");
@@ -7658,29 +8446,68 @@ function getDiscoveryVisibleMetadataEntries(result) {
   return sortDiscoveryMetadataEntries(visibleEntries).slice(0, 12);
 }
 
+function renderDiscoveryMetadataList(titleKey, entries) {
+  const sortedEntries = sortDiscoveryMetadataEntries(dedupeDiscoveryMetadataEntries(entries));
+  return `
+    <div class="discovery-metadata-list">
+      <span class="secondary-line">${escapeHtml(t(titleKey))}</span>
+      ${sortedEntries.length > 0
+        ? sortedEntries.map(([key, value]) => {
+          const textValue = formatDiscoveryMetadataValue(key, value);
+          const isWideRow = /^(disk\d+|cpuModel|kernel|kernelVersion|pveVersion|loadAverage|os|dockerComposeVersion|kubernetesVersion)$/.test(key);
+          return `
+            <div class="discovery-metadata-row${isWideRow ? " discovery-metadata-row--wide" : ""}">
+              <span>${escapeHtml(formatDiscoveryMetadataKey(key))}</span>
+              <code>${escapeHtml(truncateText(textValue, /^disk\d+$/.test(key) ? 180 : 120))}</code>
+            </div>
+          `;
+        }).join("")
+        : `<div class="secondary-line">${escapeHtml(t("discovery_details_no_visible_metadata"))}</div>`}
+    </div>
+  `;
+}
+
+function getDiscoveryHardwareMetadataEntries(result) {
+  if (!result.hardwareRaw || typeof result.hardwareRaw !== "object") {
+    return [];
+  }
+  return getDiscoveryVisibleMetadataEntries({
+    source: "proxmox",
+    sourceKind: "hypervisor",
+    visibleRaw: result.hardwareRaw,
+  });
+}
+
+function shouldPreferHostMetadataValue(key, hostValue, hardwareValue) {
+  if (key !== "os") {
+    return false;
+  }
+  const hostText = String(hostValue || "").trim();
+  const hardwareText = String(hardwareValue || "").trim();
+  return hostText.length > hardwareText.length && hostText.toLowerCase().startsWith(hardwareText.toLowerCase());
+}
+
 function renderDiscoveryDetails(result) {
-  const visibleEntries = [
-    ...getDiscoveryVisibleMetadataEntries(result),
-    ...(
-      result.hardwareRaw && typeof result.hardwareRaw === "object"
-        ? getDiscoveryVisibleMetadataEntries({
-          source: "proxmox",
-          sourceKind: "hypervisor",
-          visibleRaw: result.hardwareRaw,
-        })
-        : []
-    ),
-  ];
-  const sortedVisibleEntries = sortDiscoveryMetadataEntries(dedupeDiscoveryMetadataEntries(visibleEntries));
+  const rawVisibleEntries = getDiscoveryVisibleMetadataEntries(result);
+  const visibleByKey = new Map(rawVisibleEntries);
+  const hardwareEntries = getDiscoveryHardwareMetadataEntries(result)
+    .filter(([key, value]) => !(
+      ["os", "kernel", "kernelVersion", "pveVersion"].includes(key)
+      && visibleByKey.has(key)
+      && shouldPreferHostMetadataValue(key, visibleByKey.get(key), value)
+    ));
+  const hasHardwareMetadata = hardwareEntries.length > 0;
+  const hardwareKeys = new Set(hardwareEntries.map(([key]) => key));
+  const visibleEntries = rawVisibleEntries
+    .filter(([key]) => !(hasHardwareMetadata && hardwareKeys.has(key) && ["os", "kernel", "kernelVersion", "pveVersion"].includes(key)));
   const detailItems = [
     [getDiscoveryTargetKind(result) === "template" ? "discovery_details_detected_as" : "discovery_details_target", getDiscoveryTargetLabel(result)],
     ["device_source_label", getDeviceSourceLabel(result.source)],
-    ["device_source_kind_label", result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data")],
     ["device_source_id_label", result.sourceId || t("no_data")],
-    ["discovery_details_received_fields", String(result.receivedFields?.length || 0)],
-    ["discovery_details_accepted_fields", String(result.acceptedFields?.length || 0)],
-    ["discovery_details_visible_fields", String(result.visibleFields?.length || 0)],
   ];
+  if (shouldShowDiscoverySourceKind(result)) {
+    detailItems.splice(2, 0, ["device_source_kind_label", getDeviceSourceKindLabel(result.sourceKind)]);
+  }
   if (result.serviceUrl) {
     detailItems.push(["service_public_url_label", result.serviceUrl]);
   }
@@ -7701,20 +8528,12 @@ function renderDiscoveryDetails(result) {
           </div>
         `).join("")}
       </div>
-      <div class="discovery-metadata-list">
-        <span class="secondary-line">${escapeHtml(t("discovery_details_metadata_title"))}</span>
-        ${sortedVisibleEntries.length > 0
-          ? sortedVisibleEntries.map(([key, value]) => {
-            const textValue = formatDiscoveryMetadataValue(key, value);
-            const isWideRow = /^(disk\d+|cpuModel|kernelVersion|pveVersion|loadAverage)$/.test(key);
-            return `
-              <div class="discovery-metadata-row${isWideRow ? " discovery-metadata-row--wide" : ""}">
-                <span>${escapeHtml(formatDiscoveryMetadataKey(key))}</span>
-                <code>${escapeHtml(truncateText(textValue, /^disk\d+$/.test(key) ? 180 : 120))}</code>
-              </div>
-            `;
-          }).join("")
-          : `<div class="secondary-line">${escapeHtml(t("discovery_details_no_visible_metadata"))}</div>`}
+      <div class="discovery-metadata-stack${hasHardwareMetadata ? " discovery-metadata-stack--split" : ""}">
+        ${renderDiscoveryMetadataList(
+          hasHardwareMetadata ? "discovery_details_host_metadata_title" : "discovery_details_metadata_title",
+          visibleEntries,
+        )}
+        ${hasHardwareMetadata ? renderDiscoveryMetadataList("discovery_details_hardware_metadata_title", hardwareEntries) : ""}
       </div>
     </div>
   `;
@@ -7726,7 +8545,7 @@ function renderDiscoveryPreview() {
   }
 
   const agents = state.admin?.discoveryAgents || [];
-  const results = mergeDiscoveryHardwareResults(state.admin?.discoveryResults || []);
+  const results = getDisplayDiscoveryResults();
   const counts = results.reduce((accumulator, result) => {
     const stateName = String(result.state || "new").trim().toLowerCase();
     accumulator[stateName] = (accumulator[stateName] || 0) + 1;
@@ -7903,6 +8722,7 @@ function renderServicesList() {
   }
 
   const canWrite = Boolean(state.auth?.capabilities?.canWrite);
+  const discoveryResults = getDisplayDiscoveryResults();
   const rows = services.map((service) => {
     const host = resolveDeviceHost(service);
     const status = service.integrationStatus || "";
@@ -7953,7 +8773,7 @@ function renderServicesList() {
         <td>
           <div class="service-table__name${sourceLogo ? "" : " service-table__name--plain"}">
             ${sourceLogo}
-            ${renderRegistryDiscoveryName(service, "data-toggle-service-discovery")}
+            ${renderRegistryDiscoveryName(service, "data-toggle-service-discovery", discoveryResults)}
             ${renderRegistrySourceBadges(service)}
             ${sourceDetails.length ? `<div class="secondary-line">${escapeHtml(sourceDetails.join(" · "))}</div>` : ""}
           </div>
@@ -7995,7 +8815,7 @@ function renderServicesList() {
           </div>
         </td>
       </tr>
-      ${renderRegistryDiscoveryDetailsRow(service, 10)}
+      ${renderRegistryDiscoveryDetailsRow(service, 10, discoveryResults)}
     `;
   });
 
@@ -8039,6 +8859,7 @@ function renderDevicesTable() {
     .slice()
     .sort((left, right) => ipToInt(left.ip) - ipToInt(right.ip));
 
+  const discoveryResults = getDisplayDiscoveryResults();
   const rows = sortedDevices
     .map((device) => {
       const subnet = resolveDeviceSubnet(device);
@@ -8055,7 +8876,7 @@ function renderDevicesTable() {
       return `
         <tr class="${device.integrationStatus === "source_missing" || device.integrationStatus === "source-missing" ? "registry-row--source-missing" : ""}">
           <td>
-            ${renderRegistryDiscoveryName(device, "data-toggle-device-discovery")}
+            ${renderRegistryDiscoveryName(device, "data-toggle-device-discovery", discoveryResults)}
             ${renderRegistrySourceBadges(device)}
             ${note}
           </td>
@@ -8074,7 +8895,7 @@ function renderDevicesTable() {
             </div>
           </td>
         </tr>
-        ${renderRegistryDiscoveryDetailsRow(device, 9)}
+        ${renderRegistryDiscoveryDetailsRow(device, 9, discoveryResults)}
       `;
     });
 
@@ -8198,7 +9019,7 @@ function renderDashboardHealth() {
   const agentDown = agentStates.filter((status) => status.state === "down").length;
   const disabledAgents = agents.length - enabledAgents.length;
 
-  const discoveryResults = state.admin?.discoveryResults || [];
+  const discoveryResults = getDisplayDiscoveryResults();
   const discoveryNew = discoveryResults.filter((result) => result.state === "new").length;
   const discoveryStale = discoveryResults.filter((result) => result.state === "stale").length;
   const discoveryMatched = discoveryResults.filter((result) => result.state === "matched").length;
@@ -8418,7 +9239,7 @@ function renderDashboardAttention() {
   const orphanDevices = state.devices
     .filter(hasMissingHost)
     .map((device) => `${device.name} · ${device.ip} · ${getDeviceSourceLabel(device.source || "")}`);
-  const staleDiscovery = (state.admin?.discoveryResults || [])
+  const staleDiscovery = getDisplayDiscoveryResults()
     .filter((result) => result.state === "stale")
     .map((result) => `${result.name} · ${getDeviceSourceLabel(result.source)} · ${formatDateTime(result.lastSeenAt || result.updatedAt)}`);
   const agentIssues = (state.admin?.discoveryAgents || [])
@@ -8436,7 +9257,7 @@ function renderDashboardAttention() {
     .map((service) => ({ service, availability: getAgentAvailabilityStatus(service) }))
     .filter(({ availability }) => availability.state === "pending")
     .map(({ service }) => `${service.name} · ${resolveDeviceHost(service)?.name || t("no_binding")}`);
-  const newDiscovery = (state.admin?.discoveryResults || [])
+  const newDiscovery = getDisplayDiscoveryResults()
     .filter((result) => result.state === "new")
     .map((result) => `${result.name} · ${getDeviceSourceLabel(result.source)} · ${result.agentName || t("no_data")}`);
 

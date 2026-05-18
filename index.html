@@ -1257,6 +1257,7 @@
             <button type="button" class="template-section-tab is-active" data-discovery-tab="agents" data-i18n="discovery_tab_agents">Agents & Policy</button>
             <button type="button" class="template-section-tab" data-discovery-tab="received" data-i18n="discovery_tab_received">Received objects</button>
             <button type="button" class="template-section-tab" data-discovery-tab="audit" data-i18n="discovery_tab_audit">Audit</button>
+            <button type="button" class="template-section-tab" data-discovery-tab="debug" data-i18n="discovery_tab_debug">Debug</button>
           </div>
 
           <div class="discovery-subpanel" data-discovery-panel="agents">
@@ -1592,6 +1593,56 @@
                 <tbody id="discovery-audit-table-body">
                   <tr class="empty-row">
                     <td colspan="6" data-i18n="empty_discovery_audit">Discovery audit пока пуст.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          </div>
+
+          <div class="discovery-subpanel" data-discovery-panel="debug" hidden>
+          <div class="template-editor-card template-editor-card--modal discovery-audit-card">
+            <div class="template-editor-heading">
+              <div>
+                <p class="helper-title" data-i18n="discovery_debug_title">Discovery debug</p>
+                <p class="helper-text helper-text--tight" data-i18n="discovery_debug_note">
+                  Technical counters and field lists hidden from the normal registry view.
+                </p>
+              </div>
+            </div>
+
+            <div class="settings-grid discovery-debug-filters">
+              <label class="setting-card registry-filter-card">
+                <span class="setting-title" data-i18n="discovery_debug_agent_filter">Agent</span>
+                <select id="discovery-debug-agent-filter">
+                  <option value="all" data-i18n="discovery_debug_filter_all_agents">All agents</option>
+                </select>
+              </label>
+              <label class="setting-card registry-filter-card">
+                <span class="setting-title" data-i18n="discovery_debug_kind_filter">Object type</span>
+                <select id="discovery-debug-kind-filter">
+                  <option value="all" data-i18n="discovery_debug_filter_all_types">All types</option>
+                  <option value="device" data-i18n="discovery_target_device">Хост</option>
+                  <option value="service" data-i18n="discovery_target_service">Сервис</option>
+                  <option value="iot" data-i18n="discovery_target_iot">IoT</option>
+                  <option value="template" data-i18n="discovery_target_template">Шаблон</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="table-wrap discovery-audit-wrap">
+              <table class="discovery-audit-table discovery-debug-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="discovery_debug_object">Object</th>
+                    <th data-i18n="device_source_label">Source</th>
+                    <th data-i18n="table_status">Статус</th>
+                    <th data-i18n="discovery_debug_counts">Field counters</th>
+                  </tr>
+                </thead>
+                <tbody id="discovery-debug-table-body">
+                  <tr class="empty-row">
+                    <td colspan="4" data-i18n="empty_discovery_debug">Debug data is empty.</td>
                   </tr>
                 </tbody>
               </table>

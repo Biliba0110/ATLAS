@@ -1642,7 +1642,8 @@ textarea {
 
 .table-wrap--registry-list {
   --registry-visible-rows: 8;
-  max-height: calc(52px + (var(--registry-visible-rows) * 72px));
+  --registry-list-height: calc(52px + (var(--registry-visible-rows) * 72px));
+  max-height: min(var(--registry-list-height), max(360px, calc(100dvh - 220px)));
   overflow-y: auto;
 }
 
@@ -1663,7 +1664,8 @@ textarea {
 
 .table-wrap--compact-list {
   --compact-visible-rows: 7;
-  max-height: calc(52px + (var(--compact-visible-rows) * 72px));
+  --compact-list-height: calc(52px + (var(--compact-visible-rows) * 72px));
+  max-height: min(var(--compact-list-height), max(360px, calc(100dvh - 220px)));
   overflow-y: auto;
 }
 
@@ -2690,6 +2692,7 @@ tbody tr:last-child td {
 
 .discovery-details-row,
 .group-devices-row,
+[data-expanded-registry-discovery],
 [data-discovery-result-group] {
   scroll-margin-block: 16px;
 }
@@ -2730,6 +2733,18 @@ tbody tr:last-child td {
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: 0.9rem;
+}
+
+.discovery-metadata-stack {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.discovery-metadata-stack--split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
 }
 
 .discovery-metadata-list {
@@ -2785,6 +2800,166 @@ tbody tr:last-child td {
   max-width: 260px;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.discovery-debug-counts {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.discovery-debug-counts span,
+.discovery-debug-table__fields {
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.discovery-debug-counts strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.discovery-debug-filters {
+  margin-bottom: 12px;
+}
+
+.discovery-debug-entity {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--text);
+  text-align: left;
+}
+
+.discovery-debug-details-row td {
+  padding-top: 0;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.discovery-debug-panel {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--card-top) 68%, transparent), color-mix(in srgb, var(--card-bottom) 72%, transparent)),
+    var(--mini-base);
+}
+
+.discovery-debug-field-picker {
+  display: grid;
+  min-width: 0;
+}
+
+.discovery-debug-field-picker summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.discovery-debug-field-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.discovery-debug-field-picker summary::before {
+  content: "+";
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+
+.discovery-debug-field-picker[open] summary::before {
+  content: "-";
+}
+
+.discovery-debug-field-picker summary span {
+  min-width: 0;
+}
+
+.discovery-debug-field-picker summary strong {
+  margin-left: auto;
+  color: var(--text);
+}
+
+.discovery-debug-field-picker__content {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  margin-top: 8px;
+  overflow: auto;
+  padding: 0 4px 2px 0;
+}
+
+.discovery-debug-field-picker__content--split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.discovery-debug-field-group {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  align-content: start;
+}
+
+.discovery-debug-field-group__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.discovery-debug-field-group__header strong {
+  color: var(--text-soft);
+}
+
+.discovery-debug-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 3px 8px;
+}
+
+.discovery-debug-field-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  color: var(--text-soft);
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+
+.discovery-debug-field-option input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  appearance: auto;
+}
+
+.discovery-debug-field-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .discovery-preview-actions {
@@ -3602,8 +3777,10 @@ body[data-modal-blur="on"] .modal-backdrop {
   }
 
   .discovery-details-grid,
+  .discovery-metadata-stack--split,
   .discovery-metadata-list,
-  .discovery-metadata-row {
+  .discovery-metadata-row,
+  .discovery-debug-field-picker__content--split {
     grid-template-columns: 1fr;
   }
 
