@@ -27,6 +27,7 @@
   "proxmox_token_id": "atlas@pve!discovery",
   "proxmox_token_secret": "paste-proxmox-token-secret",
   "proxmox_nodes": [],
+  "proxmox_include_ipv6": false,
   "proxmox_verify_tls": true,
   "proxmox_timeout": 10
 }

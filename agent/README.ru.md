@@ -33,6 +33,7 @@ MVP-агент собирает локальные metadata хоста, Docker, 
 - `proxmox_api_url`: URL Proxmox API, например `https://pve.local:8006`.
 - `proxmox_token_id` и `proxmox_token_secret`: Proxmox API token, хранится только в конфиге агента.
 - `proxmox_nodes`: опциональный allow-list node'ов, например `["pve1", "pve2"]`; пустой список означает все видимые node'ы.
+- `proxmox_include_ipv6`: отправлять IPv6 guest addresses; по умолчанию `false`.
 - `proxmox_verify_tls`: проверять TLS certificates Proxmox.
 
 Для локального теста с `http://127.0.0.1:4173` включите `allow_insecure_http`.
@@ -40,8 +41,8 @@ MVP-агент собирает локальные metadata хоста, Docker, 
 ## Настройка в ATLAS
 
 1. Откройте ATLAS под администратором.
-2. Перейдите в Settings -> Discovery.
-3. Создайте агента.
+2. Перейдите в Интеграции -> Discovery -> Agents & Policy.
+3. Создайте агента и выберите нужные коллекторы.
 4. Скопируйте сгенерированный config, пока token виден.
 5. Поместите config на сервер, где будет работать агент.
 6. Оставляйте `agent_id` уникальным для каждого сервера, даже если несколько агентов используют общий token.
@@ -57,6 +58,162 @@ Proxmox tokens должны быть read-only и ограничены мини�
 
 Агент не собирает SNMP, MQTT или ручной IoT inventory. Это запланировано как отдельные
 настройки integrations в ATLAS, а не как agent collectors.
+
+## Рецепты настройки коллекторов
+
+Почти всегда оставляйте `host` включенным. Он определяет сервер, на котором работает агент,
+и дает ATLAS стабильную родительскую запись для сервисов, контейнеров, VM/LXC и будущей карты.
+
+### Только host
+
+Используйте, если нужно видеть только сам сервер с агентом.
+
+```json
+{
+  "enabled_collectors": ["host"]
+}
+```
+
+Обязательные поля:
+
+- `atlas_url`
+- `agent_id`
+- `agent_token`
+- `enabled_collectors`
+
+Host collector отправляет hostname, FQDN, основной IP, MAC, system/machine,
+версию агента и интервал отправки.
+
+### Docker host
+
+Используйте, если агент запускается на том же сервере, где работает Docker.
+
+```json
+{
+  "enabled_collectors": ["host", "docker"],
+  "docker_socket": "/var/run/docker.sock",
+  "docker_timeout": 10
+}
+```
+
+Что настроить:
+
+- `docker_socket`: лучший вариант для Linux-серверов. Обычно `/var/run/docker.sock`.
+- `docker_host`: опциональный TCP/HTTP endpoint. Используйте только в доверенной сети и только
+  если Docker API явно нужен по сети.
+
+Важно по безопасности: доступ к Docker socket почти равен локальному root-доступу. Лучше использовать
+локальный socket, а не Docker TCP. Не открывайте Docker TCP в интернет.
+
+Docker отправляет контейнеры, имя, image, статус, labels если policy разрешает, exposed/published ports,
+networks/IP если policy разрешает, timestamps и last seen. Для source tracking ATLAS использует стабильное
+имя контейнера, поэтому контейнер, пересозданный Watchtower, должен заменить старый discovery object,
+а не создать дубликат.
+
+### Proxmox / PVE
+
+Используйте, если агент может достучаться до Proxmox API. Агент может работать прямо на PVE node
+или на другом доверенном сервере, которому доступен `https://pve-host:8006`.
+
+```json
+{
+  "enabled_collectors": ["host", "proxmox"],
+  "proxmox_api_url": "https://pve.example.local:8006",
+  "proxmox_token_id": "atlas@pve!discovery",
+  "proxmox_token_secret": "paste-proxmox-token-secret",
+  "proxmox_nodes": [],
+  "proxmox_include_ipv6": false,
+  "proxmox_verify_tls": true,
+  "proxmox_timeout": 10
+}
+```
+
+Где взять значения Proxmox:
+
+1. В Proxmox создайте отдельного пользователя, например `atlas@pve`, или используйте ограниченного пользователя.
+2. Создайте API token для этого пользователя, например с именем `discovery`.
+3. Полный token id будет выглядеть как `atlas@pve!discovery`.
+4. Token secret показывается один раз. Скопируйте его в `proxmox_token_secret`.
+5. `proxmox_api_url` обычно выглядит как `https://<pve-host-or-ip>:8006`.
+
+Рекомендуемые права Proxmox:
+
+- достаточно read-only доступа;
+- ограничьте scope datacenter'ом или только нужными node'ами;
+- collector читает cluster resources, VM/LXC status, VMID, node, name, type и IP, если они доступны
+  через guest agent или config metadata.
+
+Частые нюансы PVE:
+
+- Если у Proxmox self-signed certificate, установите CA и укажите `proxmox_ca_cert`,
+  либо для lab временно поставьте `proxmox_verify_tls: false`.
+- `proxmox_nodes: []` означает все node'ы, видимые token'у.
+- `proxmox_nodes: ["pve1"]` ограничит сбор конкретными node'ами.
+- IP виртуальных машин лучше всего появляются, когда в VM включен QEMU Guest Agent и guest agent установлен внутри ОС.
+- По умолчанию Proxmox collector не отправляет IPv6 и пропускает guest interfaces вроде `docker0`,
+  `br-*`, `veth*`, `cni0`, чтобы не засорять ATLAS внутренними Docker/CNI адресами из VM.
+
+### Kubernetes
+
+Используйте, если агент работает внутри Kubernetes cluster или на хосте, который имеет доступ к Kubernetes API.
+
+Config внутри cluster:
+
+```json
+{
+  "enabled_collectors": ["host", "kubernetes"],
+  "kubernetes_api_url": "https://kubernetes.default.svc",
+  "kubernetes_token_file": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+  "kubernetes_ca_cert": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+  "kubernetes_namespaces": ["default"],
+  "kubernetes_all_namespaces": false,
+  "kubernetes_verify_tls": true,
+  "kubernetes_timeout": 10
+}
+```
+
+Config снаружи cluster:
+
+```json
+{
+  "enabled_collectors": ["host", "kubernetes"],
+  "kubernetes_api_url": "https://k8s-api.example.local:6443",
+  "kubernetes_token": "paste-service-account-token",
+  "kubernetes_ca_cert": "/path/to/cluster-ca.crt",
+  "kubernetes_namespaces": ["default", "apps"],
+  "kubernetes_verify_tls": true
+}
+```
+
+Token Kubernetes должен иметь read-доступ к:
+
+- pods
+- services
+- нужным namespaces
+
+Для всех namespaces:
+
+```json
+{
+  "kubernetes_all_namespaces": true
+}
+```
+
+Включайте это только если service account имеет нужные права и вам действительно нужна видимость всего cluster.
+Иначе лучше явно указать `kubernetes_namespaces`.
+
+### Смешанный сервер
+
+Коллекторы можно комбинировать, если сервер выполняет несколько ролей:
+
+```json
+{
+  "enabled_collectors": ["host", "docker", "proxmox"]
+}
+```
+
+Именно collectors определяют, что агент собирает. Тип агента в ATLAS — это описание для интерфейса:
+`Hypervisor` может быть удаленным, а `External` может собирать Docker или Proxmox, если это включено в config.
 
 ## Запуск
 
@@ -93,13 +250,14 @@ ATLAS хранит это как read-only runtime info, чтобы было в�
 
 ## Текущие Collector'ы
 
-- `host`: hostname, FQDN, primary IP, MAC, OS/platform, Python version.
+- `host`: hostname, FQDN, primary IP, MAC, system/machine.
 - `docker`: containers, status, exposed/published ports, labels, networks/IP, image,
   created/started timestamps и last seen.
 - `kubernetes`: Pods и Services с namespace/name, status, labels, ports, pod IP,
   node/host IP, images, owners, Service type/ClusterIP/external IPs и last seen.
-- `proxmox`: VM/LXC resources с node, VMID, status, name, type и IPs, если они доступны
-  через guest agent или config metadata.
+- `proxmox`: PVE node/hypervisor resources с CPU/RAM/load/kernel/PVE version, а также
+  VM/LXC resources с node, VMID, status, name, type, RAM, выделенными дисками, MAC
+  и основным IP, если он доступен через guest agent или config metadata.
 
 ## Запланировано отдельно
 

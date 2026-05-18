@@ -901,9 +901,14 @@
         </section>
 
         <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-access-panel" data-admin-panel="access" hidden>
-          <div class="panel-heading">
-            <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
-            <h2 data-i18n="access_groups_title">Группы доступа</h2>
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
+              <h2 data-i18n="access_groups_title">Группы доступа</h2>
+            </div>
+            <div class="panel-heading-actions">
+              <button type="button" class="action-button action-button--ghost" id="access-groups-list-toggle-button" data-toggle-access-groups-list hidden></button>
+            </div>
           </div>
 
           <form id="access-group-form" class="form-grid">
@@ -920,7 +925,7 @@
 
           <div id="access-group-status" class="result-card result-card--muted"></div>
 
-          <div class="table-wrap">
+          <div class="table-wrap" id="access-groups-table-wrap">
             <table>
               <thead>
                 <tr>
@@ -939,9 +944,14 @@
         </section>
 
         <section class="panel panel--modal settings-panel settings-panel--full admin-only" id="admin-users-panel" data-admin-panel="access" hidden>
-          <div class="panel-heading">
-            <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
-            <h2 data-i18n="users_title">Пользователи</h2>
+          <div class="panel-heading panel-heading--split">
+            <div>
+              <p class="panel-kicker" data-i18n="admin_kicker">Admin</p>
+              <h2 data-i18n="users_title">Пользователи</h2>
+            </div>
+            <div class="panel-heading-actions">
+              <button type="button" class="action-button action-button--ghost" id="users-list-toggle-button" data-toggle-users-list hidden></button>
+            </div>
           </div>
 
           <form id="user-form" class="form-grid">
@@ -977,7 +987,7 @@
 
           <div id="user-status" class="result-card result-card--muted"></div>
 
-          <div class="table-wrap">
+          <div class="table-wrap" id="users-table-wrap">
             <table>
               <thead>
                 <tr>
@@ -1219,6 +1229,7 @@
                   Включай только те сети, которые реально достижимы с сервера ATLAS.
                 </p>
               </div>
+              <button type="button" class="action-button action-button--ghost" id="automation-subnets-list-toggle-button" data-toggle-automation-subnets-list hidden></button>
             </div>
 
             <div id="settings-subnet-scan-list" class="automation-subnet-list"></div>
@@ -1257,7 +1268,10 @@
                   Создавайте push-агентов, ограничивайте IP/CIDR и выбирайте режим создания записей.
                 </p>
               </div>
-              <button type="button" class="action-button action-button--ghost" id="reset-discovery-agent-form-button" data-i18n="discovery_agent_new_button">Новый агент</button>
+              <div class="template-editor-actions">
+                <button type="button" class="action-button action-button--ghost" id="discovery-agents-list-toggle-button" data-toggle-discovery-agents-list hidden></button>
+                <button type="button" class="action-button action-button--ghost" id="reset-discovery-agent-form-button" data-i18n="discovery_agent_new_button">Новый агент</button>
+              </div>
             </div>
 
             <form id="discovery-agent-form" class="discovery-agent-form">
@@ -1289,6 +1303,44 @@
                     <option value="" data-i18n="no_binding">Нет связи</option>
                   </select>
                 </label>
+              </div>
+
+              <div class="discovery-agent-form__section discovery-agent-form__section--collectors">
+                <div class="form-grid__full">
+                  <span class="field-label-row">
+                    <span data-i18n="discovery_agent_collectors_label">Коллекторы</span>
+                  </span>
+                  <div id="discovery-agent-collector-options" class="checkbox-grid discovery-agent-collectors">
+                    <label class="checkbox-card">
+                      <input type="checkbox" name="collectors" value="host" checked>
+                      <span>
+                        <span class="setting-title" data-i18n="discovery_collector_host_title">Host</span>
+                        <span class="setting-note" data-i18n="discovery_collector_host_note">Информация о сервере агента.</span>
+                      </span>
+                    </label>
+                    <label class="checkbox-card">
+                      <input type="checkbox" name="collectors" value="docker" checked>
+                      <span>
+                        <span class="setting-title" data-i18n="discovery_collector_docker_title">Docker</span>
+                        <span class="setting-note" data-i18n="discovery_collector_docker_note">Контейнеры, статусы и опубликованные порты.</span>
+                      </span>
+                    </label>
+                    <label class="checkbox-card">
+                      <input type="checkbox" name="collectors" value="kubernetes">
+                      <span>
+                        <span class="setting-title" data-i18n="discovery_collector_kubernetes_title">Kubernetes</span>
+                        <span class="setting-note" data-i18n="discovery_collector_kubernetes_note">Pods и Services через API Kubernetes.</span>
+                      </span>
+                    </label>
+                    <label class="checkbox-card">
+                      <input type="checkbox" name="collectors" value="proxmox">
+                      <span>
+                        <span class="setting-title" data-i18n="discovery_collector_proxmox_title">Proxmox</span>
+                        <span class="setting-note" data-i18n="discovery_collector_proxmox_note">VM/LXC через Proxmox API token.</span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
               </div>
 
               <div class="discovery-agent-form__section discovery-agent-form__section--security">
@@ -1326,7 +1378,7 @@
               </div>
             </div>
 
-            <div class="table-wrap discovery-agents-wrap">
+            <div class="table-wrap discovery-agents-wrap" id="discovery-agents-table-wrap">
               <table class="discovery-agents-table">
                 <thead>
                   <tr>
@@ -1408,7 +1460,7 @@
               </div>
             </form>
 
-            <div id="discovery-agent-status" class="result-card result-card--muted"></div>
+            <div id="discovery-agent-status" class="result-card result-card--muted" hidden></div>
           </div>
 
           <div class="template-editor-card template-editor-card--modal discovery-data-policy-card">
@@ -1463,7 +1515,7 @@
               <button type="button" class="action-button" id="save-discovery-policy-button" data-i18n="discovery_policy_save_button">Сохранить policy</button>
             </div>
 
-            <div id="discovery-policy-status" class="result-card result-card--muted"></div>
+            <div id="discovery-policy-status" class="result-card result-card--muted" hidden></div>
           </div>
           </div>
 
@@ -1474,7 +1526,10 @@
                 <p class="helper-title" data-i18n="discovery_preview_title">Предпросмотр discovery</p>
                 <p class="helper-text helper-text--tight" data-i18n="discovery_received_note">Найденные агентами объекты: контейнеры, сервисы, VM/LXC и хосты. По умолчанию это только preview.</p>
               </div>
-              <span class="table-counter" id="discovery-results-counter">0</span>
+              <div class="template-editor-actions">
+                <button type="button" class="action-button action-button--ghost" id="discovery-stale-cleanup-button" data-i18n="discovery_bulk_cleanup_stale_button">Удалить устаревшие</button>
+                <span class="table-counter" id="discovery-results-counter">0</span>
+              </div>
             </div>
 
             <div class="discovery-summary-grid" id="discovery-summary-grid"></div>

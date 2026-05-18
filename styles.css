@@ -71,10 +71,10 @@
   --scene-glow-c: transparent;
   --scene-mesh: none;
   --scene-mesh-opacity: 0;
-  --radius-xl: 32px;
-  --radius-lg: 24px;
-  --radius-md: 18px;
-  --radius-sm: 14px;
+  --radius-xl: 28px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 11px;
 }
 
 :is(html, body)[data-accent-theme="ember"] {
@@ -459,6 +459,8 @@ body {
   overflow-x: hidden;
   overscroll-behavior-x: none;
   overscroll-behavior-y: none;
+  font-size: 15px;
+  line-height: 1.35;
   font-family:
     "SF Pro Display",
     "SF Pro Text",
@@ -478,7 +480,7 @@ body {
 body {
   position: relative;
   min-height: 100dvh;
-  padding: 22px 14px 54px;
+  padding: 16px 12px 40px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   isolation: isolate;
@@ -533,6 +535,13 @@ button {
 
 body:not(.app-ready) .app-shell {
   visibility: hidden;
+}
+
+:where(code, .mono, .secondary-line, .table-wrap td, .discovery-details-item strong) {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .auth-screen[hidden] {
@@ -590,8 +599,8 @@ body:not(.app-ready) .app-shell {
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1.08fr) minmax(430px, 0.92fr);
-  gap: 22px 30px;
-  padding: 34px 32px;
+  gap: 18px 24px;
+  padding: 26px 28px;
   overflow: hidden;
   position: relative;
 }
@@ -651,15 +660,15 @@ body:not(.app-ready) .app-shell {
 }
 
 .hero-title {
-  font-size: clamp(2.8rem, 4.4vw, 4.25rem);
-  line-height: 0.88;
+  font-size: clamp(2.25rem, 3.3vw, 3.4rem);
+  line-height: 0.95;
   margin: 0;
 }
 
 .hero-signature {
   margin: 14px 0 0;
   max-width: 22ch;
-  font-size: clamp(1.05rem, 1.55vw, 1.38rem);
+  font-size: clamp(0.98rem, 1.25vw, 1.18rem);
   line-height: 1.2;
   letter-spacing: 0;
   font-weight: 600;
@@ -668,7 +677,7 @@ body:not(.app-ready) .app-shell {
 
 .panel h2,
 .modal-header h2 {
-  font-size: clamp(1.15rem, 2vw, 1.5rem);
+  font-size: clamp(1.02rem, 1.45vw, 1.28rem);
 }
 
 .hero-text,
@@ -681,12 +690,12 @@ body:not(.app-ready) .app-shell {
 
 .helper-text,
 .mini-meta {
-  line-height: 1.55;
+  line-height: 1.42;
 }
 
 .setting-note {
-  font-size: 0.84rem;
-  line-height: 1.45;
+  font-size: 0.8rem;
+  line-height: 1.34;
 }
 
 .helper-text--tight {
@@ -919,7 +928,7 @@ label span {
 .row-button,
 .view-tab {
   border-radius: 999px;
-  padding: 12px 16px;
+  padding: 10px 14px;
   font-weight: 650;
   letter-spacing: 0;
 }
@@ -936,6 +945,9 @@ button.stat-card,
   appearance: none;
   cursor: pointer;
   font: inherit;
+}
+
+.hero-account-trigger {
   text-align: left;
 }
 
@@ -1007,14 +1019,15 @@ button.stat-card,
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 16px;
-  margin-top: 18px;
+  gap: 12px;
+  margin-top: 14px;
 }
 
 .stat-card {
-  padding: 20px 22px;
+  padding: 15px 18px;
   position: relative;
   overflow: hidden;
+  text-align: center;
 }
 
 .stat-card--link {
@@ -1033,7 +1046,7 @@ button.stat-card,
 .stat-value {
   display: block;
   position: relative;
-  font-size: clamp(1.8rem, 3vw, 2.8rem);
+  font-size: clamp(1.55rem, 2.4vw, 2.35rem);
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -1041,8 +1054,8 @@ button.stat-card,
 .view-switcher {
   display: flex;
   gap: 8px;
-  padding: 8px;
-  margin-top: 18px;
+  padding: 6px;
+  margin-top: 14px;
   width: fit-content;
   justify-content: center;
   margin-inline: auto;
@@ -1069,7 +1082,7 @@ button.stat-card,
 
 .page-view {
   min-width: 0;
-  margin-top: 18px;
+  margin-top: 14px;
 }
 
 .dashboard-grid,
@@ -1078,7 +1091,7 @@ button.stat-card,
 .modal-content {
   display: grid;
   min-width: 0;
-  gap: 18px;
+  gap: 14px;
 }
 
 .dashboard-grid--minimal {
@@ -1090,7 +1103,7 @@ button.stat-card,
   display: grid;
   min-width: 0;
   min-height: 120px;
-  gap: 18px;
+  gap: 14px;
   align-content: start;
 }
 
@@ -1101,7 +1114,7 @@ button.stat-card,
 
 .panel {
   min-width: 0;
-  padding: 22px;
+  padding: 18px;
 }
 
 .panel-heading-actions {
@@ -1171,7 +1184,8 @@ button.stat-card,
 }
 
 .dashboard-lead {
-  max-width: 34ch;
+  width: 100%;
+  max-width: none;
   font-size: 0.9rem;
   line-height: 1.45;
 }
@@ -1378,7 +1392,7 @@ button.stat-card,
 .stack-form,
 .form-grid {
   display: grid;
-  gap: 14px;
+  gap: 11px;
 }
 
 .panel--searchbar .search-field {
@@ -1440,7 +1454,7 @@ button.stat-card,
 
 label {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   color: var(--text-soft);
 }
 
@@ -1450,7 +1464,7 @@ textarea {
   width: 100%;
   border: 1px solid var(--input-border);
   border-radius: var(--radius-md);
-  padding: 13px 14px;
+  padding: 10px 12px;
   line-height: 1.25;
   background:
     linear-gradient(180deg, var(--input-top), var(--input-bottom)),
@@ -1647,6 +1661,23 @@ textarea {
   background: var(--surface-top);
 }
 
+.table-wrap--compact-list {
+  --compact-visible-rows: 7;
+  max-height: calc(52px + (var(--compact-visible-rows) * 72px));
+  overflow-y: auto;
+}
+
+.table-wrap--compact-list.table-wrap--expanded {
+  --compact-visible-rows: 15;
+}
+
+.table-wrap--compact-list thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-top);
+}
+
 table {
   width: 100%;
   min-width: 760px;
@@ -1655,7 +1686,7 @@ table {
 
 th,
 td {
-  padding: 15px 12px;
+  padding: 11px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   text-align: left;
   vertical-align: top;
@@ -1667,7 +1698,7 @@ th {
   z-index: 1;
   background: var(--table-header-bg);
   color: rgba(204, 214, 230, 0.72);
-  font-size: 0.79rem;
+  font-size: 0.73rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   backdrop-filter: blur(10px);
@@ -1696,10 +1727,10 @@ tbody tr:last-child td {
 }
 
 .secondary-line {
-  margin-top: 4px;
+  margin-top: 3px;
   color: var(--muted);
-  font-size: 0.88rem;
-  line-height: 1.45;
+  font-size: 0.82rem;
+  line-height: 1.32;
 }
 
 .registry-table__comment {
@@ -1731,6 +1762,29 @@ tbody tr:last-child td {
 .table-row-link:hover,
 .table-expand-button:hover {
   color: var(--accent-strong);
+}
+
+.registry-discovery-toggle {
+  justify-self: start;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-discovery-toggle:hover {
+  color: var(--accent-strong);
+  transform: none;
+}
+
+.registry-discovery-details-row td {
+  background: rgba(255, 255, 255, 0.012);
 }
 
 .table-expand-row td,
@@ -1810,7 +1864,8 @@ tbody tr:last-child td {
   overflow: hidden;
 }
 
-.service-table__name strong {
+.service-table__name strong,
+.service-table__name .registry-discovery-toggle {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -1867,6 +1922,12 @@ tbody tr:last-child td {
   border-color: rgba(120, 183, 255, 0.2);
   background: var(--info-soft);
   color: #bfdeff;
+}
+
+.registry-source-badge--hypervisor {
+  border-color: rgba(170, 128, 255, 0.26);
+  background: rgba(144, 98, 255, 0.14);
+  color: #d8c8ff;
 }
 
 .registry-source-badge--muted {
@@ -2121,17 +2182,17 @@ tbody tr:last-child td {
     ui-monospace,
     "Menlo",
     monospace;
-  font-size: 0.92rem;
+  font-size: 0.86rem;
 }
 
 .pill,
 .status-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: 5px;
+  padding: 4px 8px;
   border-radius: 999px;
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   font-weight: 650;
 }
 
@@ -2390,9 +2451,18 @@ tbody tr:last-child td {
   align-items: stretch;
 }
 
+.discovery-agent-form__section--collectors {
+  grid-template-columns: 1fr;
+}
+
+.discovery-agent-collectors {
+  margin-top: 8px;
+}
+
 .discovery-agent-form__section > label,
 .discovery-agent-form__section > .discovery-compact-toggle,
-.discovery-agent-form__section > .discovery-agent-form__actions {
+.discovery-agent-form__section > .discovery-agent-form__actions,
+.discovery-agent-form__section > .form-grid__full {
   min-width: 0;
 }
 
@@ -2585,6 +2655,13 @@ tbody tr:last-child td {
   vertical-align: top;
 }
 
+.discovery-preview-table__source {
+  display: grid;
+  gap: 5px;
+  align-items: start;
+  min-width: 0;
+}
+
 .discovery-preview-table__ports {
   overflow-wrap: anywhere;
   white-space: normal;
@@ -2611,10 +2688,19 @@ tbody tr:last-child td {
   padding-top: 0;
 }
 
+.discovery-details-row,
+.group-devices-row,
+[data-discovery-result-group] {
+  scroll-margin-block: 16px;
+}
+
 .discovery-details-panel {
   display: grid;
-  gap: 12px;
-  padding: 12px;
+  grid-template-columns: minmax(250px, 0.8fr) minmax(360px, 1.2fr);
+  gap: 10px 14px;
+  max-height: min(440px, 58vh);
+  overflow: auto;
+  padding: 10px;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 12px;
   background:
@@ -2624,8 +2710,9 @@ tbody tr:last-child td {
 
 .discovery-details-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 10px;
+  align-content: start;
 }
 
 .discovery-details-item {
@@ -2647,15 +2734,21 @@ tbody tr:last-child td {
 
 .discovery-metadata-list {
   display: grid;
-  gap: 6px;
+  gap: 5px;
+  align-content: start;
+}
+
+.discovery-metadata-list > .secondary-line {
+  grid-column: 1 / -1;
 }
 
 .discovery-metadata-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.28fr) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(112px, 0.24fr) minmax(0, 1fr);
+  gap: 9px;
   align-items: start;
-  font-size: 0.85rem;
+  font-size: 0.78rem;
+  min-width: 0;
 }
 
 .discovery-metadata-row span {
@@ -2663,9 +2756,13 @@ tbody tr:last-child td {
 }
 
 .discovery-metadata-row code {
+  display: block;
   min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
+  word-break: break-word;
   white-space: normal;
+  line-height: 1.28;
 }
 
 .discovery-audit-table {
@@ -3112,6 +3209,17 @@ tbody tr:last-child td {
   margin-top: 14px;
 }
 
+.automation-subnet-list--compact {
+  --compact-visible-rows: 7;
+  max-height: calc(var(--compact-visible-rows) * 76px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.automation-subnet-list--compact.automation-subnet-list--expanded {
+  --compact-visible-rows: 15;
+}
+
 .automation-subnet-card {
   align-items: start;
 }
@@ -3367,6 +3475,11 @@ body[data-modal-blur="on"] .modal-backdrop {
 }
 
 @media (max-width: 760px) {
+  html,
+  body {
+    font-size: 14.5px;
+  }
+
   body {
     padding-inline: 12px;
   }
@@ -3489,6 +3602,7 @@ body[data-modal-blur="on"] .modal-backdrop {
   }
 
   .discovery-details-grid,
+  .discovery-metadata-list,
   .discovery-metadata-row {
     grid-template-columns: 1fr;
   }

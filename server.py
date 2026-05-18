@@ -93,19 +93,35 @@ DISCOVERY_CORE_RAW_FIELDS = {
     "vmid",
 }
 DISCOVERY_RUNTIME_RAW_FIELDS = {
+    "cpu",
+    "cpuModel",
+    "cpus",
     "created",
     "disk",
+    "diskCount",
+    "disks",
+    "diskSummary",
+    "diskTotal",
+    "diskUsage",
     "dockerState",
     "finishedAt",
     "image",
     "images",
+    "kernelVersion",
+    "loadAverage",
     "maxDisk",
     "maxMemory",
     "memory",
+    "mounts",
+    "mountSummary",
     "phase",
     "platform",
+    "pveVersion",
+    "ram",
+    "ramUsage",
     "release",
     "restartCount",
+    "sockets",
     "startedAt",
     "statusText",
     "system",
@@ -1183,6 +1199,9 @@ def discovery_result_from_row(row: sqlite3.Row) -> dict:
         for key in visible_fields
         if key in raw
     }
+    fallback_host_name = ""
+    if row["source"] == "proxmox":
+        fallback_host_name = str(raw.get("node") or "").strip()
     return {
         "id": row["id"],
         "agentId": row["agent_id"],
@@ -1191,7 +1210,7 @@ def discovery_result_from_row(row: sqlite3.Row) -> dict:
         "sourceId": row["source_id"],
         "sourceKind": row["source_kind"],
         "hostDeviceId": row["host_device_id"] or "",
-        "hostName": row["host_name"] or "",
+        "hostName": row["host_name"] or fallback_host_name,
         "name": row["name"],
         "status": row["status"] or "",
         "ports": row["ports"] or "",
@@ -1370,9 +1389,116 @@ def get_device_row(connection: sqlite3.Connection, device_id: str) -> sqlite3.Ro
     return connection.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
 
 
+def proxmox_node_name_from_raw(raw: dict) -> str:
+    return normalize_optional_text(raw.get("node"), 120, "node") if raw.get("node") else ""
+
+
+def find_host_row_for_proxmox_node(
+    connection: sqlite3.Connection,
+    *,
+    agent_id: str,
+    node_name: str,
+) -> sqlite3.Row | None:
+    if not node_name:
+        return None
+    row = connection.execute(
+        """
+        SELECT devices.*
+        FROM discovery_results
+        JOIN devices ON devices.id = discovery_results.matched_device_id
+        WHERE discovery_results.agent_id = ?
+          AND discovery_results.source_kind = 'host'
+          AND devices.type != 'service'
+        ORDER BY
+          CASE
+            WHEN lower(discovery_results.name) = lower(?) THEN 0
+            WHEN lower(devices.name) = lower(?) THEN 1
+            ELSE 2
+          END,
+          discovery_results.updated_at DESC
+        LIMIT 1
+        """,
+        (agent_id, node_name, node_name),
+    ).fetchone()
+    if row is not None:
+        return row
+    return connection.execute(
+        """
+        SELECT *
+        FROM devices
+        WHERE type != 'service'
+          AND lower(name) = lower(?)
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        (node_name,),
+    ).fetchone()
+
+
+def resolve_discovery_host_id_for_item(connection: sqlite3.Connection, agent: dict, item: dict) -> str:
+    host_device_id = item["hostDeviceId"] or agent.get("linkedHostDeviceId", "")
+    if host_device_id:
+        return host_device_id
+    if item["source"] != "proxmox":
+        return ""
+    raw = decode_json_object(item.get("raw") or "{}")
+    host_row = find_host_row_for_proxmox_node(
+        connection,
+        agent_id=agent["id"],
+        node_name=proxmox_node_name_from_raw(raw),
+    )
+    return host_row["id"] if host_row is not None else ""
+
+
+def find_existing_device_id_for_discovery_item(connection: sqlite3.Connection, item: dict) -> str:
+    source_kind = normalize_slug_value(item.get("sourceKind"), default="")
+    if source_kind in {"template", "service", "container", "docker-container", "pod", "workload"}:
+        return ""
+    raw = decode_json_object(item.get("raw") or "{}")
+    ip = first_raw_value(raw, ["primaryIp", "primary_ip", "ip", "address"])
+    if not ip:
+        if item.get("source") == "proxmox" and source_kind == "hypervisor":
+            node_name = proxmox_node_name_from_raw(raw) or str(item.get("name") or "").strip()
+            if node_name:
+                row = connection.execute(
+                    """
+                    SELECT id
+                    FROM devices
+                    WHERE type != 'service'
+                      AND lower(name) = lower(?)
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (node_name,),
+                ).fetchone()
+                return row["id"] if row is not None else ""
+        return ""
+    row = connection.execute(
+        """
+        SELECT id
+        FROM devices
+        WHERE ip = ?
+          AND type != 'service'
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        (ip,),
+    ).fetchone()
+    return row["id"] if row is not None else ""
+
+
 def resolve_discovery_host_row(connection: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
     host_device_id = row["host_device_id"] or row["agent_linked_host_device_id"] or ""
-    return get_device_row(connection, host_device_id)
+    host_row = get_device_row(connection, host_device_id)
+    if host_row is not None:
+        return host_row
+    if row["source"] == "proxmox":
+        return find_host_row_for_proxmox_node(
+            connection,
+            agent_id=row["agent_id"],
+            node_name=proxmox_node_name_from_raw(decode_discovery_raw(row)),
+        )
+    return None
 
 
 def list_user_access_group_rows(connection: sqlite3.Connection) -> list[dict]:
@@ -3076,6 +3202,7 @@ def accepted_discovery_raw_fields(policy: dict) -> set[str] | None:
     fields = set(DISCOVERY_CORE_RAW_FIELDS)
     if policy.get("storeRuntime"):
         fields.update(DISCOVERY_RUNTIME_RAW_FIELDS)
+        fields.update(f"disk{index}" for index in range(1, 17))
     if policy.get("storeLabels"):
         fields.update(DISCOVERY_LABEL_RAW_FIELDS)
     if policy.get("storeNetworkDetails") or policy.get("storeInternalIps"):
@@ -3234,6 +3361,107 @@ def encode_seen_source_ids(seen: dict[str, set[str]]) -> str:
     )
 
 
+def is_discovery_replacement_candidate(item: dict) -> bool:
+    source = normalize_slug_value(item.get("source"), default="")
+    source_kind = normalize_slug_value(item.get("sourceKind"), default="")
+    return source == "docker" and source_kind in {"container", "docker-container"}
+
+
+def find_superseded_discovery_results(
+    connection: sqlite3.Connection,
+    *,
+    agent_id: str,
+    item: dict,
+) -> list[sqlite3.Row]:
+    if not is_discovery_replacement_candidate(item):
+        return []
+    name = str(item.get("name") or "").strip()
+    if not name:
+        return []
+    return connection.execute(
+        """
+        SELECT id, source_id, matched_device_id, matched_service_id, state
+        FROM discovery_results
+        WHERE agent_id = ?
+          AND source = ?
+          AND source_kind = ?
+          AND name = ?
+          AND source_id != ?
+          AND state != 'ignored'
+        ORDER BY updated_at DESC, created_at DESC
+        """,
+        (
+            agent_id,
+            item["source"],
+            item["sourceKind"],
+            name,
+            item["sourceId"],
+        ),
+    ).fetchall()
+
+
+def transfer_superseded_discovery_results(
+    connection: sqlite3.Connection,
+    *,
+    agent: dict,
+    item: dict,
+    current_result_id: str,
+    superseded_rows: list[sqlite3.Row],
+    now: str,
+) -> int:
+    replaced_count = 0
+    for row in superseded_rows:
+        matched_ids = [
+            (row["matched_device_id"] or "", False),
+            (row["matched_service_id"] or "", True),
+        ]
+        for matched_id, is_service in matched_ids:
+            if not matched_id:
+                continue
+            type_condition = "type = 'service'" if is_service else "type != 'service'"
+            connection.execute(
+                f"""
+                UPDATE devices
+                SET source = ?,
+                    source_kind = ?,
+                    source_id = ?,
+                    integration_status = COALESCE(NULLIF(?, ''), integration_status),
+                    last_seen_at = COALESCE(NULLIF(?, ''), last_seen_at),
+                    updated_at = ?
+                WHERE id = ?
+                  AND {type_condition}
+                """,
+                (
+                    item["source"],
+                    item["sourceKind"],
+                    item["sourceId"],
+                    item["status"],
+                    item["lastSeenAt"],
+                    now,
+                    matched_id,
+                ),
+            )
+        connection.execute("DELETE FROM discovery_results WHERE id = ?", (row["id"],))
+        replaced_count += 1
+    if replaced_count:
+        record_discovery_audit_event(
+            connection,
+            "discovery_duplicate_replaced",
+            agent_id=agent["id"],
+            agent_name=agent.get("name", ""),
+            actor="agent",
+            message="Superseded discovery result replaced by a newer source identity.",
+            details={
+                "resultId": current_result_id,
+                "source": item["source"],
+                "sourceId": item["sourceId"],
+                "name": item["name"],
+                "replaced": replaced_count,
+            },
+        )
+    return replaced_count
+
+
 def update_discovery_linked_records(
     connection: sqlite3.Connection,
     *,
@@ -3385,6 +3613,7 @@ def save_discovery_snapshot(
     updated_count = 0
     stale_count = 0
     created_count = 0
+    replaced_count = 0
     item_ids: list[str] = []
     seen_source_ids_by_source: dict[str, set[str]] = {}
     reported_interval_seconds, reported_timeout_seconds = normalize_reported_agent_timing(snapshot)
@@ -3458,10 +3687,21 @@ def save_discovery_snapshot(
             cumulative_seen_source_ids.setdefault(source, set()).update(source_ids)
 
         for item in policy_items:
-            host_device_id = item["hostDeviceId"] or agent.get("linkedHostDeviceId", "")
+            host_device_id = resolve_discovery_host_id_for_item(connection, agent, item)
             auto_matched_device_id = ""
             if item["sourceKind"] == "host" and agent.get("linkedHostDeviceId"):
                 auto_matched_device_id = agent.get("linkedHostDeviceId", "")
+            if not auto_matched_device_id:
+                existing_device_id = find_existing_device_id_for_discovery_item(connection, item)
+                if existing_device_id and existing_device_id != host_device_id:
+                    auto_matched_device_id = existing_device_id
+            superseded_rows = find_superseded_discovery_results(
+                connection,
+                agent_id=agent["id"],
+                item=item,
+            )
+            inherited_matched_device_id = next((row["matched_device_id"] or "" for row in superseded_rows if row["matched_device_id"]), "")
+            inherited_matched_service_id = next((row["matched_service_id"] or "" for row in superseded_rows if row["matched_service_id"]), "")
             existing = connection.execute(
                 """
                 SELECT id, state, matched_device_id, matched_service_id
@@ -3474,6 +3714,8 @@ def save_discovery_snapshot(
             if existing and existing["state"] == "ignored":
                 state = "ignored"
             elif existing and (existing["state"] == "matched" or existing["matched_device_id"] or existing["matched_service_id"]):
+                state = "matched"
+            elif inherited_matched_device_id or inherited_matched_service_id:
                 state = "matched"
             elif auto_matched_device_id:
                 state = "matched"
@@ -3531,8 +3773,8 @@ def save_discovery_snapshot(
                     item["accessPort"],
                     item["serviceUrl"],
                     item["lastSeenAt"],
-                    auto_matched_device_id,
-                    "",
+                    auto_matched_device_id or inherited_matched_device_id,
+                    inherited_matched_service_id,
                     state,
                     item["raw"],
                     json.dumps(item["receivedFields"], ensure_ascii=False),
@@ -3543,6 +3785,16 @@ def save_discovery_snapshot(
                 ),
             )
             current_result = get_discovery_result_row(connection, result_id)
+            if superseded_rows:
+                replaced_count += transfer_superseded_discovery_results(
+                    connection,
+                    agent=agent,
+                    item=item,
+                    current_result_id=result_id,
+                    superseded_rows=superseded_rows,
+                    now=now,
+                )
+                current_result = get_discovery_result_row(connection, result_id)
             if current_result["state"] == "matched":
                 update_discovery_linked_records(
                     connection,
@@ -3652,10 +3904,11 @@ def save_discovery_snapshot(
             "agentRunId": external_run_id,
             "source": snapshot["source"],
             "packet": packet_info,
-            "received": updated_count,
-            "stale": stale_count,
-            "created": created_count,
-        },
+                "received": updated_count,
+                "stale": stale_count,
+                "created": created_count,
+                "replaced": replaced_count,
+            },
     )
     connection.commit()
     bump_revision(
@@ -3672,6 +3925,7 @@ def save_discovery_snapshot(
         "received": updated_count,
         "stale": stale_count,
         "created": created_count,
+        "replaced": replaced_count,
         "resultIds": item_ids,
     }
 
@@ -3792,6 +4046,128 @@ def update_discovery_result_state(
     return get_discovery_result(connection, result_id)
 
 
+def delete_discovery_result(
+    connection: sqlite3.Connection,
+    result_id: str,
+    actor: str,
+) -> dict:
+    row = get_discovery_result_row(connection, result_id)
+    if row["state"] not in {"stale", "error", "ignored"}:
+        raise ValueError("Удалять из preview можно только stale, error или ignored объекты.")
+    connection.execute("DELETE FROM discovery_results WHERE id = ?", (result_id,))
+    record_discovery_audit_event(
+        connection,
+        "discovery_result_deleted",
+        agent_id=row["agent_id"],
+        agent_name=row["agent_name"] or "",
+        actor=actor,
+        message="Discovery result removed from preview.",
+        details={
+            "resultId": result_id,
+            "source": row["source"],
+            "sourceId": row["source_id"],
+            "name": row["name"],
+            "state": row["state"],
+        },
+    )
+    connection.commit()
+    bump_revision("discovery-result-deleted", {"resultId": result_id})
+    return {"status": "deleted", "resultId": result_id}
+
+
+def can_bulk_delete_discovery_linked_record(row: sqlite3.Row, device: sqlite3.Row) -> bool:
+    if device["note"] != "Agent":
+        return False
+    return (
+        (device["source"] or "") == (row["source"] or "")
+        and (device["source_id"] or "") == (row["source_id"] or "")
+    )
+
+
+def cleanup_stale_discovery_results(
+    connection: sqlite3.Connection,
+    actor: str,
+    *,
+    delete_linked_records: bool = True,
+) -> dict:
+    rows = connection.execute(
+        """
+        SELECT
+            discovery_results.*,
+            discovery_agents.name AS agent_name
+        FROM discovery_results
+        LEFT JOIN discovery_agents ON discovery_agents.id = discovery_results.agent_id
+        WHERE discovery_results.state = 'stale'
+        ORDER BY discovery_results.updated_at DESC, discovery_results.created_at DESC
+        """
+    ).fetchall()
+    if not rows:
+        return {"status": "clean", "deletedResults": 0, "deletedLinkedRecords": 0}
+
+    linked_ids: set[str] = set()
+    if delete_linked_records:
+        for row in rows:
+            for key in ("matched_service_id", "matched_device_id"):
+                device_id = row[key] or ""
+                if not device_id:
+                    continue
+                device_row = connection.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+                if device_row is not None and can_bulk_delete_discovery_linked_record(row, device_row):
+                    linked_ids.add(device_id)
+
+    deleted_linked_count = 0
+    with connection:
+        if linked_ids:
+            linked_rows = connection.execute(
+                f"SELECT * FROM devices WHERE id IN ({','.join('?' for _ in linked_ids)})",
+                sorted(linked_ids),
+            ).fetchall()
+            for device_row in linked_rows:
+                device = device_from_row(device_row)
+                record_history(
+                    connection,
+                    device_id=device["id"],
+                    device_name=device["name"],
+                    ip=device["ip"],
+                    previous_ip=device["ip"],
+                    action="released",
+                    actor=actor,
+                    note="Discovery stale cleanup",
+                )
+            delete_cursor = connection.execute(
+                f"DELETE FROM devices WHERE id IN ({','.join('?' for _ in linked_ids)})",
+                sorted(linked_ids),
+            )
+            deleted_linked_count = delete_cursor.rowcount
+        result_ids = [row["id"] for row in rows]
+        connection.execute(
+            f"DELETE FROM discovery_results WHERE id IN ({','.join('?' for _ in result_ids)})",
+            result_ids,
+        )
+        record_discovery_audit_event(
+            connection,
+            "discovery_stale_cleanup",
+            severity="warn",
+            actor=actor,
+            message="Stale discovery results cleaned in bulk.",
+            details={
+                "deletedResults": len(result_ids),
+                "deletedLinkedRecords": deleted_linked_count,
+                "deleteLinkedRecords": delete_linked_records,
+            },
+        )
+    bump_revision(
+        "discovery-stale-cleanup",
+        {"deletedResults": len(rows), "deletedLinkedRecords": deleted_linked_count},
+    )
+    signal_background_scanner(run_scan=True)
+    return {
+        "status": "cleaned",
+        "deletedResults": len(rows),
+        "deletedLinkedRecords": deleted_linked_count,
+    }
+
+
 def link_discovery_result(
     connection: sqlite3.Connection,
     result_id: str,
@@ -3871,10 +4247,15 @@ def enrich_linked_record_from_discovery(
 
     if target_type == "device":
         mac = first_raw_value(raw, ["mac", "macAddress", "mac_address"])
+        host_device_id = row["host_device_id"] or row["agent_linked_host_device_id"] or ""
         connection.execute(
             """
             UPDATE devices
             SET mac = CASE WHEN COALESCE(mac, '') = '' THEN ? ELSE mac END,
+                host_device_id = CASE
+                    WHEN COALESCE(host_device_id, '') = '' AND id != ? THEN ?
+                    ELSE host_device_id
+                END,
                 source = CASE WHEN COALESCE(source, '') = '' THEN ? ELSE source END,
                 source_kind = CASE WHEN COALESCE(source_kind, '') = '' THEN ? ELSE source_kind END,
                 source_id = CASE WHEN COALESCE(source_id, '') = '' THEN ? ELSE source_id END,
@@ -3883,7 +4264,17 @@ def enrich_linked_record_from_discovery(
             WHERE id = ?
               AND type != 'service'
             """,
-            (mac, source, source_kind, source_id, status_value, last_seen_at, target_id),
+            (
+                mac,
+                host_device_id,
+                host_device_id,
+                source,
+                source_kind,
+                source_id,
+                status_value,
+                last_seen_at,
+                target_id,
+            ),
         )
         return
 
@@ -3936,7 +4327,17 @@ def discovery_device_type(source_kind: str, raw: dict) -> str:
     return kind
 
 
+def is_discovery_template_row(row: sqlite3.Row) -> bool:
+    source_kind = normalize_slug_value(row["source_kind"], default="")
+    if source_kind == "template":
+        return True
+    raw = decode_discovery_raw(row)
+    return bool(raw.get("template"))
+
+
 def discovery_result_target_type(row: sqlite3.Row) -> str:
+    if is_discovery_template_row(row):
+        return "template"
     source = normalize_slug_value(row["source"], default="")
     source_kind = normalize_slug_value(row["source_kind"], default="")
     if source == "docker" or source_kind in {"service", "container", "docker-container", "pod", "workload"}:
@@ -3949,6 +4350,8 @@ def find_existing_record_for_discovery(
     row: sqlite3.Row,
     target_type: str,
 ) -> dict | None:
+    if target_type == "template":
+        return None
     type_condition = "type = 'service'" if target_type == "service" else "type != 'service'"
     existing_row = connection.execute(
         f"""
@@ -4009,6 +4412,8 @@ def create_discovery_result_record(
         raise ValueError("Нужно выбрать, что создать: device или service.")
 
     row = get_discovery_result_row(connection, result_id)
+    if is_discovery_template_row(row):
+        raise ValueError("Шаблоны Proxmox не создаются как хосты. Их можно оставить в preview или игнорировать.")
     raw = decode_discovery_raw(row)
     source = row["source"] or "agent"
     source_kind = row["source_kind"] or target_type
@@ -4121,6 +4526,8 @@ def auto_create_discovery_records(
         if row["state"] in {"ignored", "matched", "stale"}:
             continue
         target_type = discovery_result_target_type(row)
+        if target_type == "template":
+            continue
         if create_mode == "auto_create_services" and target_type != "service":
             continue
 
@@ -5258,6 +5665,17 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                         revoke_discovery_agent_token(connection, parts[4], resolve_actor(self, payload, admin_user)),
                     )
                     return
+                if parsed.path == "/api/admin/discovery/results/cleanup-stale":
+                    admin_user = require_admin_user(connection, self)
+                    self.send_json(
+                        HTTPStatus.OK,
+                        cleanup_stale_discovery_results(
+                            connection,
+                            resolve_actor(self, payload, admin_user),
+                            delete_linked_records=bool(payload.get("deleteLinkedRecords", True)),
+                        ),
+                    )
+                    return
                 if (
                     len([part for part in parsed.path.split("/") if part]) == 6
                     and parsed.path.startswith("/api/admin/discovery/results/")
@@ -5275,6 +5693,9 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                         return
                     if action == "resolve":
                         self.send_json(HTTPStatus.OK, update_discovery_result_state(connection, result_id, "ignored"))
+                        return
+                    if action == "delete":
+                        self.send_json(HTTPStatus.OK, delete_discovery_result(connection, result_id, actor))
                         return
                     if action == "link":
                         self.send_json(HTTPStatus.OK, link_discovery_result(connection, result_id, payload))

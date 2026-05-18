@@ -48,6 +48,25 @@ DEFAULT_DOCKER_SOCKETS = [
     str(Path.home() / ".docker" / "run" / "docker.sock"),
 ]
 KUBERNETES_SERVICE_ACCOUNT_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
+PROXMOX_IGNORED_GUEST_INTERFACES = {
+    "lo",
+    "docker0",
+    "podman0",
+    "cni0",
+    "flannel.1",
+    "tailscale0",
+}
+PROXMOX_IGNORED_GUEST_INTERFACE_PREFIXES = (
+    "br-",
+    "veth",
+    "virbr",
+    "cni-",
+    "flannel",
+    "cali",
+    "tunl",
+)
+PROXMOX_VM_DISK_KEY_PREFIXES = ("ide", "sata", "scsi", "virtio")
+PROXMOX_LXC_DISK_KEY_PREFIXES = ("rootfs", "mp")
 
 
 class AgentRequestError(RuntimeError):
@@ -359,11 +378,8 @@ def collect_host_inventory(source_name: str, observed_at: str) -> dict[str, Any]
         "fqdn": fqdn,
         "primaryIp": primary_ip,
         "mac": mac,
-        "platform": platform.platform(),
         "system": platform.system(),
-        "release": platform.release(),
         "machine": platform.machine(),
-        "python": platform.python_version(),
         "agentVersion": AGENT_VERSION,
     }
     raw = {key: value for key, value in system.items() if value}
@@ -520,8 +536,16 @@ def docker_container_name(container: dict[str, Any], inspect_data: dict[str, Any
     return str(container.get("Id") or "container")[:12]
 
 
+def docker_container_source_id(name: str, container_id: str) -> str:
+    stable_name = limit_text(name, 150)
+    if stable_name:
+        return f"docker:name:{stable_name}"
+    return f"docker:id:{container_id}"
+
+
 def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str, Any], observed_at: str) -> dict[str, Any]:
     container_id = str(container.get("Id") or inspect_data.get("Id") or "").strip()
+    container_name = docker_container_name(container, inspect_data)
     ports, access_port = extract_docker_ports(inspect_data)
     labels = trim_dict(inspect_data.get("Config", {}).get("Labels") or {})
     networks = extract_docker_networks(inspect_data)
@@ -543,10 +567,10 @@ def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str
     }
     return {
         "source": "docker",
-        "sourceId": f"docker:{container_id}",
+        "sourceId": docker_container_source_id(container_name, container_id),
         "sourceKind": "container",
         "hostDeviceId": "",
-        "name": docker_container_name(container, inspect_data),
+        "name": container_name,
         "status": docker_status(inspect_data.get("State", {}).get("Status") or container.get("State")),
         "ports": ports,
         "accessPort": access_port,
@@ -955,7 +979,137 @@ def proxmox_source_kind(raw_type: str) -> str:
     return normalized or "vm"
 
 
-def normalize_discovered_ip(value: Any) -> str:
+def proxmox_first_number(*values: Any) -> Any:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def proxmox_nested_number(data: Any, *path: str) -> Any:
+    current = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return proxmox_first_number(current)
+
+
+def proxmox_size_to_bytes(value: Any) -> int | None:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    multipliers = {
+        "K": 1024,
+        "KB": 1024,
+        "M": 1024 ** 2,
+        "MB": 1024 ** 2,
+        "G": 1024 ** 3,
+        "GB": 1024 ** 3,
+        "T": 1024 ** 4,
+        "TB": 1024 ** 4,
+    }
+    number_part = text
+    suffix = ""
+    for candidate in sorted(multipliers, key=len, reverse=True):
+        if text.endswith(candidate):
+            suffix = candidate
+            number_part = text[: -len(candidate)]
+            break
+    try:
+        number = float(number_part)
+    except ValueError:
+        return None
+    return int(number * multipliers.get(suffix, 1))
+
+
+def proxmox_disk_key(source_kind: str, key: Any) -> str:
+    normalized = str(key or "").strip().lower()
+    prefixes = PROXMOX_LXC_DISK_KEY_PREFIXES if source_kind == "lxc" else PROXMOX_VM_DISK_KEY_PREFIXES
+    if source_kind == "lxc" and normalized == "rootfs":
+        return normalized
+    for prefix in prefixes:
+        if not normalized.startswith(prefix):
+            continue
+        suffix = normalized[len(prefix):]
+        if suffix.isdigit():
+            return normalized
+    return ""
+
+
+def proxmox_extract_disk_details(key: str, value: Any) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if "media=cdrom" in lowered or "cloudinit" in lowered:
+        return None
+    first_part = text.split(",", 1)[0].strip()
+    storage = ""
+    volume = first_part
+    if ":" in first_part:
+        storage, volume = first_part.split(":", 1)
+    mountpoint = ""
+    size = None
+    for part in text.split(","):
+        if "=" not in part:
+            continue
+        part_key, raw_value = part.split("=", 1)
+        normalized_key = part_key.strip().lower()
+        if normalized_key == "mp":
+            mountpoint = limit_text(raw_value, 160)
+            continue
+        if normalized_key == "size":
+            size = proxmox_size_to_bytes(raw_value)
+    if not size:
+        return None
+    label = limit_text(mountpoint or storage or key or volume, 120)
+    return {
+        "name": label,
+        "mountpoint": mountpoint,
+        "bus": limit_text(key, 80),
+        "storage": limit_text(storage, 120),
+        "volume": limit_text(volume, 180),
+        "size": size,
+    }
+
+
+def proxmox_disk_metadata_fields(disks: list[dict[str, Any]], *, limit: int = 16) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for index, disk in enumerate(disks[:limit], start=1):
+        bus = limit_text(disk.get("bus"), 40)
+        name = limit_text(disk.get("name") or disk.get("storage") or disk.get("volume"), 120)
+        size = disk.get("size")
+        if not name or not size:
+            continue
+        label = " ".join(part for part in [bus, name] if part)
+        fields[f"disk{index}"] = f"{label}={size}"
+    return fields
+
+
+def proxmox_extract_disks_from_config(config_data: Any, source_kind: str) -> list[dict[str, Any]]:
+    if not isinstance(config_data, dict):
+        return []
+    disks = []
+    for key, value in sorted(config_data.items()):
+        disk_name = proxmox_disk_key(source_kind, key)
+        if not disk_name:
+            continue
+        disk = proxmox_extract_disk_details(disk_name, value)
+        if not disk:
+            continue
+        disks.append(disk)
+    return disks
+
+
+def normalize_discovered_ip(value: Any, *, allow_ipv6: bool = True) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
@@ -967,18 +1121,20 @@ def normalize_discovered_ip(value: Any) -> str:
         ip = ipaddress.ip_address(candidate)
     except ValueError:
         return ""
+    if ip.version == 6 and not allow_ipv6:
+        return ""
     if ip.is_loopback or ip.is_link_local or ip.is_multicast:
         return ""
     return str(ip)
 
 
-def append_unique_ip(values: list[str], value: Any) -> None:
-    ip = normalize_discovered_ip(value)
+def append_unique_ip(values: list[str], value: Any, *, allow_ipv6: bool = True) -> None:
+    ip = normalize_discovered_ip(value, allow_ipv6=allow_ipv6)
     if ip and ip not in values:
         values.append(ip)
 
 
-def proxmox_extract_ips_from_config_value(value: Any) -> list[str]:
+def proxmox_extract_ips_from_config_value(value: Any, *, allow_ipv6: bool) -> list[str]:
     text = str(value or "").strip()
     if not text:
         return []
@@ -989,23 +1145,56 @@ def proxmox_extract_ips_from_config_value(value: Any) -> list[str]:
         key, raw_value = part.split("=", 1)
         if key.strip().lower() not in {"ip", "ip6"}:
             continue
-        append_unique_ip(ips, raw_value)
+        append_unique_ip(ips, raw_value, allow_ipv6=allow_ipv6)
     return ips
 
 
-def proxmox_extract_ips_from_config(config_data: Any) -> list[str]:
+def proxmox_extract_mac_from_config_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for part in text.split(","):
+        if "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        if key.strip().lower() not in {"hwaddr", "mac", "macaddr", "macaddress"}:
+            continue
+        return limit_text(raw_value, 80).upper()
+    return ""
+
+
+def proxmox_extract_ips_from_config(config_data: Any, *, allow_ipv6: bool) -> list[str]:
     if not isinstance(config_data, dict):
         return []
     ips: list[str] = []
     for key, value in sorted(config_data.items()):
         normalized_key = str(key or "").lower()
         if normalized_key.startswith("net") or normalized_key.startswith("ipconfig"):
-            for ip in proxmox_extract_ips_from_config_value(value):
-                append_unique_ip(ips, ip)
+            for ip in proxmox_extract_ips_from_config_value(value, allow_ipv6=allow_ipv6):
+                append_unique_ip(ips, ip, allow_ipv6=allow_ipv6)
     return ips
 
 
-def proxmox_extract_guest_agent_ips(data: Any) -> list[str]:
+def proxmox_extract_mac_from_config(config_data: Any) -> str:
+    if not isinstance(config_data, dict):
+        return ""
+    for key, value in sorted(config_data.items()):
+        if not str(key or "").lower().startswith("net"):
+            continue
+        mac = proxmox_extract_mac_from_config_value(value)
+        if mac:
+            return mac
+    return ""
+
+
+def is_ignored_proxmox_guest_interface(interface: dict[str, Any]) -> bool:
+    name = str(interface.get("name") or interface.get("ifname") or "").strip().lower()
+    if not name:
+        return False
+    return name in PROXMOX_IGNORED_GUEST_INTERFACES or name.startswith(PROXMOX_IGNORED_GUEST_INTERFACE_PREFIXES)
+
+
+def proxmox_extract_guest_agent_ips(data: Any, *, allow_ipv6: bool) -> list[str]:
     if not isinstance(data, dict):
         return []
     interfaces = data.get("result")
@@ -1017,20 +1206,53 @@ def proxmox_extract_guest_agent_ips(data: Any) -> list[str]:
     for interface in interfaces:
         if not isinstance(interface, dict):
             continue
+        if is_ignored_proxmox_guest_interface(interface):
+            continue
         addresses = interface.get("ip-addresses") or interface.get("ipAddresses")
         if not isinstance(addresses, list):
             continue
         for address in addresses:
             if not isinstance(address, dict):
                 continue
-            append_unique_ip(ips, address.get("ip-address") or address.get("ipAddress"))
+            append_unique_ip(
+                ips,
+                address.get("ip-address") or address.get("ipAddress"),
+                allow_ipv6=allow_ipv6,
+            )
     return ips
 
 
-def proxmox_guest_ips(config: dict[str, Any], node: str, vmid: str, source_kind: str) -> list[str]:
+def proxmox_extract_guest_agent_mac(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    interfaces = data.get("result")
+    if not isinstance(interfaces, list):
+        interfaces = data.get("interfaces")
+    if not isinstance(interfaces, list):
+        return ""
+    for interface in interfaces:
+        if not isinstance(interface, dict):
+            continue
+        if is_ignored_proxmox_guest_interface(interface):
+            continue
+        mac = (
+            interface.get("hardware-address")
+            or interface.get("hardwareAddress")
+            or interface.get("mac-address")
+            or interface.get("macAddress")
+        )
+        if mac:
+            return limit_text(mac, 80).upper()
+    return ""
+
+
+def proxmox_guest_network(config: dict[str, Any], node: str, vmid: str, source_kind: str) -> dict[str, Any]:
     ips: list[str] = []
+    mac = ""
+    disks: list[dict[str, Any]] = []
     encoded_node = quote(node, safe="")
     encoded_vmid = quote(vmid, safe="")
+    allow_ipv6 = bool(config.get("proxmox_include_ipv6", False))
 
     if source_kind == "vm":
         try:
@@ -1038,20 +1260,136 @@ def proxmox_guest_ips(config: dict[str, Any], node: str, vmid: str, source_kind:
                 config,
                 f"/nodes/{encoded_node}/qemu/{encoded_vmid}/agent/network-get-interfaces",
             )
-            for ip in proxmox_extract_guest_agent_ips(agent_data):
-                append_unique_ip(ips, ip)
+            for ip in proxmox_extract_guest_agent_ips(agent_data, allow_ipv6=allow_ipv6):
+                append_unique_ip(ips, ip, allow_ipv6=allow_ipv6)
+            mac = proxmox_extract_guest_agent_mac(agent_data)
         except Exception:
             pass
 
     try:
         config_type = "qemu" if source_kind == "vm" else "lxc"
         config_data = proxmox_request(config, f"/nodes/{encoded_node}/{config_type}/{encoded_vmid}/config")
-        for ip in proxmox_extract_ips_from_config(config_data):
-            append_unique_ip(ips, ip)
+        for ip in proxmox_extract_ips_from_config(config_data, allow_ipv6=allow_ipv6):
+            append_unique_ip(ips, ip, allow_ipv6=allow_ipv6)
+        if not mac:
+            mac = proxmox_extract_mac_from_config(config_data)
+        disks = proxmox_extract_disks_from_config(config_data, source_kind)
     except Exception:
         pass
 
-    return ips
+    return {"ips": ips, "mac": mac, "disks": disks}
+
+
+def proxmox_guest_config_disks(config: dict[str, Any], node: str, vmid: str, source_kind: str) -> list[dict[str, Any]]:
+    if not node or not vmid:
+        return []
+    config_type = "qemu" if source_kind == "vm" else "lxc"
+    try:
+        config_data = proxmox_request(
+            config,
+            f"/nodes/{quote(node, safe='')}/{config_type}/{quote(vmid, safe='')}/config",
+        )
+    except Exception:
+        return []
+    return proxmox_extract_disks_from_config(config_data, source_kind)
+
+
+def proxmox_node_disks(config: dict[str, Any], node: str) -> list[dict[str, Any]]:
+    if not node:
+        return []
+    try:
+        disks_data = proxmox_request(config, f"/nodes/{quote(node, safe='')}/disks/list")
+    except Exception:
+        return []
+    if not isinstance(disks_data, list):
+        return []
+
+    disks: list[dict[str, Any]] = []
+    for disk in disks_data:
+        if not isinstance(disk, dict):
+            continue
+        size = proxmox_first_number(disk.get("size"))
+        if not size:
+            continue
+        devpath = limit_text(disk.get("devpath") or disk.get("device"), 120)
+        model = limit_text(disk.get("model"), 160)
+        vendor = limit_text(disk.get("vendor"), 120)
+        serial = limit_text(disk.get("serial"), 120)
+        disk_type = limit_text(disk.get("type"), 80)
+        name = limit_text(" ".join(part for part in [vendor, model] if part) or devpath or disk_type or "disk", 180)
+        disks.append({
+            "name": name,
+            "bus": devpath,
+            "type": disk_type,
+            "serial": serial,
+            "size": size,
+        })
+    return disks
+
+
+def proxmox_node_item_from_resource(config: dict[str, Any], resource: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    node = limit_text(resource.get("node"), 120)
+    status_data: dict[str, Any] = {}
+    if node:
+        try:
+            raw_status = proxmox_request(config, f"/nodes/{quote(node, safe='')}/status")
+            status_data = raw_status if isinstance(raw_status, dict) else {}
+        except Exception:
+            status_data = {}
+
+    cpu_info = status_data.get("cpuinfo") if isinstance(status_data.get("cpuinfo"), dict) else {}
+    memory_used = proxmox_first_number(
+        proxmox_nested_number(status_data, "memory", "used"),
+        resource.get("mem"),
+    )
+    memory_total = proxmox_first_number(
+        proxmox_nested_number(status_data, "memory", "total"),
+        resource.get("maxmem"),
+    )
+    loadavg = status_data.get("loadavg") if isinstance(status_data.get("loadavg"), list) else []
+    disks = proxmox_node_disks(config, node)
+    disk_total = sum(int(disk.get("size") or 0) for disk in disks)
+    raw = {
+        "node": node,
+        "type": "hypervisor",
+        "statusText": limit_text(resource.get("status") or status_data.get("status"), 80),
+        "cpu": proxmox_first_number(status_data.get("cpu"), resource.get("cpu")),
+        "cpus": proxmox_first_number(cpu_info.get("cpus"), resource.get("maxcpu")),
+        "cpuModel": limit_text(cpu_info.get("model"), 180),
+        "sockets": proxmox_first_number(cpu_info.get("sockets")),
+        "memory": memory_used,
+        "maxMemory": memory_total,
+        "ramUsage": f"{memory_used} / {memory_total}" if memory_used is not None and memory_total else "",
+        "diskCount": len(disks) or "",
+        "diskTotal": disk_total or "",
+        "diskSummary": ", ".join(
+            f"{disk['name']}={disk['size']}"
+            for disk in disks
+            if disk.get("name") and disk.get("size")
+        ),
+        "disks": disks,
+        "loadAverage": ", ".join(limit_text(item, 20) for item in loadavg[:3]),
+        "kernelVersion": limit_text(status_data.get("kversion"), 160),
+        "pveVersion": limit_text(status_data.get("pveversion"), 120),
+    }
+    raw.update(proxmox_disk_metadata_fields(disks))
+    raw = {key: value for key, value in raw.items() if value != "" and value != [] and value is not None}
+    for noisy_zero_key in ("cpu", "disk", "memory", "uptime"):
+        if raw.get(noisy_zero_key) in {0, 0.0, "0"}:
+            raw.pop(noisy_zero_key, None)
+    return {
+        "source": "proxmox",
+        "sourceId": f"proxmox:node:{node}",
+        "sourceKind": "hypervisor",
+        "hostDeviceId": "",
+        "name": node or "proxmox-node",
+        "status": proxmox_status(resource.get("status") or status_data.get("status")),
+        "ports": "",
+        "accessPort": "",
+        "serviceUrl": "",
+        "lastSeenAt": observed_at,
+        "raw": raw,
+    }
 
 
 def proxmox_item_from_resource(config: dict[str, Any], resource: dict[str, Any], observed_at: str) -> dict[str, Any]:
@@ -1059,9 +1397,16 @@ def proxmox_item_from_resource(config: dict[str, Any], resource: dict[str, Any],
     vmid = limit_text(resource.get("vmid"), 80)
     raw_type = limit_text(resource.get("type"), 80)
     source_kind = proxmox_source_kind(raw_type)
+    is_template = bool(resource.get("template", False))
     base_name = limit_text(resource.get("name") or resource.get("id") or f"{source_kind}-{vmid}", 140)
-    name = limit_text(f"{base_name}/{vmid}" if vmid and not base_name.endswith(f"/{vmid}") else base_name, 160)
-    ips = proxmox_guest_ips(config, node, vmid, source_kind) if node and vmid else []
+    name = base_name
+    guest_network = {"ips": [], "mac": "", "disks": []}
+    if not is_template and node and vmid:
+        guest_network = proxmox_guest_network(config, node, vmid, source_kind)
+    ips = guest_network["ips"]
+    disks = proxmox_guest_config_disks(config, node, vmid, source_kind) if is_template else (guest_network.get("disks") or [])
+    disk_total = sum(int(disk.get("size") or 0) for disk in disks)
+    max_disk = disk_total or proxmox_first_number(resource.get("maxdisk"))
     raw = {
         "node": node,
         "vmid": vmid,
@@ -1069,22 +1414,40 @@ def proxmox_item_from_resource(config: dict[str, Any], resource: dict[str, Any],
         "proxmoxType": raw_type,
         "primaryIp": ips[0] if ips else "",
         "ips": ips,
+        "mac": guest_network["mac"],
         "statusText": limit_text(resource.get("status"), 80),
-        "template": bool(resource.get("template", False)),
+        "template": is_template,
         "tags": limit_text(resource.get("tags"), 300),
-        "uptime": resource.get("uptime"),
-        "cpu": resource.get("cpu"),
         "cpus": resource.get("maxcpu") or resource.get("cpus"),
-        "memory": resource.get("mem"),
-        "maxMemory": resource.get("maxmem"),
-        "disk": resource.get("disk"),
-        "maxDisk": resource.get("maxdisk"),
+        "diskCount": len(disks) or "",
+        "diskTotal": disk_total or "",
+        "diskSummary": ", ".join(
+            f"{disk['name']}={disk['size']}"
+            for disk in disks
+            if disk.get("name") and disk.get("size")
+        ),
+        "disks": disks,
     }
+    if is_template:
+        raw["ram"] = resource.get("maxmem")
+    else:
+        raw.update({
+            "uptime": resource.get("uptime"),
+            "cpu": resource.get("cpu"),
+            "memory": resource.get("mem"),
+            "maxMemory": resource.get("maxmem"),
+            "ramUsage": f"{resource.get('mem')} / {resource.get('maxmem')}" if resource.get("mem") is not None and resource.get("maxmem") else "",
+            "maxDisk": max_disk,
+        })
+    raw.update(proxmox_disk_metadata_fields(disks))
     raw = {key: value for key, value in raw.items() if value != "" and value != [] and value is not None}
+    for noisy_zero_key in ("cpu", "disk", "memory", "uptime"):
+        if raw.get(noisy_zero_key) in {0, 0.0, "0"}:
+            raw.pop(noisy_zero_key, None)
     return {
         "source": "proxmox",
         "sourceId": f"proxmox:{node}:{vmid}",
-        "sourceKind": source_kind,
+        "sourceKind": "template" if is_template else source_kind,
         "hostDeviceId": "",
         "name": name,
         "status": proxmox_status(resource.get("status")),
@@ -1110,6 +1473,21 @@ def collect_proxmox_inventory(config: dict[str, Any], observed_at: str) -> dict[
 
     allowed_nodes = proxmox_node_filter(config)
     items = []
+    try:
+        raw_nodes = proxmox_request(config, "/nodes")
+        node_resources = raw_nodes if isinstance(raw_nodes, list) else []
+    except Exception:
+        node_resources = []
+    for node_resource in node_resources:
+        if not isinstance(node_resource, dict):
+            continue
+        node = str(node_resource.get("node") or "").strip()
+        if allowed_nodes and node not in allowed_nodes:
+            continue
+        item = proxmox_node_item_from_resource(config, node_resource, observed_at)
+        if item["sourceId"] != "proxmox:node:":
+            items.append(item)
+
     for resource in resources:
         if not isinstance(resource, dict):
             continue
@@ -1128,6 +1506,7 @@ def collect_proxmox_inventory(config: dict[str, Any], observed_at: str) -> dict[
         "metadata": {
             "proxmoxVersion": limit_text(version.get("version"), 80),
             "nodeScope": ",".join(sorted(allowed_nodes)) if allowed_nodes else "all",
+            "nodeCount": sum(1 for item in items if item["sourceKind"] == "hypervisor"),
             "vmCount": sum(1 for item in items if item["sourceKind"] == "vm"),
             "lxcCount": sum(1 for item in items if item["sourceKind"] == "lxc"),
         },

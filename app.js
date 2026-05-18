@@ -42,8 +42,16 @@ const DEFAULT_DISCOVERY_DATA_POLICY = {
 const DISCOVERY_DEFAULT_SEND_INTERVAL_MS = 60 * 1000;
 const DISCOVERY_UP_GRACE_MS = 20 * 1000;
 const DISCOVERY_DOWN_GRACE_MS = 75 * 1000;
+const RESULT_STATUS_AUTO_HIDE_MS = 5000;
+const DISCOVERY_AGENT_CONFIG_HIDE_MS = 10000;
 const UP_INTEGRATION_STATUSES = new Set(["running", "online", "active", "up", "ok", "healthy"]);
 const DOWN_INTEGRATION_STATUSES = new Set(["offline", "down", "dead", "stopped", "stale", "source-missing", "source_missing", "error", "unreachable"]);
+const DISCOVERY_COLLECTOR_PRESETS = {
+  host: ["host", "docker"],
+  local: ["host", "docker"],
+  hypervisor: ["host", "proxmox"],
+  external: ["host"],
+};
 
 const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
   {
@@ -186,6 +194,7 @@ const FIELD_HELP_CONFIG = {
   "discovery-agent-form": [
     { selector: '[name="name"]', key: "help_discovery_agent_name" },
     { selector: '[name="kind"]', key: "help_discovery_agent_kind" },
+    { selector: "#discovery-agent-collector-options", key: "help_discovery_agent_collectors" },
     { selector: '[name="createMode"]', key: "help_discovery_agent_create_mode" },
     { selector: '[name="linkedHostDeviceId"]', key: "help_discovery_agent_linked_host" },
     { selector: '[name="allowedCidrs"]', key: "help_discovery_agent_allowed_cidrs" },
@@ -356,6 +365,7 @@ const elements = {
   settingsScanInterval: document.getElementById("settings-scan-interval"),
   settingsPingMeta: document.getElementById("settings-ping-meta"),
   settingsSubnetScanList: document.getElementById("settings-subnet-scan-list"),
+  automationSubnetsListToggleButton: document.getElementById("automation-subnets-list-toggle-button"),
   deviceTypeSelect: document.querySelector('#device-form select[name="type"]'),
   saveProfileSettingsButton: document.getElementById("save-profile-settings-button"),
   profileSettingsStatus: document.getElementById("profile-settings-status"),
@@ -386,11 +396,17 @@ const elements = {
   userStatus: document.getElementById("user-status"),
   accessGroupsTableBody: document.getElementById("access-groups-table-body"),
   usersTableBody: document.getElementById("users-table-body"),
+  accessGroupsTableWrap: document.getElementById("access-groups-table-wrap"),
+  usersTableWrap: document.getElementById("users-table-wrap"),
+  accessGroupsListToggleButton: document.getElementById("access-groups-list-toggle-button"),
+  usersListToggleButton: document.getElementById("users-list-toggle-button"),
   discoveryAgentForm: document.getElementById("discovery-agent-form"),
   discoveryAgentHostSelect: document.getElementById("discovery-agent-host-select"),
   discoveryAgentSharedTokenSelect: document.getElementById("discovery-agent-shared-token-select"),
   discoveryAgentSharedTokenLabel: document.getElementById("discovery-agent-shared-token-label"),
   discoveryAgentsTableBody: document.getElementById("discovery-agents-table-body"),
+  discoveryAgentsTableWrap: document.getElementById("discovery-agents-table-wrap"),
+  discoveryAgentsListToggleButton: document.getElementById("discovery-agents-list-toggle-button"),
   discoveryAgentStatus: document.getElementById("discovery-agent-status"),
   resetDiscoveryAgentFormButton: document.getElementById("reset-discovery-agent-form-button"),
   discoveryAgentTokenCard: document.getElementById("discovery-agent-token-card"),
@@ -416,6 +432,7 @@ const elements = {
   discoverySummaryGrid: document.getElementById("discovery-summary-grid"),
   discoveryResultsTableBody: document.getElementById("discovery-results-table-body"),
   discoveryResultsCounter: document.getElementById("discovery-results-counter"),
+  discoveryStaleCleanupButton: document.getElementById("discovery-stale-cleanup-button"),
   discoveryAuditEventFilter: document.getElementById("discovery-audit-event-filter"),
   discoveryAuditTableBody: document.getElementById("discovery-audit-table-body"),
   userAccessGroupOptions: document.getElementById("user-access-group-options"),
@@ -493,9 +510,15 @@ let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
 let showAllServicesInRegistry = false;
+let showAllAccessGroups = false;
+let showAllUsers = false;
+let showAllAutomationSubnets = false;
+let showAllDiscoveryAgents = false;
 const expandedGroupIds = new Set();
 const expandedDiscoveryResultIds = new Set();
-const collapsedDiscoveryGroupIds = new Set();
+const expandedDiscoveryGroupIds = new Set();
+const expandedDiscoveryHardwareIds = new Set();
+const expandedRegistryDiscoveryKeys = new Set();
 const collapsedFilterPanels = {
   registry: false,
   history: false,
@@ -503,6 +526,10 @@ const collapsedFilterPanels = {
 const REGISTRY_VISIBLE_ROWS = {
   default: 8,
   filtersCollapsed: 12,
+  expanded: 15,
+};
+const COMPACT_LIST_VISIBLE_ROWS = {
+  default: 7,
   expanded: 15,
 };
 let isAuthReady = false;
@@ -513,6 +540,8 @@ let dialogOpenedOverModal = false;
 let activeFieldHelpButton = null;
 let isFieldHelpPinned = false;
 let suppressDashboardStatClick = false;
+const resultStatusTimers = new WeakMap();
+let discoveryAgentConfigTimer = null;
 let editingSubnetId = "";
 let editingGroupId = "";
 let editingDeviceId = "";
@@ -677,6 +706,98 @@ function getLinkedDiscoveryAgentForHost(record) {
   return (state.admin?.discoveryAgents || []).find((agent) => agent.linkedHostDeviceId === record.id) || null;
 }
 
+function getDirectHostDiscoveryResultForRecord(record) {
+  if (!record?.id || record.type === "service") {
+    return null;
+  }
+  const results = state.admin?.discoveryResults || [];
+  return results.find((result) => (
+    result.matchedDeviceId === record.id
+    && normalizeMetadataToken(result.sourceKind, "") === "host"
+  )) || null;
+}
+
+function hasDirectHostAgent(record) {
+  return Boolean(getLinkedDiscoveryAgentForHost(record) || getDirectHostDiscoveryResultForRecord(record));
+}
+
+function getHypervisorDiscoveryResultForRecord(record) {
+  if (!record?.id || record.type === "service") {
+    return null;
+  }
+  const results = state.admin?.discoveryResults || [];
+  return results.find((result) => (
+    result.matchedDeviceId === record.id
+    && normalizeMetadataToken(result.source, "") === "proxmox"
+    && ["vm", "lxc", "hypervisor"].includes(normalizeMetadataToken(result.sourceKind, ""))
+  )) || null;
+}
+
+function getRegistryDiscoveryKey(record) {
+  if (!record?.id) {
+    return "";
+  }
+  return `${record.type === "service" ? "service" : "device"}:${record.id}`;
+}
+
+function getRegistryDiscoveryDetailsResult(record) {
+  if (!record?.id) {
+    return null;
+  }
+
+  if (record.type === "service") {
+    return getDiscoveryResultForRecord(record);
+  }
+
+  const hostResult = getDirectHostDiscoveryResultForRecord(record) || getDiscoveryResultForRecord(record);
+  const hypervisorResult = getHypervisorDiscoveryResultForRecord(record);
+  if (hostResult && hypervisorResult && hostResult.id !== hypervisorResult.id) {
+    return {
+      ...hostResult,
+      hardwareRaw: hypervisorResult.visibleRaw || {},
+    };
+  }
+  return hostResult || hypervisorResult;
+}
+
+function renderRegistryDiscoveryName(record, attributeName) {
+  const name = escapeHtml(record.name || t("no_data"));
+  const result = getRegistryDiscoveryDetailsResult(record);
+  if (!result) {
+    return `<strong title="${name}">${name}</strong>`;
+  }
+
+  const key = getRegistryDiscoveryKey(record);
+  return `
+    <button
+      type="button"
+      class="link-button registry-discovery-toggle"
+      ${attributeName}="${escapeHtml(record.id)}"
+      aria-expanded="${expandedRegistryDiscoveryKeys.has(key) ? "true" : "false"}"
+      title="${name}"
+    >${name}</button>
+  `;
+}
+
+function renderRegistryDiscoveryDetailsRow(record, colspan) {
+  const key = getRegistryDiscoveryKey(record);
+  if (!key || !expandedRegistryDiscoveryKeys.has(key)) {
+    return "";
+  }
+
+  const result = getRegistryDiscoveryDetailsResult(record);
+  if (!result) {
+    expandedRegistryDiscoveryKeys.delete(key);
+    return "";
+  }
+
+  return `
+    <tr class="registry-discovery-details-row discovery-details-row" data-expanded-registry-discovery="${escapeHtml(key)}">
+      <td colspan="${colspan}">${renderDiscoveryDetails(result)}</td>
+    </tr>
+  `;
+}
+
 function isAgentManagedRecord(record) {
   return Boolean(
     getDiscoveryResultForRecord(record)
@@ -694,13 +815,78 @@ function getRecordLiveLastSeenAt(record) {
   return record?.lastSeenAt || linkedResult?.lastSeenAt || linkedAgent?.lastSeenAt || "";
 }
 
+function isHypervisorDiscoveredHost(record) {
+  if (!record || record.type === "service") {
+    return false;
+  }
+  const source = normalizeMetadataToken(record.source, "");
+  const sourceKind = normalizeMetadataToken(record.sourceKind, "");
+  return (
+    source === "proxmox" && ["vm", "lxc", "hypervisor"].includes(sourceKind)
+  ) || Boolean(getHypervisorDiscoveryResultForRecord(record));
+}
+
+function getProxmoxNodeFromSourceId(sourceId) {
+  const parts = String(sourceId || "").split(":").map((part) => part.trim()).filter(Boolean);
+  if (parts[0] !== "proxmox") {
+    return "";
+  }
+  if (parts[1] === "node") {
+    return parts[2] || "";
+  }
+  return parts[1] || "";
+}
+
+function getHypervisorOriginName(record) {
+  const result = getHypervisorDiscoveryResultForRecord(record);
+  if (result) {
+    return result.hostName || getProxmoxNodeFromSourceId(result.sourceId) || "";
+  }
+  const host = resolveDeviceHost(record);
+  if (host && host.id !== record.id) {
+    return host.name;
+  }
+  return getProxmoxNodeFromSourceId(record?.sourceId) || "";
+}
+
+function formatHypervisorOriginBadge(originName) {
+  const compact = String(originName || "").trim().split(".")[0];
+  return (compact || "PVE").slice(0, 12);
+}
+
+function shouldRenderAgentSourceBadge(record) {
+  if (record?.type === "service") {
+    return isAgentManagedRecord(record);
+  }
+  if (isHypervisorDiscoveredHost(record)) {
+    return hasDirectHostAgent(record);
+  }
+  return isAgentManagedRecord(record);
+}
+
 function renderRegistrySourceBadges(record) {
-  const isAgentRecord = isAgentManagedRecord(record);
-  const originLabel = isAgentRecord ? t("registry_source_agent") : t("registry_source_manual");
-  const originVariant = isAgentRecord ? "info" : "muted";
-  const badges = [
-    `<span class="registry-source-badge registry-source-badge--${originVariant}">${escapeHtml(originLabel)}</span>`,
-  ];
+  const badges = [];
+  if (shouldRenderAgentSourceBadge(record)) {
+    badges.push(`<span class="registry-source-badge registry-source-badge--info">${escapeHtml(t("registry_source_agent"))}</span>`);
+  }
+
+  if (isHypervisorDiscoveredHost(record)) {
+    const originName = getHypervisorOriginName(record);
+    const title = t("registry_source_hypervisor_tooltip", { name: originName || "Proxmox" });
+    badges.push(`
+      <span class="registry-source-badge registry-source-badge--hypervisor" title="${escapeHtml(title)}">
+        ${escapeHtml(formatHypervisorOriginBadge(originName))}
+      </span>
+    `);
+  }
+
+  if (badges.length === 0) {
+    badges.push(`
+      <span class="registry-source-badge registry-source-badge--muted" title="${escapeHtml(t("registry_source_manual_tooltip"))}">
+        ${escapeHtml(t("registry_source_manual"))}
+      </span>
+    `);
+  }
   return `<div class="registry-source-badges">${badges.join("")}</div>`;
 }
 
@@ -844,6 +1030,44 @@ function truncateText(value, maxLength = 30) {
   }
 
   return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) {
+    return CSS.escape(String(value));
+  }
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function revealExpandedContent(targetGetter, options = {}) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const target = typeof targetGetter === "function" ? targetGetter() : targetGetter;
+      if (!target) {
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+
+      requestAnimationFrame(() => {
+        const rect = target.getBoundingClientRect();
+        const margin = 28;
+        const extraDown = Math.max(0, Number(options.extraDown || 0));
+        const bottomOverflow = Math.max(0, rect.bottom - window.innerHeight + margin);
+        if (bottomOverflow > 0 || extraDown > 0) {
+          window.scrollBy({
+            top: Math.min(bottomOverflow + extraDown, 420),
+            behavior: "smooth",
+          });
+        } else if (rect.top < margin) {
+          window.scrollBy({
+            top: rect.top - margin,
+            behavior: "smooth",
+          });
+        }
+      });
+    });
+  });
 }
 
 function renderRegistryComment(value) {
@@ -1165,6 +1389,22 @@ function bindEvents() {
     showAllServicesInRegistry = !showAllServicesInRegistry;
     renderServicesList();
   });
+  elements.accessGroupsListToggleButton?.addEventListener("click", () => {
+    showAllAccessGroups = !showAllAccessGroups;
+    renderAccessGroupsTable();
+  });
+  elements.usersListToggleButton?.addEventListener("click", () => {
+    showAllUsers = !showAllUsers;
+    renderUsersTable();
+  });
+  elements.automationSubnetsListToggleButton?.addEventListener("click", () => {
+    showAllAutomationSubnets = !showAllAutomationSubnets;
+    renderSubnetScanSettings();
+  });
+  elements.discoveryAgentsListToggleButton?.addEventListener("click", () => {
+    showAllDiscoveryAgents = !showAllDiscoveryAgents;
+    renderDiscoveryAgentsTable();
+  });
   elements.accessGroupsTableBody?.addEventListener("click", handleAccessGroupTableActions);
   elements.usersTableBody?.addEventListener("click", handleUserAdminTableActions);
   elements.discoveryAgentsTableBody?.addEventListener("click", handleDiscoveryAgentTableActions);
@@ -1178,6 +1418,9 @@ function bindEvents() {
     });
   });
   elements.discoveryAgentForm?.elements.allowedCidrs?.addEventListener("input", autosizeDiscoveryAllowedCidrs);
+  elements.discoveryAgentForm?.elements.kind?.addEventListener("change", () => {
+    setDiscoveryAgentCollectors(getDefaultDiscoveryCollectors(elements.discoveryAgentForm.elements.kind.value));
+  });
   elements.copyDiscoveryAgentConfigButton?.addEventListener("click", copyDiscoveryAgentConfig);
   elements.discoveryAgentPolicyForm?.addEventListener("submit", handleDiscoveryAgentPolicySave);
   elements.cancelDiscoveryAgentPolicyButton?.addEventListener("click", hideDiscoveryAgentPolicyEditor);
@@ -1186,6 +1429,7 @@ function bindEvents() {
   elements.saveDiscoveryPolicyButton?.addEventListener("click", handleDiscoveryPolicySave);
   elements.discoveryPolicyStoreRaw?.addEventListener("change", syncDiscoveryPolicyControls);
   elements.discoveryResultsTableBody?.addEventListener("click", handleDiscoveryPreviewActions);
+  elements.discoveryStaleCleanupButton?.addEventListener("click", handleDiscoveryStaleCleanup);
   elements.discoveryAuditEventFilter?.addEventListener("change", renderDiscoveryAudit);
   elements.historySearchInput?.addEventListener("input", renderHistoryTable);
   elements.historyEventFilter?.addEventListener("change", renderHistoryTable);
@@ -1338,6 +1582,19 @@ function applyVisualSettings() {
 
 function renderSubnetScanSettings() {
   const canManage = Boolean(state.auth?.capabilities?.canManageServerSettings);
+  const shouldShowExpand = syncCompactListWrap(
+    elements.settingsSubnetScanList,
+    state.subnets.length,
+    showAllAutomationSubnets,
+  );
+  syncRegistryListToggleButton(
+    elements.automationSubnetsListToggleButton,
+    shouldShowExpand,
+    showAllAutomationSubnets,
+    "show_all_automation_subnets",
+    "show_less_automation_subnets",
+    state.subnets.length,
+  );
 
   if (state.subnets.length === 0) {
     elements.settingsSubnetScanList.innerHTML = `
@@ -1946,28 +2203,48 @@ function handleCustomDeviceTypeListClick(event) {
   syncTemplateJsonFromCards();
 }
 
+function setResultStatus(element, message, tone = "muted", extraClassName = "", visible = true) {
+  if (!element) {
+    return;
+  }
+
+  const previousTimer = resultStatusTimers.get(element);
+  if (previousTimer) {
+    window.clearTimeout(previousTimer);
+    resultStatusTimers.delete(element);
+  }
+
+  element.className = ["result-card", `result-card--${tone}`, extraClassName].filter(Boolean).join(" ");
+  element.textContent = message || "";
+  element.hidden = !visible || !message;
+
+  if (!element.hidden && (tone === "ok" || tone === "warn")) {
+    const expectedMessage = element.textContent;
+    const timer = window.setTimeout(() => {
+      if (element.textContent === expectedMessage) {
+        element.hidden = true;
+        element.textContent = "";
+      }
+      resultStatusTimers.delete(element);
+    }, RESULT_STATUS_AUTO_HIDE_MS);
+    resultStatusTimers.set(element, timer);
+  }
+}
+
 function setTemplateSettingsStatus(message, tone = "muted") {
-  elements.templateSettingsStatus.className = `result-card result-card--${tone}`;
-  elements.templateSettingsStatus.textContent = message;
+  setResultStatus(elements.templateSettingsStatus, message, tone);
 }
 
 function setDeviceTypeSettingsStatus(message, tone = "muted") {
-  elements.deviceTypeSettingsStatus.className = `result-card result-card--${tone}`;
-  elements.deviceTypeSettingsStatus.textContent = message;
+  setResultStatus(elements.deviceTypeSettingsStatus, message, tone);
 }
 
 function setDeviceSourceSettingsStatus(message, tone = "muted") {
-  if (!elements.deviceSourceSettingsStatus) {
-    return;
-  }
-  elements.deviceSourceSettingsStatus.className = `result-card result-card--${tone}`;
-  elements.deviceSourceSettingsStatus.textContent = message;
+  setResultStatus(elements.deviceSourceSettingsStatus, message, tone);
 }
 
 function setDeviceFormStatus(message, tone = "muted", visible = true) {
-  elements.deviceFormStatus.className = `result-card result-card--${tone} form-grid__full`;
-  elements.deviceFormStatus.textContent = message;
-  elements.deviceFormStatus.hidden = !visible;
+  setResultStatus(elements.deviceFormStatus, message, tone, "form-grid__full", visible);
 }
 
 function clearDeviceFormStatus() {
@@ -1987,34 +2264,23 @@ function setDeviceFormPending(isPending) {
 }
 
 function setServerSettingsStatus(message, tone = "muted") {
-  elements.serverSettingsStatus.className = `result-card result-card--${tone}`;
-  elements.serverSettingsStatus.textContent = message;
+  setResultStatus(elements.serverSettingsStatus, message, tone);
 }
 
 function setAccessGroupStatus(message, tone = "muted") {
-  elements.accessGroupStatus.className = `result-card result-card--${tone}`;
-  elements.accessGroupStatus.textContent = message;
+  setResultStatus(elements.accessGroupStatus, message, tone);
 }
 
 function setUserStatus(message, tone = "muted") {
-  elements.userStatus.className = `result-card result-card--${tone}`;
-  elements.userStatus.textContent = message;
+  setResultStatus(elements.userStatus, message, tone);
 }
 
 function setDiscoveryAgentStatus(message, tone = "muted") {
-  if (!elements.discoveryAgentStatus) {
-    return;
-  }
-  elements.discoveryAgentStatus.className = `result-card result-card--${tone}`;
-  elements.discoveryAgentStatus.textContent = message;
+  setResultStatus(elements.discoveryAgentStatus, message, tone);
 }
 
 function setDiscoveryPolicyStatus(message, tone = "muted") {
-  if (!elements.discoveryPolicyStatus) {
-    return;
-  }
-  elements.discoveryPolicyStatus.className = `result-card result-card--${tone}`;
-  elements.discoveryPolicyStatus.textContent = message;
+  setResultStatus(elements.discoveryPolicyStatus, message, tone);
 }
 
 function collectInterfaceSettingsDraft() {
@@ -2054,13 +2320,11 @@ function restoreInterfaceBaseline() {
 }
 
 function setProfileSettingsStatus(message, tone = "muted") {
-  elements.profileSettingsStatus.className = `result-card result-card--${tone}`;
-  elements.profileSettingsStatus.textContent = message;
+  setResultStatus(elements.profileSettingsStatus, message, tone);
 }
 
 function setInterfaceSettingsStatus(message, tone = "muted") {
-  elements.interfaceSettingsStatus.className = `result-card result-card--${tone}`;
-  elements.interfaceSettingsStatus.textContent = message;
+  setResultStatus(elements.interfaceSettingsStatus, message, tone);
 }
 
 function handleInterfaceSettingsPreview() {
@@ -2431,6 +2695,7 @@ function prepareDiscoveryAgentForm(agent = null) {
   elements.discoveryAgentForm.elements.linkedHostDeviceId.value = agent?.linkedHostDeviceId || "";
   elements.discoveryAgentForm.elements.name.value = agent?.name || "";
   elements.discoveryAgentForm.elements.allowedCidrs.value = (agent?.allowedCidrs || []).join("\n");
+  setDiscoveryAgentCollectors(getDefaultDiscoveryCollectors(elements.discoveryAgentForm.elements.kind.value));
   autosizeDiscoveryAllowedCidrs();
   const submitButton = elements.discoveryAgentForm.querySelector('[type="submit"]');
   if (submitButton) {
@@ -2668,9 +2933,7 @@ function prepareDeviceModal(device = null, options = {}) {
 }
 
 function setServiceFormStatus(message, tone = "muted", visible = true) {
-  elements.serviceFormStatus.className = `result-card result-card--${tone} form-grid__full`;
-  elements.serviceFormStatus.textContent = message;
-  elements.serviceFormStatus.hidden = !visible;
+  setResultStatus(elements.serviceFormStatus, message, tone, "form-grid__full", visible);
 }
 
 function clearServiceFormStatus() {
@@ -3955,6 +4218,7 @@ async function handleDiscoveryAgentSubmit(event) {
   const form = event.currentTarget;
   const formData = new FormData(form);
   const isEditing = Boolean(editingDiscoveryAgentId);
+  const selectedCollectors = getDiscoveryAgentSelectedCollectors();
   const payload = {
     name: formData.get("name"),
     kind: formData.get("kind"),
@@ -3981,7 +4245,7 @@ async function handleDiscoveryAgentSubmit(event) {
     prepareDiscoveryAgentForm();
     await refreshState(true, true);
     if (token) {
-      showDiscoveryAgentConfig(savedAgent, token);
+      showDiscoveryAgentConfig(savedAgent, token, selectedCollectors);
       setDiscoveryAgentStatus(t("discovery_agent_created_with_token"), "ok");
     } else if (!isEditing && response.sharedTokenAgentId) {
       clearDiscoveryAgentConfig();
@@ -4311,10 +4575,7 @@ async function handleDiscoveryAgentTableActions(event) {
         method: "POST",
         body: JSON.stringify({}),
       });
-      lastDiscoveryAgentConfig = "";
-      if (elements.discoveryAgentTokenCard) {
-        elements.discoveryAgentTokenCard.hidden = true;
-      }
+      clearDiscoveryAgentConfig();
       await refreshState(true, true);
       setDiscoveryAgentStatus(t("discovery_agent_token_revoked", { name: agent.name }), "ok");
     } catch (error) {
@@ -4351,10 +4612,7 @@ async function handleDiscoveryAgentTableActions(event) {
       if (editingDiscoveryAgentPolicyId === agent.id) {
         hideDiscoveryAgentPolicyEditor();
       }
-      lastDiscoveryAgentConfig = "";
-      if (elements.discoveryAgentTokenCard) {
-        elements.discoveryAgentTokenCard.hidden = true;
-      }
+      clearDiscoveryAgentConfig();
       await refreshState(true, true);
       setDiscoveryAgentStatus(
         choice === "related"
@@ -5271,12 +5529,16 @@ async function handleGroupTableActions(event) {
   const toggleButton = event.target.closest("[data-toggle-group-devices]");
   if (toggleButton) {
     const groupId = toggleButton.dataset.toggleGroupDevices;
-    if (expandedGroupIds.has(groupId)) {
+    const willExpand = !expandedGroupIds.has(groupId);
+    if (!willExpand) {
       expandedGroupIds.delete(groupId);
     } else {
       expandedGroupIds.add(groupId);
     }
     renderGroupsTable();
+    if (willExpand) {
+      revealExpandedContent(() => document.querySelector(`[data-expanded-group-devices="${cssEscape(groupId)}"]`));
+    }
     return;
   }
 
@@ -5354,6 +5616,28 @@ async function handleDeviceTableActions(event) {
     return;
   }
 
+  const discoveryButton = event.target.closest("[data-toggle-device-discovery]");
+  if (discoveryButton) {
+    const deviceId = discoveryButton.dataset.toggleDeviceDiscovery || "";
+    const device = state.devices.find((entry) => entry.id === deviceId && entry.type !== "service");
+    const key = getRegistryDiscoveryKey(device);
+    if (!key) {
+      return;
+    }
+
+    const willExpand = !expandedRegistryDiscoveryKeys.has(key);
+    if (willExpand) {
+      expandedRegistryDiscoveryKeys.add(key);
+    } else {
+      expandedRegistryDiscoveryKeys.delete(key);
+    }
+    renderDevicesTable();
+    if (willExpand) {
+      revealExpandedContent(() => document.querySelector(`[data-expanded-registry-discovery="${cssEscape(key)}"]`));
+    }
+    return;
+  }
+
   const jumpGroupButton = event.target.closest("[data-jump-group]");
   if (jumpGroupButton) {
     const groupId = jumpGroupButton.dataset.jumpGroup;
@@ -5411,6 +5695,28 @@ async function handleServiceListActions(event) {
   if (toggleButton) {
     showAllServicesInRegistry = !showAllServicesInRegistry;
     renderServicesList();
+    return;
+  }
+
+  const discoveryButton = event.target.closest("[data-toggle-service-discovery]");
+  if (discoveryButton) {
+    const serviceId = discoveryButton.dataset.toggleServiceDiscovery || "";
+    const service = state.devices.find((entry) => entry.id === serviceId && entry.type === "service");
+    const key = getRegistryDiscoveryKey(service);
+    if (!key) {
+      return;
+    }
+
+    const willExpand = !expandedRegistryDiscoveryKeys.has(key);
+    if (willExpand) {
+      expandedRegistryDiscoveryKeys.add(key);
+    } else {
+      expandedRegistryDiscoveryKeys.delete(key);
+    }
+    renderServicesList();
+    if (willExpand) {
+      revealExpandedContent(() => document.querySelector(`[data-expanded-registry-discovery="${cssEscape(key)}"]`));
+    }
     return;
   }
 
@@ -6027,7 +6333,7 @@ function renderGroupsTable() {
           </td>
         </tr>
         ${isExpanded ? `
-          <tr class="group-devices-row">
+          <tr class="group-devices-row" data-expanded-group-devices="${escapeHtml(group.id)}">
             <td colspan="6">
               <div class="group-devices-panel">
                 <div class="group-devices-header">
@@ -6051,6 +6357,15 @@ function renderGroupsTable() {
 function renderAccessGroupsTable() {
   const canManage = Boolean(state.auth?.capabilities?.canManageAccessGroups);
   const accessGroups = state.admin?.accessGroups || [];
+  const shouldShowExpand = syncCompactTableWrap(elements.accessGroupsTableWrap, accessGroups.length, showAllAccessGroups);
+  syncRegistryListToggleButton(
+    elements.accessGroupsListToggleButton,
+    shouldShowExpand,
+    showAllAccessGroups,
+    "show_all_access_groups",
+    "show_less_access_groups",
+    accessGroups.length,
+  );
   if (accessGroups.length === 0) {
     elements.accessGroupsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -6082,6 +6397,15 @@ function renderUsersTable() {
   const canManage = Boolean(state.auth?.capabilities?.canManageUsers);
   const currentUserId = String(state.auth?.user?.id || "");
   const users = state.admin?.users || [];
+  const shouldShowExpand = syncCompactTableWrap(elements.usersTableWrap, users.length, showAllUsers);
+  syncRegistryListToggleButton(
+    elements.usersListToggleButton,
+    shouldShowExpand,
+    showAllUsers,
+    "show_all_users",
+    "show_less_users",
+    users.length,
+  );
   if (users.length === 0) {
     elements.usersTableBody.innerHTML = `
       <tr class="empty-row">
@@ -6161,9 +6485,35 @@ function getDiscoveryCreateModeLabel(mode) {
   return TRANSLATIONS[getLanguage()]?.[key] || humanizeDeviceType(normalizedMode);
 }
 
-function buildDiscoveryAgentConfig(agent, token) {
+function getDefaultDiscoveryCollectors(kind) {
+  const normalizedKind = normalizeMetadataToken(kind, "host");
+  return DISCOVERY_COLLECTOR_PRESETS[normalizedKind] || DISCOVERY_COLLECTOR_PRESETS.host;
+}
+
+function getDiscoveryAgentCollectorInputs() {
+  return [...(elements.discoveryAgentForm?.querySelectorAll('input[name="collectors"]') || [])];
+}
+
+function setDiscoveryAgentCollectors(collectors) {
+  const selected = new Set(collectors?.length ? collectors : ["host"]);
+  getDiscoveryAgentCollectorInputs().forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+}
+
+function getDiscoveryAgentSelectedCollectors() {
+  const selected = getDiscoveryAgentCollectorInputs()
+    .filter((input) => input.checked)
+    .map((input) => input.value);
+  return selected.includes("host") ? selected : ["host", ...selected];
+}
+
+function buildDiscoveryAgentConfig(agent, token, collectors = null) {
   const atlasUrl = window.location.origin;
-  return JSON.stringify({
+  const enabledCollectors = collectors?.length
+    ? collectors
+    : getDefaultDiscoveryCollectors(agent?.kind || "host");
+  const config = {
     atlas_url: atlasUrl,
     agent_id: agent.id,
     agent_token: token || "paste-shared-token-here",
@@ -6172,25 +6522,63 @@ function buildDiscoveryAgentConfig(agent, token) {
     verify_tls: atlasUrl.startsWith("https://"),
     allow_insecure_http: atlasUrl.startsWith("http://"),
     timeout: 20,
-    enabled_collectors: ["host", "docker"],
+    enabled_collectors: enabledCollectors,
+  };
+  if (enabledCollectors.includes("docker")) {
+    Object.assign(config, {
     docker_socket: "/var/run/docker.sock",
     docker_timeout: 10,
-  }, null, 2);
+    });
+  }
+  if (enabledCollectors.includes("kubernetes")) {
+    Object.assign(config, {
+      kubernetes_api_url: "https://kubernetes.default.svc",
+      kubernetes_token_file: "/var/run/secrets/kubernetes.io/serviceaccount/token",
+      kubernetes_ca_cert: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+      kubernetes_namespaces: ["default"],
+      kubernetes_all_namespaces: false,
+      kubernetes_verify_tls: true,
+      kubernetes_timeout: 10,
+    });
+  }
+  if (enabledCollectors.includes("proxmox")) {
+    Object.assign(config, {
+      proxmox_api_url: "https://pve.example.local:8006",
+      proxmox_token_id: "atlas@pve!discovery",
+      proxmox_token_secret: "paste-proxmox-token-secret",
+      proxmox_nodes: [],
+      proxmox_include_ipv6: false,
+      proxmox_verify_tls: true,
+      proxmox_timeout: 10,
+    });
+  }
+  return JSON.stringify(config, null, 2);
 }
 
-function showDiscoveryAgentConfig(agent, token) {
+function showDiscoveryAgentConfig(agent, token, collectors = null) {
   if (!elements.discoveryAgentTokenCard || !elements.discoveryAgentConfigSnippet) {
     return;
   }
-  lastDiscoveryAgentConfig = buildDiscoveryAgentConfig(agent, token);
+  if (discoveryAgentConfigTimer) {
+    window.clearTimeout(discoveryAgentConfigTimer);
+    discoveryAgentConfigTimer = null;
+  }
+  lastDiscoveryAgentConfig = buildDiscoveryAgentConfig(agent, token, collectors);
   elements.discoveryAgentConfigSnippet.value = lastDiscoveryAgentConfig;
   elements.discoveryAgentTokenCard.hidden = false;
   if (elements.copyDiscoveryAgentConfigButton) {
     elements.copyDiscoveryAgentConfigButton.disabled = false;
   }
+  discoveryAgentConfigTimer = window.setTimeout(() => {
+    clearDiscoveryAgentConfig();
+  }, DISCOVERY_AGENT_CONFIG_HIDE_MS);
 }
 
 function clearDiscoveryAgentConfig() {
+  if (discoveryAgentConfigTimer) {
+    window.clearTimeout(discoveryAgentConfigTimer);
+    discoveryAgentConfigTimer = null;
+  }
   lastDiscoveryAgentConfig = "";
   if (elements.discoveryAgentConfigSnippet) {
     elements.discoveryAgentConfigSnippet.value = "";
@@ -6245,6 +6633,26 @@ function syncRegistryListWrap(wrapElement, itemCount, isExpanded) {
   wrapElement.classList.toggle("table-wrap--registry-list", shouldScroll);
   wrapElement.classList.toggle("table-wrap--filters-collapsed", shouldScroll && collapsedFilterPanels.registry);
   wrapElement.classList.toggle("table-wrap--expanded", shouldScroll && isExpanded);
+  return shouldScroll;
+}
+
+function syncCompactTableWrap(wrapElement, itemCount, isExpanded) {
+  if (!wrapElement) {
+    return false;
+  }
+  const shouldScroll = itemCount > COMPACT_LIST_VISIBLE_ROWS.default;
+  wrapElement.classList.toggle("table-wrap--compact-list", shouldScroll);
+  wrapElement.classList.toggle("table-wrap--expanded", shouldScroll && isExpanded);
+  return shouldScroll;
+}
+
+function syncCompactListWrap(listElement, itemCount, isExpanded) {
+  if (!listElement) {
+    return false;
+  }
+  const shouldScroll = itemCount > COMPACT_LIST_VISIBLE_ROWS.default;
+  listElement.classList.toggle("automation-subnet-list--compact", shouldScroll);
+  listElement.classList.toggle("automation-subnet-list--expanded", shouldScroll && isExpanded);
   return shouldScroll;
 }
 
@@ -6408,6 +6816,15 @@ function renderDiscoveryAgentsTable() {
 
   const agents = state.admin?.discoveryAgents || [];
   const canManage = Boolean(state.auth?.capabilities?.isAdmin);
+  const shouldShowExpand = syncCompactTableWrap(elements.discoveryAgentsTableWrap, agents.length, showAllDiscoveryAgents);
+  syncRegistryListToggleButton(
+    elements.discoveryAgentsListToggleButton,
+    shouldShowExpand,
+    showAllDiscoveryAgents,
+    "show_all_discovery_agents",
+    "show_less_discovery_agents",
+    agents.length,
+  );
   if (agents.length === 0) {
     elements.discoveryAgentsTableBody.innerHTML = `
       <tr class="empty-row">
@@ -6503,9 +6920,16 @@ function getDiscoveryStateVariant(stateName) {
   return "info";
 }
 
+function isStaleDiscoveryResult(result) {
+  return String(result?.state || "").trim().toLowerCase() === "stale";
+}
+
 function getDiscoveryTargetKind(result) {
   const source = normalizeMetadataToken(result.source, "");
   const sourceKind = normalizeMetadataToken(result.sourceKind, "");
+  if (sourceKind === "template") {
+    return "template";
+  }
   if (sourceKind === "iot" || sourceKind === "sensor" || sourceKind === "controller") {
     return "iot";
   }
@@ -6521,6 +6945,7 @@ function getDiscoveryTargetLabel(result) {
     iot: "discovery_target_iot",
     service: "discovery_target_service",
     device: "discovery_target_device",
+    template: "discovery_target_template",
   }[targetKind];
   return t(key);
 }
@@ -6539,13 +6964,16 @@ function renderDiscoveryActions(result) {
       const targetKind = getDiscoveryTargetKind(result);
       if (targetKind === "service") {
         actions.push(["create-service", "discovery_action_create_service"]);
-      } else {
+      } else if (targetKind === "device" || targetKind === "iot") {
         actions.push(["create-device", targetKind === "iot" ? "discovery_action_create_iot" : "discovery_action_create_device"]);
       }
-      actions.push(["link", "discovery_action_link"]);
+      if (targetKind !== "template") {
+        actions.push(["link", "discovery_action_link"]);
+      }
     }
     if (normalizedState === "stale" || normalizedState === "error") {
       actions.push(["resolve", "discovery_action_resolve"]);
+      actions.push(["delete", "discovery_action_delete"]);
     }
     actions.push(["ignore", "discovery_action_ignore"]);
   }
@@ -6586,16 +7014,55 @@ function getDiscoveryPreviewGroup(result) {
   };
 }
 
-function renderDiscoveryPreviewRow(result) {
+function getDiscoveryPreviewSortRank(result) {
+  const source = normalizeMetadataToken(result.source, "");
+  const sourceKind = normalizeMetadataToken(result.sourceKind, "");
+  if (source === "host" || sourceKind === "host") {
+    return 0;
+  }
+  if (sourceKind === "hypervisor" || source === "proxmox" || ["vm", "lxc", "virtual-machine", "template"].includes(sourceKind)) {
+    return 1;
+  }
+  if (source === "docker" || ["container", "docker-container", "service"].includes(sourceKind)) {
+    return 2;
+  }
+  if (source === "kubernetes" || ["pod", "workload"].includes(sourceKind)) {
+    return 3;
+  }
+  if (sourceKind === "iot" || sourceKind === "sensor" || sourceKind === "controller") {
+    return 4;
+  }
+  return 5;
+}
+
+function sortDiscoveryPreviewResults(results) {
+  return results.slice().sort((left, right) => {
+    const rankDiff = getDiscoveryPreviewSortRank(left) - getDiscoveryPreviewSortRank(right);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    const leftType = getDeviceSourceKindLabel(left.sourceKind || left.source || "");
+    const rightType = getDeviceSourceKindLabel(right.sourceKind || right.source || "");
+    const typeDiff = leftType.localeCompare(rightType, getLanguage(), { sensitivity: "base" });
+    if (typeDiff !== 0) {
+      return typeDiff;
+    }
+    return String(left.name || left.sourceId || "").localeCompare(
+      String(right.name || right.sourceId || ""),
+      getLanguage(),
+      { sensitivity: "base", numeric: true },
+    );
+  });
+}
+
+function renderDiscoveryPreviewRow(result, groupKey = "") {
   const sourceLabel = getDeviceSourceLabel(result.source);
   const sourceKindLabel = result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data");
-  const sourceId = result.sourceId ? `${t("device_source_id_meta", { id: result.sourceId })}` : "";
-  const metadataSummary = renderDiscoveryMetadataSummary(result);
   const hostLabel = result.hostName || result.hostDeviceId || t("no_binding");
   const ports = [result.accessPort, result.ports].filter(Boolean).join(" · ") || t("no_data");
   const isExpanded = expandedDiscoveryResultIds.has(result.id);
   return `
-    <tr>
+    <tr data-discovery-result-row="${escapeHtml(result.id)}"${groupKey ? ` data-discovery-result-group="${escapeHtml(groupKey)}"` : ""}>
       <td>
         <span class="status-badge status-badge--${getDiscoveryStateVariant(result.state)}">
           ${escapeHtml(getDiscoveryStateLabel(result.state))}
@@ -6607,9 +7074,9 @@ function renderDiscoveryPreviewRow(result) {
         <div class="secondary-line">${escapeHtml(sourceKindLabel)}</div>
       </td>
       <td>
-        <span class="pill">${escapeHtml(sourceLabel)}</span>
-        <div class="secondary-line">${escapeHtml(sourceId || result.agentName || t("no_data"))}</div>
-        ${metadataSummary ? `<div class="secondary-line">${escapeHtml(metadataSummary)}</div>` : ""}
+        <div class="discovery-preview-table__source">
+          <span class="pill">${escapeHtml(sourceLabel)}</span>
+        </div>
       </td>
       <td>${escapeHtml(hostLabel)}</td>
       <td><div class="discovery-preview-table__ports mono">${escapeHtml(ports)}</div></td>
@@ -6617,30 +7084,11 @@ function renderDiscoveryPreviewRow(result) {
       <td>${renderDiscoveryActions(result)}</td>
     </tr>
     ${isExpanded ? `
-      <tr class="discovery-details-row">
+      <tr class="discovery-details-row" data-expanded-discovery-result="${escapeHtml(result.id)}">
         <td colspan="7">${renderDiscoveryDetails(result)}</td>
       </tr>
     ` : ""}
   `;
-}
-
-function renderDiscoveryMetadataSummary(result) {
-  const receivedCount = result.receivedFields?.length || 0;
-  const acceptedCount = result.acceptedFields?.length || 0;
-  const visibleEntries = Object.entries(result.visibleRaw || {})
-    .filter(([, value]) => value !== "" && value !== null && value !== undefined)
-    .slice(0, 3)
-    .map(([key, value]) => {
-      const textValue = typeof value === "object" ? JSON.stringify(value) : String(value);
-      return `${key}: ${truncateText(textValue, 28)}`;
-    });
-  const summary = receivedCount || acceptedCount
-    ? t("discovery_metadata_counts", { received: receivedCount, accepted: acceptedCount })
-    : "";
-  return [
-    summary,
-    ...visibleEntries,
-  ].filter(Boolean).join(" · ");
 }
 
 function findDiscoveryLinkTarget(value) {
@@ -6659,12 +7107,35 @@ async function handleDiscoveryPreviewActions(event) {
   const groupButton = event.target.closest("[data-toggle-discovery-group]");
   if (groupButton) {
     const groupId = groupButton.dataset.toggleDiscoveryGroup || "";
-    if (collapsedDiscoveryGroupIds.has(groupId)) {
-      collapsedDiscoveryGroupIds.delete(groupId);
+    const willExpand = !expandedDiscoveryGroupIds.has(groupId);
+    if (!willExpand) {
+      expandedDiscoveryGroupIds.delete(groupId);
     } else {
-      collapsedDiscoveryGroupIds.add(groupId);
+      expandedDiscoveryGroupIds.add(groupId);
     }
     renderDiscoveryPreview();
+    if (willExpand) {
+      revealExpandedContent(() => (
+        document.querySelector(`[data-discovery-result-group="${cssEscape(groupId)}"]`)
+        || document.querySelector(`[data-discovery-group-row="${cssEscape(groupId)}"]`)
+      ), { extraDown: 120 });
+    }
+    return;
+  }
+
+  const hardwareButton = event.target.closest("[data-toggle-discovery-hardware]");
+  if (hardwareButton) {
+    const resultId = hardwareButton.dataset.toggleDiscoveryHardware || "";
+    const willExpand = !expandedDiscoveryHardwareIds.has(resultId);
+    if (!willExpand) {
+      expandedDiscoveryHardwareIds.delete(resultId);
+    } else {
+      expandedDiscoveryHardwareIds.add(resultId);
+    }
+    renderDiscoveryPreview();
+    if (willExpand) {
+      revealExpandedContent(() => document.querySelector(`[data-expanded-discovery-result="${cssEscape(resultId)}"]`));
+    }
     return;
   }
 
@@ -6679,12 +7150,16 @@ async function handleDiscoveryPreviewActions(event) {
   const resultName = result?.name || t("no_data");
 
   if (action === "details") {
-    if (expandedDiscoveryResultIds.has(resultId)) {
+    const willExpand = !expandedDiscoveryResultIds.has(resultId);
+    if (!willExpand) {
       expandedDiscoveryResultIds.delete(resultId);
     } else {
       expandedDiscoveryResultIds.add(resultId);
     }
     renderDiscoveryPreview();
+    if (willExpand) {
+      revealExpandedContent(() => document.querySelector(`[data-expanded-discovery-result="${cssEscape(resultId)}"]`));
+    }
     return;
   }
 
@@ -6728,6 +7203,22 @@ async function handleDiscoveryPreviewActions(event) {
           targetType: target.type === "service" ? "service" : "device",
         }),
       });
+    } else if (action === "delete") {
+      const confirmed = await showAtlasConfirm(
+        t("discovery_delete_confirm", { name: resultName }),
+        {
+          title: t("discovery_delete_title"),
+          confirmLabel: t("discovery_action_delete"),
+          danger: true,
+        },
+      );
+      if (!confirmed) {
+        return;
+      }
+      await apiRequest(`/admin/discovery/results/${encodeURIComponent(resultId)}/delete`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
     } else {
       await apiRequest(`/admin/discovery/results/${encodeURIComponent(resultId)}/${action}`, {
         method: "POST",
@@ -6741,6 +7232,48 @@ async function handleDiscoveryPreviewActions(event) {
     showToast(error.message, true);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function handleDiscoveryStaleCleanup() {
+  const staleCount = (state.admin?.discoveryResults || []).filter(isStaleDiscoveryResult).length;
+  if (staleCount === 0) {
+    showToast(t("discovery_bulk_cleanup_stale_empty"));
+    return;
+  }
+
+  const confirmed = await showAtlasConfirm(
+    t("discovery_bulk_cleanup_stale_confirm", { count: staleCount }),
+    {
+      title: t("discovery_bulk_cleanup_stale_title"),
+      confirmLabel: t("discovery_bulk_cleanup_stale_button"),
+      danger: true,
+    },
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const button = elements.discoveryStaleCleanupButton;
+  try {
+    if (button) {
+      button.disabled = true;
+    }
+    const result = await apiRequest("/admin/discovery/results/cleanup-stale", {
+      method: "POST",
+      body: JSON.stringify({ deleteLinkedRecords: true }),
+    });
+    await refreshState(true, true);
+    showToast(t("discovery_bulk_cleanup_stale_done", {
+      results: result.deletedResults || 0,
+      records: result.deletedLinkedRecords || 0,
+    }));
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
   }
 }
 
@@ -6831,12 +7364,316 @@ function renderDiscoveryAudit() {
     .join("");
 }
 
+const DISCOVERY_VISIBLE_METADATA_PRIORITY = [
+  "primaryIp",
+  "ip",
+  "mac",
+  "hostname",
+  "fqdn",
+  "node",
+  "vmid",
+  "type",
+  "proxmoxType",
+  "statusText",
+  "uptime",
+  "cpu",
+  "cpus",
+  "cpuModel",
+  "sockets",
+  "ram",
+  "ramUsage",
+  "memory",
+  "maxMemory",
+  "diskCount",
+  ...Array.from({ length: 16 }, (_, index) => `disk${index + 1}`),
+  "diskSummary",
+  "diskUsage",
+  "disks",
+  "disk",
+  "maxDisk",
+  "loadAverage",
+  "kernelVersion",
+  "pveVersion",
+  "system",
+  "machine",
+  "agentVersion",
+  "tags",
+  "containerId",
+  "image",
+];
+
+function formatBytesValue(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) {
+    return String(value);
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let current = bytes;
+  let unitIndex = 0;
+  while (Math.abs(current) >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+  const digits = unitIndex === 0 ? 0 : 1;
+  return `${current.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatDiscoveryDiskDescriptor(value) {
+  const [label, size] = String(value).split("=").map((item) => item.trim());
+  return label && Number.isFinite(Number(size))
+    ? `${label} ${formatBytesValue(size)}`
+    : String(value);
+}
+
+function formatDiscoveryMetadataKey(key) {
+  const diskMatch = String(key).match(/^disk(\d+)$/);
+  if (diskMatch) {
+    return `disk ${diskMatch[1]}`;
+  }
+  if (key === "ram") {
+    return "RAM";
+  }
+  return key;
+}
+
+function formatDurationSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return String(value);
+  }
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const parts = [];
+  if (days) {
+    parts.push(`${days}d`);
+  }
+  if (hours || days) {
+    parts.push(`${hours}h`);
+  }
+  parts.push(`${minutes}m`);
+  return parts.join(" ");
+}
+
+function formatDiscoveryMetadataValue(key, value) {
+  if (/^disk\d+$/.test(key)) {
+    return formatDiscoveryDiskDescriptor(value);
+  }
+  if (key === "mounts" && Array.isArray(value)) {
+    return value
+      .map((mount) => {
+        if (!mount || typeof mount !== "object") {
+          return String(mount);
+        }
+        const label = mount.mountpoint || mount.name || "mount";
+        const used = Number.isFinite(Number(mount.used)) ? formatBytesValue(mount.used) : "";
+        const total = Number.isFinite(Number(mount.total)) ? formatBytesValue(mount.total) : "";
+        const usage = used && total ? `${used} / ${total}` : total;
+        return [label, usage].filter(Boolean).join(" ");
+      })
+      .join(", ");
+  }
+  if (key === "disks" && Array.isArray(value)) {
+    return value
+      .map((disk) => {
+        if (!disk || typeof disk !== "object") {
+          return String(disk);
+        }
+        const label = disk.name || disk.storage || disk.bus || "disk";
+        const size = disk.size ? formatBytesValue(disk.size) : "";
+        return [label, size].filter(Boolean).join(" ");
+      })
+      .join(", ");
+  }
+  if (key === "mountSummary") {
+    return String(value)
+      .split(",")
+      .map((part) => {
+        const [label, usage] = part.split("=").map((item) => item.trim());
+        const [used, total] = String(usage || "").split("/").map((item) => item.trim());
+        if (!label || !Number.isFinite(Number(total))) {
+          return part.trim();
+        }
+        if (used && Number.isFinite(Number(used))) {
+          return `${label} ${formatBytesValue(used)} / ${formatBytesValue(total)}`;
+        }
+        return `${label} ${formatBytesValue(total)}`;
+      })
+      .filter(Boolean)
+      .join(", ");
+  }
+  if (key === "diskSummary") {
+    return String(value)
+      .split(",")
+      .map((part) => formatDiscoveryDiskDescriptor(part.trim()))
+      .filter(Boolean)
+      .join(", ");
+  }
+  if (Array.isArray(value)) {
+    const visibleValues = value.slice(0, 4).map((item) => String(item));
+    const suffix = value.length > visibleValues.length ? ` +${value.length - visibleValues.length}` : "";
+    return `${visibleValues.join(", ")}${suffix}`;
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  if (["ramUsage", "diskUsage"].includes(key)) {
+    const [used, total] = String(value).split("/").map((part) => part.trim());
+    if (used && total && Number.isFinite(Number(used)) && Number.isFinite(Number(total))) {
+      return `${formatBytesValue(used)} / ${formatBytesValue(total)}`;
+    }
+  }
+  if (["ram", "memory", "maxMemory", "disk", "maxDisk"].includes(key) && Number.isFinite(Number(value))) {
+    return formatBytesValue(value);
+  }
+  if (key === "cpu" && Number.isFinite(Number(value))) {
+    return `${(Number(value) * 100).toFixed(1)}%`;
+  }
+  if (key === "uptime" && Number.isFinite(Number(value))) {
+    return formatDurationSeconds(value);
+  }
+  return String(value);
+}
+
+function isProxmoxHypervisorResult(result) {
+  return normalizeMetadataToken(result?.source, "") === "proxmox"
+    && normalizeMetadataToken(result?.sourceKind, "") === "hypervisor";
+}
+
+function getProxmoxNodeName(result) {
+  return String(result?.visibleRaw?.node || result?.name || result?.hostName || "").trim().toLowerCase();
+}
+
+function mergeDiscoveryHardwareResults(results) {
+  const mergedResults = results.map((result) => ({ ...result }));
+  const hostByNode = new Map();
+  mergedResults.forEach((result) => {
+    const sourceKind = normalizeMetadataToken(result.sourceKind, "");
+    if (sourceKind !== "host") {
+      return;
+    }
+    const nodeName = String(result.name || result.hostName || "").trim().toLowerCase();
+    if (nodeName) {
+      hostByNode.set(`${result.agentId}::${nodeName}`, result);
+    }
+  });
+
+  const hiddenIds = new Set();
+  mergedResults.forEach((result) => {
+    if (!isProxmoxHypervisorResult(result)) {
+      return;
+    }
+    const nodeName = getProxmoxNodeName(result);
+    const hostResult = nodeName ? hostByNode.get(`${result.agentId}::${nodeName}`) : null;
+    if (!hostResult) {
+      return;
+    }
+    hostResult.hardwareRaw = result.visibleRaw || {};
+    hiddenIds.add(result.id);
+  });
+  return mergedResults.filter((result) => !hiddenIds.has(result.id));
+}
+
+function sortDiscoveryMetadataEntries(entries) {
+  return [...entries].sort(([leftKey], [rightKey]) => {
+    const leftIndex = DISCOVERY_VISIBLE_METADATA_PRIORITY.indexOf(leftKey);
+    const rightIndex = DISCOVERY_VISIBLE_METADATA_PRIORITY.indexOf(rightKey);
+    const leftRank = leftIndex === -1 ? DISCOVERY_VISIBLE_METADATA_PRIORITY.length : leftIndex;
+    const rightRank = rightIndex === -1 ? DISCOVERY_VISIBLE_METADATA_PRIORITY.length : rightIndex;
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+    return leftKey.localeCompare(rightKey, getLanguage(), { sensitivity: "base" });
+  });
+}
+
+function dedupeDiscoveryMetadataEntries(entries) {
+  const result = [];
+  const indexByKey = new Map();
+  entries.forEach((entry) => {
+    const [key] = entry;
+    if (indexByKey.has(key)) {
+      result[indexByKey.get(key)] = entry;
+      return;
+    }
+    indexByKey.set(key, result.length);
+    result.push(entry);
+  });
+  return result;
+}
+
+function getDiscoveryVisibleMetadataEntries(result) {
+  const raw = result.visibleRaw || {};
+  const hiddenWhenSummarized = new Set();
+  const source = normalizeMetadataToken(result.source, "");
+  const sourceKind = normalizeMetadataToken(result.sourceKind, "");
+  hiddenWhenSummarized.add("mountSummary");
+  hiddenWhenSummarized.add("mounts");
+  hiddenWhenSummarized.add("python");
+  hiddenWhenSummarized.add("platform");
+  hiddenWhenSummarized.add("release");
+  if (Object.keys(raw).some((key) => /^disk\d+$/.test(key))) {
+    hiddenWhenSummarized.add("diskCount");
+    hiddenWhenSummarized.add("diskTotal");
+    hiddenWhenSummarized.add("maxDisk");
+    hiddenWhenSummarized.add("diskSummary");
+    hiddenWhenSummarized.add("disks");
+    hiddenWhenSummarized.add("diskUsage");
+  }
+  if (source === "proxmox" && sourceKind === "template") {
+    hiddenWhenSummarized.add("cpu");
+    hiddenWhenSummarized.add("uptime");
+    hiddenWhenSummarized.add("memory");
+    hiddenWhenSummarized.add("maxMemory");
+    hiddenWhenSummarized.add("ramUsage");
+    hiddenWhenSummarized.add("maxDisk");
+    hiddenWhenSummarized.add("diskTotal");
+    hiddenWhenSummarized.add("diskUsage");
+  }
+  if (raw.ramUsage) {
+    hiddenWhenSummarized.add("memory");
+    hiddenWhenSummarized.add("maxMemory");
+  }
+  if (source === "proxmox" && sourceKind === "hypervisor") {
+    hiddenWhenSummarized.add("uptime");
+    hiddenWhenSummarized.add("disk");
+    hiddenWhenSummarized.add("maxDisk");
+    hiddenWhenSummarized.add("diskTotal");
+    hiddenWhenSummarized.add("diskUsage");
+    hiddenWhenSummarized.add("diskSummary");
+    hiddenWhenSummarized.add("disks");
+  }
+  if (raw.diskSummary || raw.diskUsage) {
+    hiddenWhenSummarized.add("disk");
+    hiddenWhenSummarized.add("maxDisk");
+    hiddenWhenSummarized.add("diskTotal");
+    if (raw.diskSummary) {
+      hiddenWhenSummarized.add("disks");
+      hiddenWhenSummarized.add("diskUsage");
+    }
+  }
+  const entries = Object.entries(raw)
+    .filter(([, value]) => value !== "" && value !== null && value !== undefined);
+  const visibleEntries = entries.filter(([key]) => !hiddenWhenSummarized.has(key));
+  return sortDiscoveryMetadataEntries(visibleEntries).slice(0, 12);
+}
+
 function renderDiscoveryDetails(result) {
-  const visibleEntries = Object.entries(result.visibleRaw || {})
-    .filter(([, value]) => value !== "" && value !== null && value !== undefined)
-    .slice(0, 12);
+  const visibleEntries = [
+    ...getDiscoveryVisibleMetadataEntries(result),
+    ...(
+      result.hardwareRaw && typeof result.hardwareRaw === "object"
+        ? getDiscoveryVisibleMetadataEntries({
+          source: "proxmox",
+          sourceKind: "hypervisor",
+          visibleRaw: result.hardwareRaw,
+        })
+        : []
+    ),
+  ];
+  const sortedVisibleEntries = sortDiscoveryMetadataEntries(dedupeDiscoveryMetadataEntries(visibleEntries));
   const detailItems = [
-    ["discovery_details_target", getDiscoveryTargetLabel(result)],
+    [getDiscoveryTargetKind(result) === "template" ? "discovery_details_detected_as" : "discovery_details_target", getDiscoveryTargetLabel(result)],
     ["device_source_label", getDeviceSourceLabel(result.source)],
     ["device_source_kind_label", result.sourceKind ? getDeviceSourceKindLabel(result.sourceKind) : t("no_data")],
     ["device_source_id_label", result.sourceId || t("no_data")],
@@ -6866,13 +7703,14 @@ function renderDiscoveryDetails(result) {
       </div>
       <div class="discovery-metadata-list">
         <span class="secondary-line">${escapeHtml(t("discovery_details_metadata_title"))}</span>
-        ${visibleEntries.length > 0
-          ? visibleEntries.map(([key, value]) => {
-            const textValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+        ${sortedVisibleEntries.length > 0
+          ? sortedVisibleEntries.map(([key, value]) => {
+            const textValue = formatDiscoveryMetadataValue(key, value);
+            const isWideRow = /^(disk\d+|cpuModel|kernelVersion|pveVersion|loadAverage)$/.test(key);
             return `
-              <div class="discovery-metadata-row">
-                <span>${escapeHtml(key)}</span>
-                <code>${escapeHtml(truncateText(textValue, 120))}</code>
+              <div class="discovery-metadata-row${isWideRow ? " discovery-metadata-row--wide" : ""}">
+                <span>${escapeHtml(formatDiscoveryMetadataKey(key))}</span>
+                <code>${escapeHtml(truncateText(textValue, /^disk\d+$/.test(key) ? 180 : 120))}</code>
               </div>
             `;
           }).join("")
@@ -6888,15 +7726,18 @@ function renderDiscoveryPreview() {
   }
 
   const agents = state.admin?.discoveryAgents || [];
-  const results = state.admin?.discoveryResults || [];
+  const results = mergeDiscoveryHardwareResults(state.admin?.discoveryResults || []);
   const counts = results.reduce((accumulator, result) => {
-    const stateName = result.state || "new";
+    const stateName = String(result.state || "new").trim().toLowerCase();
     accumulator[stateName] = (accumulator[stateName] || 0) + 1;
     return accumulator;
   }, {});
 
   if (elements.discoveryResultsCounter) {
     elements.discoveryResultsCounter.textContent = formatRecordsCount(results.length);
+  }
+  if (elements.discoveryStaleCleanupButton) {
+    elements.discoveryStaleCleanupButton.disabled = !results.some(isStaleDiscoveryResult);
   }
 
   if (elements.discoverySummaryGrid) {
@@ -6935,20 +7776,20 @@ function renderDiscoveryPreview() {
 
   elements.discoveryResultsTableBody.innerHTML = [...groupedResults.values()]
     .map((group) => {
-      const isCollapsed = collapsedDiscoveryGroupIds.has(group.key);
-      const groupRows = isCollapsed
-        ? ""
-        : group.results.map((result) => renderDiscoveryPreviewRow(result)).join("");
+      const isExpanded = expandedDiscoveryGroupIds.has(group.key);
+      const groupRows = isExpanded
+        ? sortDiscoveryPreviewResults(group.results).map((result) => renderDiscoveryPreviewRow(result, group.key)).join("")
+        : "";
       return `
-        <tr class="discovery-group-row">
+        <tr class="discovery-group-row" data-discovery-group-row="${escapeHtml(group.key)}">
           <td colspan="7">
             <button
               type="button"
               class="link-button discovery-group-toggle"
               data-toggle-discovery-group="${escapeHtml(group.key)}"
-              aria-expanded="${isCollapsed ? "false" : "true"}"
+              aria-expanded="${isExpanded ? "true" : "false"}"
             >
-              ${escapeHtml(isCollapsed ? "+" : "-")}
+              ${escapeHtml(isExpanded ? "-" : "+")}
               <strong>${escapeHtml(group.hostLabel)}</strong>
             </button>
             <span class="secondary-line">
@@ -6989,7 +7830,7 @@ function renderDeviceHostSourceCell(device) {
 
   if (host) {
     lines.push(`${t("device_host_short")}: ${host.name}`);
-  } else if (device.hostDeviceId) {
+  } else if (isServiceRecord(device) && device.hostDeviceId) {
     lines.push(t("device_host_orphan"));
   }
   if (device.sourceKind) {
@@ -7112,7 +7953,7 @@ function renderServicesList() {
         <td>
           <div class="service-table__name${sourceLogo ? "" : " service-table__name--plain"}">
             ${sourceLogo}
-            <strong title="${escapeHtml(service.name)}">${escapeHtml(service.name)}</strong>
+            ${renderRegistryDiscoveryName(service, "data-toggle-service-discovery")}
             ${renderRegistrySourceBadges(service)}
             ${sourceDetails.length ? `<div class="secondary-line">${escapeHtml(sourceDetails.join(" · "))}</div>` : ""}
           </div>
@@ -7154,6 +7995,7 @@ function renderServicesList() {
           </div>
         </td>
       </tr>
+      ${renderRegistryDiscoveryDetailsRow(service, 10)}
     `;
   });
 
@@ -7213,7 +8055,7 @@ function renderDevicesTable() {
       return `
         <tr class="${device.integrationStatus === "source_missing" || device.integrationStatus === "source-missing" ? "registry-row--source-missing" : ""}">
           <td>
-            <strong>${escapeHtml(device.name)}</strong>
+            ${renderRegistryDiscoveryName(device, "data-toggle-device-discovery")}
             ${renderRegistrySourceBadges(device)}
             ${note}
           </td>
@@ -7232,6 +8074,7 @@ function renderDevicesTable() {
             </div>
           </td>
         </tr>
+        ${renderRegistryDiscoveryDetailsRow(device, 9)}
       `;
     });
 
@@ -7873,7 +8716,7 @@ function normalizeDiscoveryResult(entry) {
     lastSeenAt: entry?.lastSeenAt || "",
     matchedDeviceId: String(entry?.matchedDeviceId || "").trim(),
     matchedServiceId: String(entry?.matchedServiceId || "").trim(),
-    state: String(entry?.state || "new").trim(),
+    state: String(entry?.state || "new").trim().toLowerCase(),
     receivedFields: Array.isArray(entry?.receivedFields) ? entry.receivedFields.map((field) => String(field)) : [],
     acceptedFields: Array.isArray(entry?.acceptedFields) ? entry.acceptedFields.map((field) => String(field)) : [],
     visibleFields: Array.isArray(entry?.visibleFields) ? entry.visibleFields.map((field) => String(field)) : [],
@@ -8498,7 +9341,7 @@ function resolveDeviceHost(device) {
 }
 
 function hasMissingHost(device) {
-  return Boolean(device?.hostDeviceId && !resolveDeviceHost(device));
+  return Boolean(isServiceRecord(device) && device?.hostDeviceId && !resolveDeviceHost(device));
 }
 
 function isServiceRecord(device) {
