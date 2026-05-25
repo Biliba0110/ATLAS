@@ -11,6 +11,7 @@ It is intentionally simple to run: one Python server, one SQLite database, a bro
 - subnet management with `CIDR`, notes, ranges, and optional access scopes
 - named IP range groups inside subnets
 - devices and services with IP, MAC, ports, URLs, types, notes, and history
+- Network Map topology from IPAM and discovery data
 - free IP suggestions based on stored inventory and optional `ping`
 - IP conflict detection
 - multi-user access with `admin`, `editor`, and `viewer` roles
@@ -96,7 +97,50 @@ Discovery is preview-first by default. A discovered item can be:
 
 ATLAS merges related discovery data in the UI where possible. For example, a host agent running on a Proxmox node and Proxmox hardware data for the same node are shown as one understandable entity instead of two confusing records.
 
+Docker container replacement is automated by default for Watchtower/recreate flows: if a container keeps the same name on the same linked host, ATLAS updates the existing service identity instead of leaving an old duplicate. Admins can disable this in `Integrations -> Discovery -> Agents & Policy -> Data Policy`.
+
+Bulk stale cleanup removes the stale preview rows, optional agent-owned registry records, and the discovery audit events tied to those deleted rows while keeping the cleanup event itself.
+
 The Discovery Debug view can show stored raw metadata, filter by agent/kind, and choose which raw keys are visible or hidden for each entity.
+
+## Network Map
+
+The Network Map is the 0.4 topology layer. It builds a readable graph from IPAM records, services, and discovery results.
+
+The UI includes:
+
+- simple and advanced map modes
+- subnet, layer, source, and status filters
+- zoomable SVG graph
+- subnet context cards
+- colored network, hypervisor, Kubernetes, and host-to-service links
+- capability-based layer visibility for admin/viewer users
+
+The topology API is available at:
+
+```text
+GET /api/topology
+```
+
+It returns:
+
+- `nodes`: normalized topology objects such as `subnet`, `core-router`, `switch`, `host`, `service`, `container`, `hypervisor`, `vm`, `lxc`, `kubernetes-service`, `kubernetes-pod`, `kubernetes-workload`, and `iot`
+- `links`: normalized relationships with `source`, `target`, `kind`, `confidence`, and `graphSource`
+- `interfaces`: normalized node addresses with IP, MAC, subnet, confidence, and source metadata
+- `capabilities`: layer visibility and advanced-mode availability for the current user
+
+Supported link kinds:
+
+- `core-subnet`: core router anchors a subnet
+- `subnet-member`: subnet contains a host, service, workload, or IoT object
+- `core-member`: UI-collapsed subnet membership shown through the core router
+- `host-service`: host provides a service/container
+- `hypervisor-guest`: Proxmox hypervisor contains a VM/LXC
+- `kubernetes-service-workload`: Kubernetes Service selector matches a Pod/workload
+
+`confidence` is `high`, `medium`, or `low`. `graphSource` is `manual`, `ipam`, `discovery`, or `inferred`.
+
+The map is generated automatically. Manual map editing, pinned node positions, and manual topology overrides are intentionally kept for a later version.
 
 ## Discovery Security
 
@@ -170,6 +214,23 @@ Example:
 ```bash
 ATLAS_PORT=4180 ATLAS_DB_PATH=/srv/atlas/atlas.db python3 server.py
 ```
+
+## Testing
+
+Run the full regression suite with:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Or run focused suites:
+
+```bash
+python3 -m unittest tests.test_topology
+python3 -m unittest tests.test_discovery_integrity
+```
+
+The fixtures cover subnet-to-host, host-to-service, Proxmox hypervisor-to-VM/LXC, Kubernetes Service-to-Pod, IoT-to-subnet, admin/viewer topology capability differences, Docker host-scoped replacement, Watchtower recreate protection, and stale discovery audit cleanup.
 
 ## Project Files
 

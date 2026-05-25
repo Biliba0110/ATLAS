@@ -11,6 +11,7 @@ ATLAS — self-hosted IPAM, реестр сети и лёгкая discovery-ко
 - управление подсетями с `CIDR`, заметками, диапазонами и опциональными группами доступа
 - именованные IP-диапазоны внутри подсетей
 - устройства и сервисы с IP, MAC, портами, URL, типами, заметками и историей
+- Network Map топология на базе IPAM и discovery
 - подбор свободного IP по базе и опциональному `ping`
 - обнаружение конфликтов IP
 - многопользовательский доступ с ролями `admin`, `editor`, `viewer`
@@ -96,7 +97,50 @@ ATLAS принимает подписанные snapshots от опционал�
 
 ATLAS объединяет связанные discovery-данные в интерфейсе, где это возможно. Например, host-агент на Proxmox node и Proxmox hardware data той же node показываются как одна понятная сущность, а не как две дублирующиеся записи.
 
+Подмена обновлённых Docker-контейнеров включена по умолчанию для Watchtower/recreate сценариев: если контейнер сохранил имя на том же связанном хосте, ATLAS обновит identity существующего сервиса вместо старого дубля. Администратор может выключить это в `Интеграции -> Discovery -> Agents & Policy -> Data Policy`.
+
+Массовая очистка устаревших удаляет stale preview rows, опциональные agent-owned записи реестра и audit events, связанные с удалёнными rows, оставляя само событие cleanup в аудите.
+
 Discovery Debug умеет показывать сохранённые raw metadata, фильтровать по агенту/kind и вручную выбирать, какие raw keys видимы или скрыты для каждой сущности.
+
+## Network Map
+
+Network Map — это topology-слой версии 0.4. Он строит граф инфраструктуры из IPAM-записей, сервисов и discovery-results.
+
+В UI есть:
+
+- режимы simple и advanced
+- фильтры по subnet, layer, source и status
+- SVG-граф с масштабом
+- отдельные карточки контекста подсетей
+- цветные связи сети, гипервизоров, Kubernetes и host-to-service
+- видимость слоёв по capabilities текущего пользователя
+
+Topology API:
+
+```text
+GET /api/topology
+```
+
+Ответ содержит:
+
+- `nodes`: нормализованные объекты `subnet`, `core-router`, `switch`, `host`, `service`, `container`, `hypervisor`, `vm`, `lxc`, `kubernetes-service`, `kubernetes-pod`, `kubernetes-workload`, `iot`
+- `links`: связи с `source`, `target`, `kind`, `confidence`, `graphSource`
+- `interfaces`: адреса узлов с IP, MAC, subnet, confidence и source metadata
+- `capabilities`: доступные слои и advanced mode для текущего пользователя
+
+Поддерживаемые связи:
+
+- `core-subnet`: core router является якорем подсети
+- `subnet-member`: подсеть содержит host, service, workload или IoT object
+- `core-member`: membership подсети в UI показан через core router
+- `host-service`: host предоставляет service/container
+- `hypervisor-guest`: Proxmox hypervisor содержит VM/LXC
+- `kubernetes-service-workload`: Kubernetes Service selector совпал с Pod/workload
+
+`confidence` может быть `high`, `medium`, `low`. `graphSource` может быть `manual`, `ipam`, `discovery`, `inferred`.
+
+Карта строится автоматически. Ручное редактирование карты, pinned positions и manual topology overrides лучше вынести в следующую версию.
 
 ## Безопасность discovery
 
@@ -170,6 +214,23 @@ ATLAS хранит состояние в SQLite.
 ```bash
 ATLAS_PORT=4180 ATLAS_DB_PATH=/srv/atlas/atlas.db python3 server.py
 ```
+
+## Тесты
+
+Полный regression suite запускается так:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Или можно запускать отдельные suites:
+
+```bash
+python3 -m unittest tests.test_topology
+python3 -m unittest tests.test_discovery_integrity
+```
+
+Fixtures проверяют связи subnet-to-host, host-to-service, Proxmox hypervisor-to-VM/LXC, Kubernetes Service-to-Pod, IoT-to-subnet, различия capabilities для admin/viewer, Docker host-scoped replacement, защиту Watchtower recreate и очистку stale discovery audit.
 
 ## Файлы проекта
 

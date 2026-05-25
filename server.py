@@ -62,6 +62,9 @@ DEFAULT_DISCOVERY_DATA_POLICY = {
     "storeRawMetadata": False,
     "showMetadataInPreview": False,
 }
+DEFAULT_DISCOVERY_REPLACEMENT_POLICY = {
+    "autoReplaceDockerContainers": True,
+}
 DISCOVERY_CORE_RAW_FIELDS = {
     "address",
     "containerId",
@@ -398,6 +401,10 @@ CREATE INDEX IF NOT EXISTS idx_discovery_agents_enabled ON discovery_agents(enab
 CREATE INDEX IF NOT EXISTS idx_discovery_results_agent_id ON discovery_results(agent_id);
 CREATE INDEX IF NOT EXISTS idx_discovery_results_state ON discovery_results(state);
 CREATE INDEX IF NOT EXISTS idx_discovery_results_source_lookup ON discovery_results(agent_id, source, source_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_host_repair_order ON discovery_results(state, source_kind, updated_at DESC, created_at DESC, matched_device_id, agent_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_unbound_host ON discovery_results(agent_id, host_device_id, source_kind, state);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_matched_device ON discovery_results(matched_device_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_results_matched_service ON discovery_results(matched_service_id);
 CREATE INDEX IF NOT EXISTS idx_discovery_results_last_seen ON discovery_results(last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_discovery_runs_agent_id ON discovery_runs(agent_id);
 CREATE INDEX IF NOT EXISTS idx_discovery_runs_started_at ON discovery_runs(started_at DESC);
@@ -605,6 +612,23 @@ def normalize_device_type(value: object) -> str:
         "сервер": "server",
         "серверы": "server",
         "сервери": "server",
+        "core-router": "core-router",
+        "core router": "core-router",
+        "root-router": "core-router",
+        "root router": "core-router",
+        "router": "core-router",
+        "gateway": "core-router",
+        "шлюз": "core-router",
+        "роутер": "core-router",
+        "маршрутизатор": "core-router",
+        "ядро": "core-router",
+        "ядро сети": "core-router",
+        "switch": "switch",
+        "network-switch": "switch",
+        "network switch": "switch",
+        "свитч": "switch",
+        "свич": "switch",
+        "коммутатор": "switch",
         "container": "container",
         "containers": "container",
         "контейнер": "container",
@@ -1015,6 +1039,18 @@ def ensure_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_discovery_runs_external_run_id ON discovery_runs(agent_id, external_run_id)"
         )
         connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discovery_results_host_repair_order ON discovery_results(state, source_kind, updated_at DESC, created_at DESC, matched_device_id, agent_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discovery_results_unbound_host ON discovery_results(agent_id, host_device_id, source_kind, state)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discovery_results_matched_device ON discovery_results(matched_device_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discovery_results_matched_service ON discovery_results(matched_service_id)"
+        )
+        connection.execute(
             """
             INSERT INTO app_settings (key, value, updated_at)
             VALUES (?, ?, ?)
@@ -1098,6 +1134,10 @@ def device_from_row(row: sqlite3.Row) -> dict:
         "note": row["note"],
         "createdAt": row["created_at"],
     }
+
+
+def is_template_device_row(row: sqlite3.Row) -> bool:
+    return str(row["source_kind"] or "").strip().lower() == "template"
 
 
 def scan_result_from_row(row: sqlite3.Row) -> dict:
@@ -1359,6 +1399,81 @@ def record_discovery_audit_event(
             utc_now_iso(),
         ),
     )
+
+
+def discovery_audit_event_matches_result(
+    event_row: sqlite3.Row,
+    details: dict,
+    *,
+    result_ids: set[str],
+    source_keys: set[tuple[str, str, str]],
+) -> bool:
+    direct_result_id = str(details.get("resultId") or details.get("oldResultId") or "").strip()
+    if direct_result_id in result_ids:
+        return True
+
+    raw_result_ids = details.get("resultIds")
+    if isinstance(raw_result_ids, list) and any(str(result_id or "").strip() in result_ids for result_id in raw_result_ids):
+        return True
+
+    source_id = str(details.get("sourceId") or details.get("oldSourceId") or "").strip()
+    if not source_id:
+        return False
+    source = str(details.get("source") or "").strip()
+    event_agent_id = str(event_row["agent_id"] or "").strip()
+    return any(
+        source_id == row_source_id
+        and (not source or source == row_source)
+        and (not event_agent_id or event_agent_id == row_agent_id)
+        for row_agent_id, row_source, row_source_id in source_keys
+    )
+
+
+def cleanup_discovery_audit_events_for_results(
+    connection: sqlite3.Connection,
+    result_rows: list[sqlite3.Row],
+) -> int:
+    if not result_rows:
+        return 0
+    result_ids = {str(row["id"] or "").strip() for row in result_rows if str(row["id"] or "").strip()}
+    source_keys = {
+        (
+            str(row["agent_id"] or "").strip(),
+            str(row["source"] or "").strip(),
+            str(row["source_id"] or "").strip(),
+        )
+        for row in result_rows
+        if str(row["source_id"] or "").strip()
+    }
+    if not result_ids and not source_keys:
+        return 0
+
+    audit_rows = connection.execute(
+        """
+        SELECT id, agent_id, details
+        FROM discovery_audit_events
+        WHERE event_type != 'discovery_stale_cleanup'
+          AND details != '{}'
+        """
+    ).fetchall()
+    audit_ids: list[int] = []
+    for audit_row in audit_rows:
+        details = decode_json_object(audit_row["details"] or "{}")
+        if discovery_audit_event_matches_result(
+            audit_row,
+            details,
+            result_ids=result_ids,
+            source_keys=source_keys,
+        ):
+            audit_ids.append(int(audit_row["id"]))
+
+    if not audit_ids:
+        return 0
+    cursor = connection.execute(
+        f"DELETE FROM discovery_audit_events WHERE id IN ({','.join('?' for _ in audit_ids)})",
+        audit_ids,
+    )
+    return cursor.rowcount
 
 
 def get_discovery_result_row(connection: sqlite3.Connection, result_id: str) -> sqlite3.Row:
@@ -2111,13 +2226,734 @@ def enrich_subnet(subnet: dict, access_groups_map: dict[str, dict]) -> dict:
     }
 
 
+def topology_safe_ip_int(value: object) -> int | None:
+    try:
+        return ip_to_int_value(str(value or "").strip())
+    except ValueError:
+        return None
+
+
+def topology_node_kind_for_device(device: dict) -> str:
+    if device.get("type") == "service":
+        return "service"
+    source_kind = str(device.get("sourceKind") or "").strip().lower()
+    source = str(device.get("source") or "").strip().lower()
+    device_type = str(device.get("type") or "").strip().lower()
+    if device_type in {"core-router", "switch"}:
+        return device_type
+    if device.get("type") == "iot" or source == "iot" or source_kind in {"iot", "sensor", "controller"}:
+        return "iot"
+    if source == "proxmox" and source_kind in {"vm", "lxc", "hypervisor"}:
+        return source_kind
+    if source == "kubernetes":
+        if source_kind == "service":
+            return "kubernetes-service"
+        if source_kind == "pod":
+            return "kubernetes-pod"
+        return "kubernetes-workload"
+    if source_kind in {"container", "pod"} or device.get("type") == "container":
+        return "container"
+    return "host"
+
+
+def topology_node_kind_for_discovery(row: sqlite3.Row, raw: dict) -> str:
+    source = str(row["source"] or "").strip().lower()
+    source_kind = str(row["source_kind"] or "").strip().lower()
+    raw_type = str(raw.get("type") or "").strip().lower()
+    if source == "iot" or source_kind in {"iot", "sensor", "controller"} or raw_type in {"iot", "sensor", "controller"}:
+        return "iot"
+    if source == "proxmox" and source_kind in {"hypervisor", "vm", "lxc"}:
+        return source_kind
+    if source == "kubernetes":
+        if source_kind == "service":
+            return "kubernetes-service"
+        if source_kind == "pod":
+            return "kubernetes-pod"
+        return "kubernetes-workload"
+    if source_kind in {"container", "pod"}:
+        return "container"
+    if source_kind == "service":
+        return "service"
+    if raw_type == "hypervisor":
+        return "hypervisor"
+    return "host"
+
+
+def topology_node_role(kind: str) -> str:
+    if kind == "subnet":
+        return "network"
+    if kind in {"core-router", "switch"}:
+        return "network"
+    if kind in {"hypervisor", "vm", "lxc"}:
+        return "compute"
+    if kind in {"service", "container", "kubernetes", "kubernetes-pod", "kubernetes-service", "kubernetes-workload"}:
+        return "workload"
+    if kind == "iot":
+        return "iot"
+    return "host"
+
+
+def topology_node_status(value: object) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"running", "online", "active", "up", "ok", "healthy"}:
+        return "up"
+    if status in {"stopped", "offline", "down", "dead", "stale", "source-missing", "source_missing", "error", "unreachable"}:
+        return "down"
+    if status in {"pending", "unknown", "new", "matched"}:
+        return status
+    return status or "unknown"
+
+
+def topology_merge_status(*values: object) -> str:
+    rank = {
+        "up": 50,
+        "pending": 40,
+        "known": 30,
+        "unknown": 20,
+        "down": 10,
+    }
+    statuses = [topology_node_status(value) for value in values if str(value or "").strip()]
+    if not statuses:
+        return "unknown"
+    return max(statuses, key=lambda status: rank.get(status, 30))
+
+
+def topology_apply_node_status(node: dict, status: object) -> None:
+    node["status"] = topology_merge_status(node.get("status"), status)
+
+
+def topology_freshness_status(last_seen_at: object, interval_seconds: object = 0) -> str | None:
+    text = str(last_seen_at or "").strip()
+    if not text:
+        return None
+    try:
+        last_seen = parse_iso8601(text)
+    except ValueError:
+        return None
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    try:
+        interval = int(interval_seconds or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    expected = max(15, interval or 60)
+    age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+    if age <= expected + 20:
+        return "up"
+    if age <= (expected * 2) + 75:
+        return "pending"
+    return "down"
+
+
+def topology_effective_device_status(device: dict) -> str:
+    status = topology_node_status(device.get("integrationStatus") or "")
+    source = str(device.get("source") or "").strip().lower()
+    last_seen_at = device.get("lastSeenAt")
+    if source and source not in {"manual", "ipam"} and last_seen_at:
+        freshness = topology_freshness_status(last_seen_at)
+        if freshness == "down":
+            return "down"
+        if freshness == "pending" and status == "up":
+            return "pending"
+    return status if status != "unknown" else "known"
+
+
+def topology_effective_discovery_status(row: sqlite3.Row) -> str:
+    keys = set(row.keys())
+    agent_enabled = bool(row["agent_enabled"]) if "agent_enabled" in keys else True
+    interval_seconds = row["agent_interval_seconds"] if "agent_interval_seconds" in keys else 0
+    last_seen_at = row["agent_last_seen_at"] if "agent_last_seen_at" in keys else row["last_seen_at"]
+    source_status = topology_node_status(row["status"] or row["state"])
+    if not agent_enabled:
+        return "down"
+    freshness = topology_freshness_status(last_seen_at or row["last_seen_at"], interval_seconds)
+    if freshness == "down":
+        return "down"
+    if freshness == "pending" and source_status == "up":
+        return "pending"
+    return source_status
+
+
+def topology_has_value(value: object) -> bool:
+    return value is not None and value != "" and value != []
+
+
+def topology_add_node(nodes: dict[str, dict], node: dict) -> dict:
+    existing = nodes.get(node["id"])
+    if existing is None:
+        nodes[node["id"]] = node
+        return node
+    for key, value in node.items():
+        if key == "status":
+            topology_apply_node_status(existing, value)
+            continue
+        if key == "metadata" and isinstance(value, dict):
+            existing.setdefault("metadata", {}).update({
+                item_key: item_value
+                for item_key, item_value in value.items()
+                if topology_has_value(item_value)
+            })
+            continue
+        if not topology_has_value(existing.get(key)) and topology_has_value(value):
+            existing[key] = value
+    return existing
+
+
+def topology_add_link(links: dict[str, dict], link: dict) -> None:
+    if link["source"] == link["target"]:
+        return
+    existing = links.get(link["id"])
+    if existing is None:
+        links[link["id"]] = link
+        return
+    confidence_rank = {"low": 1, "medium": 2, "high": 3}
+    if confidence_rank.get(link.get("confidence", "low"), 0) > confidence_rank.get(existing.get("confidence", "low"), 0):
+        existing.update(link)
+
+
+def topology_interface_for_node(
+    node_id: str,
+    *,
+    ip: str = "",
+    mac: str = "",
+    subnet_id: str = "",
+    source: str = "ipam",
+    confidence: str = "high",
+    graph_source: str = "",
+) -> dict | None:
+    if not ip and not mac:
+        return None
+    suffix = ip or mac or "iface"
+    return {
+        "id": f"iface:{node_id}:{suffix}",
+        "nodeId": node_id,
+        "name": "primary",
+        "ip": ip,
+        "mac": mac,
+        "subnetId": subnet_id,
+        "source": source,
+        "graphSource": graph_source or source,
+        "confidence": confidence,
+    }
+
+
+def topology_node_layer(kind: str, source: str = "") -> str:
+    normalized_kind = str(kind or "").strip().lower()
+    normalized_source = str(source or "").strip().lower()
+    if normalized_kind == "subnet":
+        return "subnets"
+    if normalized_kind in {"core-router", "switch"}:
+        return "hosts"
+    if normalized_kind == "iot":
+        return "iot"
+    if normalized_source == "kubernetes":
+        return "kubernetes"
+    if normalized_source == "proxmox" or normalized_kind in {"hypervisor", "vm", "lxc"}:
+        return "proxmox"
+    if normalized_kind == "container":
+        return "containers"
+    if normalized_kind == "service":
+        return "services"
+    return "hosts"
+
+
+def topology_clean_label_map(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    labels: dict[str, str] = {}
+    for key, item_value in value.items():
+        label_key = str(key or "").strip()
+        if not label_key:
+            continue
+        labels[label_key] = str(item_value or "").strip()
+    return labels
+
+
+def topology_kubernetes_namespace(raw: dict) -> str:
+    return str(raw.get("namespace") or "default").strip() or "default"
+
+
+def topology_kubernetes_selector_matches(selector: dict[str, str], labels: dict[str, str]) -> bool:
+    if not selector:
+        return False
+    return all(labels.get(key) == value for key, value in selector.items())
+
+
+def topology_graph_source_for_device(device: dict) -> str:
+    source = str(device.get("source") or "").strip().lower()
+    if not source or source == "manual":
+        return "manual"
+    if source == "ipam":
+        return "ipam"
+    return "discovery"
+
+
+def topology_normalized_label(value: object) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def topology_promote_matched_discovery_node(
+    node: dict,
+    *,
+    kind: str,
+    row: sqlite3.Row,
+    raw: dict,
+) -> None:
+    topology_apply_node_status(
+        node,
+        topology_effective_discovery_status(row),
+    )
+    node.update({
+        "kind": kind,
+        "role": topology_node_role(kind),
+        "layer": topology_node_layer(kind, row["source"]),
+        "source": row["source"],
+        "sourceKind": row["source_kind"],
+        "graphSource": "discovery",
+        "discoveryResultId": row["id"],
+        "agentId": row["agent_id"],
+        "agentName": row["agent_name"] or node.get("agentName", ""),
+    })
+    node.setdefault("metadata", {})
+    node["metadata"].update({
+        "discoveryResultId": row["id"],
+        "agentId": row["agent_id"],
+        "agentName": row["agent_name"] or "",
+        "lastSeenAt": row["last_seen_at"],
+        "node": raw.get("node", ""),
+        "vmid": raw.get("vmid", ""),
+        "os": raw.get("os", ""),
+        "kernel": raw.get("kernel", ""),
+    })
+
+
+def build_topology_payload(
+    connection: sqlite3.Connection,
+    user: dict,
+    subnets: list[dict],
+    devices: list[dict],
+    access_groups_map: dict[str, dict],
+) -> dict:
+    nodes: dict[str, dict] = {}
+    links: dict[str, dict] = {}
+    interfaces: dict[str, dict] = {}
+    device_node_ids: dict[str, str] = {}
+    host_node_by_label: dict[str, str] = {}
+    subnet_by_id = {subnet["id"]: subnet for subnet in subnets}
+    host_by_ip: dict[str, str] = {}
+
+    for subnet in subnets:
+        node_id = f"subnet:{subnet['id']}"
+        topology_add_node(nodes, {
+            "id": node_id,
+            "kind": "subnet",
+            "role": "network",
+            "layer": "subnets",
+            "label": subnet["name"],
+            "cidr": subnet["cidr"],
+            "status": "known",
+            "source": "ipam",
+            "sourceKind": "subnet",
+            "graphSource": "ipam",
+            "subnetId": subnet["id"],
+            "accessGroupId": subnet.get("accessGroupId", ""),
+            "accessGroupName": subnet.get("accessGroupName", ""),
+            "metadata": {
+                "network": subnet.get("network", ""),
+                "broadcast": subnet.get("broadcast", ""),
+                "poolSize": subnet.get("poolSize", 0),
+                "scanEnabled": subnet.get("scanEnabled", False),
+            },
+        })
+
+    for device in devices:
+        kind = topology_node_kind_for_device(device)
+        node_id = f"device:{device['id']}"
+        device_node_ids[device["id"]] = node_id
+        subnet = subnet_by_id.get(device.get("subnetId", ""))
+        access_group_id = subnet.get("accessGroupId", "") if subnet else ""
+        topology_add_node(nodes, {
+            "id": node_id,
+            "kind": kind,
+            "role": topology_node_role(kind),
+            "layer": topology_node_layer(kind, device.get("source") or "ipam"),
+            "label": device["name"],
+            "ip": device.get("ip", ""),
+            "mac": device.get("mac", ""),
+            "status": topology_effective_device_status(device),
+            "source": device.get("source") or "ipam",
+            "sourceKind": device.get("sourceKind") or device.get("type") or kind,
+            "graphSource": topology_graph_source_for_device(device),
+            "subnetId": device.get("subnetId", ""),
+            "deviceId": "" if device.get("type") == "service" else device["id"],
+            "serviceId": device["id"] if device.get("type") == "service" else "",
+            "hostDeviceId": device.get("hostDeviceId", ""),
+            "accessGroupId": access_group_id,
+            "accessGroupName": access_groups_map.get(access_group_id, {}).get("name", "") if access_group_id else "",
+            "metadata": {
+                "ports": device.get("ports", ""),
+                "accessPort": device.get("accessPort", ""),
+                "protocol": device.get("protocol", ""),
+                "serviceUrl": device.get("serviceUrl", ""),
+                "lastSeenAt": device.get("lastSeenAt", ""),
+            },
+        })
+        interface = topology_interface_for_node(
+            node_id,
+            ip=device.get("ip", ""),
+            mac=device.get("mac", ""),
+            subnet_id=device.get("subnetId", ""),
+            graph_source=topology_graph_source_for_device(device),
+        )
+        if interface:
+            interfaces[interface["id"]] = interface
+        if device.get("type") != "service" and device.get("ip"):
+            host_by_ip.setdefault(device["ip"], node_id)
+        if device.get("type") != "service":
+            normalized_label = topology_normalized_label(device.get("name"))
+            if normalized_label:
+                host_node_by_label.setdefault(normalized_label, node_id)
+        if device.get("subnetId") in subnet_by_id and kind != "core-router":
+            topology_add_link(links, {
+                "id": f"link:subnet:{device['subnetId']}:device:{device['id']}",
+                "source": f"subnet:{device['subnetId']}",
+                "target": node_id,
+                "kind": "subnet-member",
+                "confidence": "high",
+                "reason": "Device IP belongs to this subnet.",
+                "sourceType": "ipam",
+                "graphSource": "ipam",
+            })
+
+    for device in devices:
+        if device.get("type") != "service":
+            continue
+        service_node_id = device_node_ids.get(device["id"])
+        if not service_node_id:
+            continue
+        host_node_id = device_node_ids.get(device.get("hostDeviceId", ""))
+        confidence = "high"
+        reason = "Service has an explicit host link."
+        graph_source = topology_graph_source_for_device(device)
+        if not host_node_id and device.get("ip"):
+            host_node_id = host_by_ip.get(device["ip"])
+            confidence = "medium"
+            reason = "Service shares an IP address with a host."
+            graph_source = "inferred"
+        if host_node_id:
+            topology_add_link(links, {
+                "id": f"link:host-service:{host_node_id}:{service_node_id}",
+                "source": host_node_id,
+                "target": service_node_id,
+                "kind": "host-service",
+                "confidence": confidence,
+                "reason": reason,
+                "sourceType": "ipam",
+                "graphSource": graph_source,
+            })
+
+    if is_admin(user):
+        discovery_rows = list(connection.execute(
+            """
+            SELECT
+                discovery_results.*,
+                discovery_agents.name AS agent_name,
+                discovery_agents.enabled AS agent_enabled,
+                discovery_agents.last_seen_at AS agent_last_seen_at,
+                discovery_agents.reported_interval_seconds AS agent_interval_seconds
+            FROM discovery_results
+            LEFT JOIN discovery_agents ON discovery_agents.id = discovery_results.agent_id
+            WHERE discovery_results.state != 'ignored'
+            ORDER BY discovery_results.updated_at DESC, discovery_results.created_at DESC
+            """
+        ))
+    else:
+        visible_device_ids = set(device_node_ids)
+        discovery_rows = list(connection.execute(
+            """
+            SELECT
+                discovery_results.*,
+                discovery_agents.name AS agent_name,
+                discovery_agents.enabled AS agent_enabled,
+                discovery_agents.last_seen_at AS agent_last_seen_at,
+                discovery_agents.reported_interval_seconds AS agent_interval_seconds
+            FROM discovery_results
+            LEFT JOIN discovery_agents ON discovery_agents.id = discovery_results.agent_id
+            WHERE discovery_results.state != 'ignored'
+              AND (
+                discovery_results.matched_device_id != ''
+                OR discovery_results.matched_service_id != ''
+              )
+            ORDER BY discovery_results.updated_at DESC, discovery_results.created_at DESC
+            """
+        ))
+        discovery_rows = [
+            row for row in discovery_rows
+            if row["matched_device_id"] in visible_device_ids or row["matched_service_id"] in visible_device_ids
+        ]
+
+    proxmox_hypervisor_by_agent_node: dict[tuple[str, str], str] = {}
+    proxmox_child_rows: list[tuple[sqlite3.Row, dict, str]] = []
+    kubernetes_pods: list[tuple[sqlite3.Row, dict, str]] = []
+    kubernetes_services: list[tuple[sqlite3.Row, dict, str]] = []
+
+    for row in discovery_rows:
+        raw = decode_json_object(row["raw"] or "{}")
+        if is_discovery_template_row(row):
+            continue
+        matched_id = row["matched_service_id"] or row["matched_device_id"] or ""
+        node_id = device_node_ids.get(matched_id, "")
+        discovery_kind = topology_node_kind_for_discovery(row, raw)
+        if node_id and row["source"] == "proxmox" and row["source_kind"] in {"hypervisor", "vm", "lxc"}:
+            topology_promote_matched_discovery_node(
+                nodes[node_id],
+                kind=discovery_kind,
+                row=row,
+                raw=raw,
+            )
+        if not node_id and row["source"] == "proxmox" and row["source_kind"] == "hypervisor":
+            for label_candidate in [raw.get("node"), row["name"], row["agent_name"]]:
+                node_id = host_node_by_label.get(topology_normalized_label(label_candidate), "")
+                if node_id:
+                    topology_promote_matched_discovery_node(
+                        nodes[node_id],
+                        kind="hypervisor",
+                        row=row,
+                        raw=raw,
+                    )
+                    break
+        if not node_id:
+            kind = discovery_kind
+            node_id = f"discovery:{row['id']}"
+            topology_add_node(nodes, {
+                "id": node_id,
+                "kind": kind,
+                "role": topology_node_role(kind),
+                "layer": topology_node_layer(kind, row["source"]),
+                "label": row["name"],
+                "ip": raw.get("primaryIp") or "",
+                "mac": raw.get("mac") or "",
+                "status": topology_effective_discovery_status(row),
+                "source": row["source"],
+                "sourceKind": row["source_kind"],
+                "graphSource": "discovery",
+                "discoveryResultId": row["id"],
+                "agentId": row["agent_id"],
+                "agentName": row["agent_name"] or "",
+                "metadata": {
+                    "state": row["state"],
+                    "lastSeenAt": row["last_seen_at"],
+                    "node": raw.get("node", ""),
+                    "vmid": raw.get("vmid", ""),
+                    "os": raw.get("os", ""),
+                    "deviceClass": raw.get("deviceClass", ""),
+                    "manufacturer": raw.get("manufacturer") or raw.get("vendor", ""),
+                    "model": raw.get("model", ""),
+                    "firmware": raw.get("firmware") or raw.get("firmwareVersion", ""),
+                    "location": raw.get("location", ""),
+                    "room": raw.get("room", ""),
+                    "battery": raw.get("battery") or raw.get("batteryLevel", ""),
+                    "signal": raw.get("signal") or raw.get("rssi", ""),
+                },
+            })
+            ip_values = raw.get("ips") if isinstance(raw.get("ips"), list) else [raw.get("primaryIp")]
+            for ip_value in ip_values:
+                ip = str(ip_value or "").strip()
+                if not ip:
+                    continue
+                subnet_id = ""
+                ip_int = topology_safe_ip_int(ip)
+                if ip_int is not None:
+                    subnet = next((item for item in subnets if item["networkInt"] <= ip_int <= item["broadcastInt"]), None)
+                    subnet_id = subnet["id"] if subnet else ""
+                interface = topology_interface_for_node(
+                    node_id,
+                    ip=ip,
+                    mac=str(raw.get("mac") or ""),
+                    subnet_id=subnet_id,
+                    source=row["source"],
+                    confidence="medium",
+                    graph_source="discovery",
+                )
+                if interface:
+                    interfaces[interface["id"]] = interface
+                if subnet_id:
+                    topology_add_link(links, {
+                        "id": f"link:subnet:{subnet_id}:discovery:{row['id']}:{ip}",
+                        "source": f"subnet:{subnet_id}",
+                        "target": node_id,
+                        "kind": "subnet-member",
+                        "confidence": "medium",
+                        "reason": "Discovery IP belongs to this subnet.",
+                        "sourceType": "discovery",
+                        "graphSource": "inferred",
+                    })
+        elif node_id and row["source"] == "proxmox" and row["source_kind"] in {"vm", "lxc"}:
+            node = nodes.get(node_id, {})
+            ip_values = raw.get("ips") if isinstance(raw.get("ips"), list) else [raw.get("primaryIp")]
+            for ip_value in ip_values:
+                ip = str(ip_value or "").strip()
+                if not ip:
+                    continue
+                subnet_id = node.get("subnetId") or ""
+                if not subnet_id:
+                    ip_int = topology_safe_ip_int(ip)
+                    if ip_int is not None:
+                        subnet = next((item for item in subnets if item["networkInt"] <= ip_int <= item["broadcastInt"]), None)
+                        subnet_id = subnet["id"] if subnet else ""
+                interface = topology_interface_for_node(
+                    node_id,
+                    ip=ip,
+                    mac=str(raw.get("mac") or node.get("mac") or ""),
+                    subnet_id=subnet_id,
+                    source=row["source"],
+                    confidence="high",
+                    graph_source="discovery",
+                )
+                if interface:
+                    interfaces[interface["id"]] = interface
+        else:
+            nodes[node_id]["status"] = topology_merge_status(
+                nodes[node_id].get("status"),
+                topology_effective_discovery_status(row),
+            )
+            nodes[node_id].setdefault("metadata", {})
+            nodes[node_id]["metadata"].update({
+                "discoveryResultId": row["id"],
+                "agentId": row["agent_id"],
+                "agentName": row["agent_name"] or "",
+                "lastSeenAt": row["last_seen_at"],
+            })
+
+        if row["source"] == "proxmox" and row["source_kind"] == "hypervisor":
+            node_name = str(raw.get("node") or row["name"] or "").strip().lower()
+            if node_name:
+                proxmox_hypervisor_by_agent_node[(row["agent_id"], node_name)] = node_id
+        if row["source"] == "proxmox" and row["source_kind"] in {"vm", "lxc"}:
+            proxmox_child_rows.append((row, raw, node_id))
+        if row["source"] == "kubernetes" and row["source_kind"] == "pod":
+            kubernetes_pods.append((row, raw, node_id))
+        if row["source"] == "kubernetes" and row["source_kind"] == "service":
+            kubernetes_services.append((row, raw, node_id))
+
+    for row, raw, child_node_id in proxmox_child_rows:
+        node_name = str(raw.get("node") or "").strip().lower()
+        hypervisor_node_id = proxmox_hypervisor_by_agent_node.get((row["agent_id"], node_name))
+        if not hypervisor_node_id:
+            continue
+        topology_add_link(links, {
+            "id": f"link:hypervisor:{hypervisor_node_id}:{child_node_id}",
+            "source": hypervisor_node_id,
+            "target": child_node_id,
+            "kind": "hypervisor-guest",
+            "confidence": "high",
+            "reason": "Proxmox reports this VM/LXC on the hypervisor node.",
+            "sourceType": "discovery",
+            "graphSource": "discovery",
+        })
+
+    core_router_nodes = [
+        node for node in nodes.values()
+        if node.get("kind") == "core-router" and node.get("subnetId") in subnet_by_id
+    ]
+    for core_node in core_router_nodes:
+        subnet_id = core_node["subnetId"]
+        topology_add_link(links, {
+            "id": f"link:core-subnet:{core_node['id']}:{subnet_id}",
+            "source": core_node["id"],
+            "target": f"subnet:{subnet_id}",
+            "kind": "core-subnet",
+            "confidence": "high",
+            "reason": "Core router anchors this subnet.",
+            "sourceType": "ipam",
+            "graphSource": core_node.get("graphSource") or "manual",
+        })
+
+    for service_row, service_raw, service_node_id in kubernetes_services:
+        namespace = topology_kubernetes_namespace(service_raw)
+        selector = topology_clean_label_map(service_raw.get("selector"))
+        if not selector:
+            continue
+        for pod_row, pod_raw, pod_node_id in kubernetes_pods:
+            if pod_row["agent_id"] != service_row["agent_id"]:
+                continue
+            if topology_kubernetes_namespace(pod_raw) != namespace:
+                continue
+            labels = topology_clean_label_map(pod_raw.get("labels"))
+            if not topology_kubernetes_selector_matches(selector, labels):
+                continue
+            topology_add_link(links, {
+                "id": f"link:kubernetes-service:{service_node_id}:{pod_node_id}",
+                "source": service_node_id,
+                "target": pod_node_id,
+                "kind": "kubernetes-service-workload",
+                "confidence": "high",
+                "reason": "Kubernetes Service selector matches Pod labels in the same namespace.",
+                "sourceType": "discovery",
+                "graphSource": "discovery",
+            })
+
+    ordered_nodes = sorted(nodes.values(), key=lambda item: (item.get("kind", ""), item.get("label", "").lower(), item.get("id", "")))
+    ordered_links = sorted(links.values(), key=lambda item: (item.get("kind", ""), item.get("source", ""), item.get("target", "")))
+    ordered_interfaces = sorted(interfaces.values(), key=lambda item: (item.get("nodeId", ""), item.get("ip", ""), item.get("mac", "")))
+    return {
+        "schema": "atlas.topology.v1",
+        "generatedAt": utc_now_iso(),
+        "nodes": ordered_nodes,
+        "links": ordered_links,
+        "interfaces": ordered_interfaces,
+        "summary": {
+            "nodes": len(ordered_nodes),
+            "links": len(ordered_links),
+            "interfaces": len(ordered_interfaces),
+            "subnets": sum(1 for item in ordered_nodes if item.get("kind") == "subnet"),
+            "hosts": sum(1 for item in ordered_nodes if item.get("role") == "host"),
+            "workloads": sum(1 for item in ordered_nodes if item.get("role") == "workload"),
+        },
+        "capabilities": {
+            "advancedMode": is_admin(user),
+            "layers": {
+                "subnets": True,
+                "hosts": True,
+                "services": True,
+                "containers": True,
+                "kubernetes": is_admin(user),
+                "proxmox": is_admin(user),
+                "iot": True,
+            },
+        },
+    }
+
+
 def subnet_from_db_row_with_access(row: sqlite3.Row) -> dict:
     subnet = subnet_from_row(row)
     subnet["accessGroupId"] = row["access_group_id"] or ""
     return subnet
 
 
+def load_topology_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
+    repair_orphan_discovery_matches(connection, actor="system")
+    repair_agent_host_links_from_matched_hosts(connection)
+    all_access_groups = list_access_groups(connection)
+    access_groups_map = {group["id"]: group for group in all_access_groups}
+    subnets_all = [
+        subnet_from_db_row_with_access(row)
+        for row in connection.execute("SELECT * FROM subnets ORDER BY created_at DESC, rowid DESC")
+    ]
+    subnets = [enrich_subnet(subnet, access_groups_map) for subnet in filter_visible_subnets(subnets_all, user)]
+    visible_subnet_ids = {subnet["id"] for subnet in subnets}
+    devices = [
+        device_from_row(row)
+        for row in connection.execute("SELECT * FROM devices ORDER BY created_at DESC, rowid DESC")
+        if not is_template_device_row(row)
+        and (row["subnet_id"] in visible_subnet_ids or (is_admin(user) and not row["subnet_id"]))
+    ]
+    return build_topology_payload(connection, user, subnets, devices, access_groups_map)
+
+
 def load_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
+    repair_orphan_discovery_matches(connection, actor="system")
+    repair_agent_host_links_from_matched_hosts(connection)
     all_access_groups = list_access_groups(connection)
     access_groups_map = {group["id"]: group for group in all_access_groups}
     subnets_all = [
@@ -2134,7 +2970,8 @@ def load_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
     devices = [
         device_from_row(row)
         for row in connection.execute("SELECT * FROM devices ORDER BY created_at DESC, rowid DESC")
-        if row["subnet_id"] in visible_subnet_ids or (is_admin(user) and not row["subnet_id"])
+        if not is_template_device_row(row)
+        and (row["subnet_id"] in visible_subnet_ids or (is_admin(user) and not row["subnet_id"]))
     ]
     scan_results = [
         scan_result_from_row(row)
@@ -2162,10 +2999,12 @@ def load_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
         group for group in all_access_groups if group["id"] in set(user.get("accessGroupIds", []))
     ]
     preferences = load_user_preferences(connection, user["id"])
+    topology = build_topology_payload(connection, user, subnets, devices, access_groups_map)
     return {
         "subnets": subnets,
         "groups": groups,
         "devices": devices,
+        "topology": topology,
         "scanResults": scan_results,
         "history": history,
         "accessGroups": auth_access_groups,
@@ -2390,6 +3229,32 @@ def get_discovery_data_policy(connection: sqlite3.Connection | None = None) -> d
         return resolve_policy(temporary_connection)
 
 
+def normalize_discovery_replacement_policy(value: object) -> dict:
+    policy = dict(DEFAULT_DISCOVERY_REPLACEMENT_POLICY)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = {}
+    if not isinstance(value, dict):
+        return policy
+    for key, default_value in DEFAULT_DISCOVERY_REPLACEMENT_POLICY.items():
+        if key in value:
+            policy[key] = normalize_boolean(value.get(key), default_value)
+    return policy
+
+
+def get_discovery_replacement_policy(connection: sqlite3.Connection | None = None) -> dict:
+    def resolve_policy(active_connection: sqlite3.Connection) -> dict:
+        return normalize_discovery_replacement_policy(get_setting(active_connection, "discovery_replacement_policy"))
+
+    if connection is not None:
+        return resolve_policy(connection)
+
+    with connect_db() as temporary_connection:
+        return resolve_policy(temporary_connection)
+
+
 def get_effective_discovery_agent_policy(connection: sqlite3.Connection, agent: dict) -> dict:
     override = agent.get("dataPolicyOverride")
     if isinstance(override, dict):
@@ -2402,6 +3267,7 @@ def load_settings(connection: sqlite3.Connection) -> dict:
         "scanIntervalSeconds": get_scan_interval_seconds(connection),
         "defaultSubnetScanEnabled": get_default_subnet_scan_enabled(connection),
         "discoveryDataPolicy": get_discovery_data_policy(connection),
+        "discoveryReplacementPolicy": get_discovery_replacement_policy(connection),
         "scanTimeoutMs": SCAN_TIMEOUT_MS,
         "scanConcurrency": SCAN_CONCURRENCY,
         "limits": {
@@ -2412,7 +3278,13 @@ def load_settings(connection: sqlite3.Connection) -> dict:
 
 
 def update_settings(connection: sqlite3.Connection, payload: dict, actor: str = "system") -> dict:
-    supported_keys = {"scanIntervalSeconds", "defaultSubnetScanEnabled", "subnetScanSettings", "discoveryDataPolicy"}
+    supported_keys = {
+        "scanIntervalSeconds",
+        "defaultSubnetScanEnabled",
+        "subnetScanSettings",
+        "discoveryDataPolicy",
+        "discoveryReplacementPolicy",
+    }
     if not any(key in payload for key in supported_keys):
         raise ValueError("Нет поддерживаемых настроек для обновления.")
 
@@ -2457,6 +3329,21 @@ def update_settings(connection: sqlite3.Connection, payload: dict, actor: str = 
             actor=actor,
             message="Discovery data policy changed.",
             details={"policy": discovery_data_policy},
+        )
+
+    if "discoveryReplacementPolicy" in payload:
+        discovery_replacement_policy = normalize_discovery_replacement_policy(payload.get("discoveryReplacementPolicy"))
+        set_setting(
+            connection,
+            "discovery_replacement_policy",
+            json.dumps(discovery_replacement_policy, ensure_ascii=False, sort_keys=True),
+        )
+        record_discovery_audit_event(
+            connection,
+            "replacement_policy_changed",
+            actor=actor,
+            message="Discovery replacement policy changed.",
+            details={"policy": discovery_replacement_policy},
         )
 
     connection.commit()
@@ -2967,6 +3854,7 @@ def delete_discovery_agent(
     ).fetchall()
     linked_ids = sorted({linked_row["device_id"] for linked_row in linked_rows if linked_row["device_id"]})
     deleted_related_count = 0
+    protected_related_count = 0
     with connection:
         if delete_related_records and linked_ids:
             placeholders = ",".join("?" for _ in linked_ids)
@@ -2975,22 +3863,22 @@ def delete_discovery_agent(
                 linked_ids,
             ).fetchall()
             for device_row in linked_devices:
-                device = device_from_row(device_row)
-                record_history(
+                if has_other_discovery_record_reference(
                     connection,
-                    device_id=device["id"],
-                    device_name=device["name"],
-                    ip=device["ip"],
-                    previous_ip=device["ip"],
-                    action="released",
+                    device_id=device_row["id"],
+                    excluded_agent_id=agent_id,
+                ):
+                    protected_related_count += 1
+                    continue
+                if delete_agent_owned_registry_record(
+                    connection,
+                    device_row=device_row,
                     actor=actor,
                     note=f"Discovery agent deleted: {row['name']}",
-                )
-            cursor = connection.execute(
-                f"DELETE FROM devices WHERE id IN ({placeholders})",
-                linked_ids,
-            )
-            deleted_related_count = cursor.rowcount
+                ):
+                    deleted_related_count += 1
+                else:
+                    protected_related_count += 1
         record_discovery_audit_event(
             connection,
             "agent_deleted",
@@ -3002,12 +3890,20 @@ def delete_discovery_agent(
             details={
                 "deleteRelatedRecords": delete_related_records,
                 "deletedRelatedRecords": deleted_related_count,
+                "protectedRelatedRecords": protected_related_count,
             },
         )
         connection.execute("DELETE FROM discovery_agents WHERE id = ?", (agent_id,))
+    repair_result = repair_orphan_discovery_matches(connection, actor=actor)
     bump_revision(
         "discovery-agent-deleted",
-        {"agentId": agent_id, "deleteRelatedRecords": delete_related_records, "deletedRelatedRecords": deleted_related_count},
+        {
+            "agentId": agent_id,
+            "deleteRelatedRecords": delete_related_records,
+            "deletedRelatedRecords": deleted_related_count,
+            "repairedOrphanMatches": repair_result["repaired"],
+            "unlinkedOrphanMatches": repair_result["unlinked"],
+        },
     )
     if deleted_related_count:
         signal_background_scanner(run_scan=True)
@@ -3016,6 +3912,9 @@ def delete_discovery_agent(
         "agentId": agent_id,
         "name": row["name"],
         "deletedRelatedRecords": deleted_related_count,
+        "protectedRelatedRecords": protected_related_count,
+        "repairedOrphanMatches": repair_result["repaired"],
+        "unlinkedOrphanMatches": repair_result["unlinked"],
     }
 
 
@@ -3373,20 +4272,67 @@ def is_discovery_replacement_candidate(item: dict) -> bool:
     return source == "docker" and source_kind in {"container", "docker-container"}
 
 
+def is_docker_container_identity(source: object, source_kind: object) -> bool:
+    return (
+        normalize_slug_value(source, default="") == "docker"
+        and normalize_slug_value(source_kind, default="") in {"container", "docker-container"}
+    )
+
+
 def find_superseded_discovery_results(
     connection: sqlite3.Connection,
     *,
     agent_id: str,
     item: dict,
+    host_device_id: str = "",
 ) -> list[sqlite3.Row]:
     if not is_discovery_replacement_candidate(item):
         return []
     name = str(item.get("name") or "").strip()
     if not name:
         return []
+    if normalize_slug_value(item.get("source"), default="") == "docker":
+        return connection.execute(
+            """
+            SELECT id, source, source_kind, source_id, matched_device_id, matched_service_id, state
+            FROM discovery_results
+            WHERE agent_id = ?
+              AND source = ?
+              AND source_kind IN ('container', 'docker-container')
+              AND name = ?
+              AND source_id != ?
+              AND (
+                ? = ''
+                OR host_device_id = ?
+                OR (
+                  host_device_id = ''
+                  AND (
+                    matched_service_id = ''
+                    OR EXISTS (
+                      SELECT 1
+                      FROM devices
+                      WHERE devices.id = discovery_results.matched_service_id
+                        AND devices.host_device_id = ?
+                    )
+                  )
+                )
+              )
+              AND state != 'ignored'
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (
+                agent_id,
+                item["source"],
+                name,
+                item["sourceId"],
+                host_device_id,
+                host_device_id,
+                host_device_id,
+            ),
+        ).fetchall()
     return connection.execute(
         """
-        SELECT id, source_id, matched_device_id, matched_service_id, state
+        SELECT id, source, source_kind, source_id, matched_device_id, matched_service_id, state
         FROM discovery_results
         WHERE agent_id = ?
           AND source = ?
@@ -3416,6 +4362,11 @@ def transfer_superseded_discovery_results(
     now: str,
 ) -> int:
     replaced_count = 0
+    deleted_linked_count = 0
+    current_result = connection.execute(
+        "SELECT matched_device_id, matched_service_id FROM discovery_results WHERE id = ?",
+        (current_result_id,),
+    ).fetchone()
     for row in superseded_rows:
         matched_ids = [
             (row["matched_device_id"] or "", False),
@@ -3424,6 +4375,28 @@ def transfer_superseded_discovery_results(
         for matched_id, is_service in matched_ids:
             if not matched_id:
                 continue
+            current_linked_id = ""
+            if current_result is not None:
+                current_linked_id = current_result["matched_service_id"] if is_service else current_result["matched_device_id"]
+            if current_linked_id and current_linked_id != matched_id:
+                device_row = connection.execute("SELECT * FROM devices WHERE id = ?", (matched_id,)).fetchone()
+                if (
+                    device_row is not None
+                    and can_bulk_delete_discovery_linked_record(row, device_row)
+                    and not has_other_discovery_record_reference(
+                        connection,
+                        device_id=matched_id,
+                        excluded_result_ids={row["id"]},
+                    )
+                    and delete_agent_owned_registry_record(
+                        connection,
+                        device_row=device_row,
+                        actor="agent",
+                        note="Discovery duplicate replaced",
+                    )
+                ):
+                    deleted_linked_count += 1
+                    continue
             type_condition = "type = 'service'" if is_service else "type != 'service'"
             connection.execute(
                 f"""
@@ -3463,9 +4436,41 @@ def transfer_superseded_discovery_results(
                 "sourceId": item["sourceId"],
                 "name": item["name"],
                 "replaced": replaced_count,
+                "deletedLinkedRecords": deleted_linked_count,
             },
         )
     return replaced_count
+
+
+def clear_mismatched_service_match_for_discovery_result(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    expected_host_device_id: str,
+    now: str,
+) -> bool:
+    if not expected_host_device_id or not row["matched_service_id"]:
+        return False
+    if discovery_result_target_type(row) != "service":
+        return False
+    service_row = connection.execute(
+        "SELECT id, host_device_id FROM devices WHERE id = ? AND type = 'service'",
+        (row["matched_service_id"],),
+    ).fetchone()
+    if service_row is not None and (not service_row["host_device_id"] or service_row["host_device_id"] == expected_host_device_id):
+        return False
+    next_state = "matched" if row["matched_device_id"] else "new"
+    connection.execute(
+        """
+        UPDATE discovery_results
+        SET matched_service_id = '',
+            state = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (next_state, now, row["id"]),
+    )
+    return True
 
 
 def update_discovery_linked_records(
@@ -3636,6 +4641,8 @@ def save_discovery_snapshot(
         packet_sources.add(snapshot["source"])
     packet_info = packet_info or {"source": snapshot["source"], "index": 1, "total": 1}
     is_final_source_packet = int(packet_info.get("index", 1)) >= int(packet_info.get("total", 1))
+    replacement_policy = get_discovery_replacement_policy(connection)
+    auto_replace_docker_containers = bool(replacement_policy.get("autoReplaceDockerContainers", True))
     with connection:
         existing_run = None
         if external_run_id:
@@ -3701,10 +4708,15 @@ def save_discovery_snapshot(
                 existing_device_id = find_existing_device_id_for_discovery_item(connection, item)
                 if existing_device_id and existing_device_id != host_device_id:
                     auto_matched_device_id = existing_device_id
-            superseded_rows = find_superseded_discovery_results(
-                connection,
-                agent_id=agent["id"],
-                item=item,
+            superseded_rows = (
+                find_superseded_discovery_results(
+                    connection,
+                    agent_id=agent["id"],
+                    item=item,
+                    host_device_id=host_device_id,
+                )
+                if auto_replace_docker_containers
+                else []
             )
             inherited_matched_device_id = next((row["matched_device_id"] or "" for row in superseded_rows if row["matched_device_id"]), "")
             inherited_matched_service_id = next((row["matched_service_id"] or "" for row in superseded_rows if row["matched_service_id"]), "")
@@ -3791,6 +4803,13 @@ def save_discovery_snapshot(
                 ),
             )
             current_result = get_discovery_result_row(connection, result_id)
+            if clear_mismatched_service_match_for_discovery_result(
+                connection,
+                current_result,
+                expected_host_device_id=host_device_id,
+                now=now,
+            ):
+                current_result = get_discovery_result_row(connection, result_id)
             if superseded_rows:
                 replaced_count += transfer_superseded_discovery_results(
                     connection,
@@ -3889,6 +4908,7 @@ def save_discovery_snapshot(
             ),
         )
 
+    repair_agent_host_links_from_matched_hosts(connection)
     created_count = auto_create_discovery_records(connection, agent, item_ids)
     if created_count:
         connection.execute(
@@ -4060,6 +5080,7 @@ def delete_discovery_result(
     row = get_discovery_result_row(connection, result_id)
     if row["state"] not in {"stale", "error", "ignored"}:
         raise ValueError("Удалять из preview можно только stale, error или ignored объекты.")
+    deleted_audit_count = cleanup_discovery_audit_events_for_results(connection, [row])
     connection.execute("DELETE FROM discovery_results WHERE id = ?", (result_id,))
     record_discovery_audit_event(
         connection,
@@ -4074,6 +5095,7 @@ def delete_discovery_result(
             "sourceId": row["source_id"],
             "name": row["name"],
             "state": row["state"],
+            "deletedAuditEvents": deleted_audit_count,
         },
     )
     connection.commit()
@@ -4088,6 +5110,167 @@ def can_bulk_delete_discovery_linked_record(row: sqlite3.Row, device: sqlite3.Ro
         (device["source"] or "") == (row["source"] or "")
         and (device["source_id"] or "") == (row["source_id"] or "")
     )
+
+
+def has_other_discovery_record_reference(
+    connection: sqlite3.Connection,
+    *,
+    device_id: str,
+    excluded_result_ids: set[str] | None = None,
+    excluded_agent_id: str = "",
+) -> bool:
+    if not device_id:
+        return False
+    excluded_result_ids = excluded_result_ids or set()
+    rows = connection.execute(
+        """
+        SELECT id, agent_id
+        FROM discovery_results
+        WHERE state != 'ignored'
+          AND (matched_device_id = ? OR matched_service_id = ?)
+        """,
+        (device_id, device_id),
+    ).fetchall()
+    for row in rows:
+        if row["id"] in excluded_result_ids:
+            continue
+        if excluded_agent_id and row["agent_id"] == excluded_agent_id:
+            continue
+        return True
+    return False
+
+
+def delete_agent_owned_registry_record(
+    connection: sqlite3.Connection,
+    *,
+    device_row: sqlite3.Row,
+    actor: str,
+    note: str,
+) -> bool:
+    device = device_from_row(device_row)
+    if device["note"] != "Agent":
+        return False
+    record_history(
+        connection,
+        device_id=device["id"],
+        device_name=device["name"],
+        ip=device["ip"],
+        previous_ip=device["ip"],
+        action="released",
+        actor=actor,
+        note=note,
+    )
+    connection.execute("DELETE FROM devices WHERE id = ?", (device["id"],))
+    return True
+
+
+def repair_orphan_discovery_matches(connection: sqlite3.Connection, actor: str = "system") -> dict:
+    rows = connection.execute(
+        """
+        SELECT id, matched_device_id, matched_service_id
+        FROM discovery_results
+        WHERE state = 'matched'
+          AND (
+            (
+              matched_device_id != ''
+              AND NOT EXISTS (
+                SELECT 1
+                FROM devices
+                WHERE devices.id = discovery_results.matched_device_id
+              )
+            )
+            OR (
+              matched_service_id != ''
+              AND NOT EXISTS (
+                SELECT 1
+                FROM devices
+                WHERE devices.id = discovery_results.matched_service_id
+              )
+            )
+          )
+        ORDER BY updated_at DESC, created_at DESC
+        """
+    ).fetchall()
+    repaired_count = 0
+    unlinked_count = 0
+    for row in rows:
+        result = get_discovery_result_row(connection, row["id"])
+        target_type = "service" if row["matched_service_id"] else "device"
+        old_target_id = row["matched_service_id"] if target_type == "service" else row["matched_device_id"]
+        if discovery_result_target_type(result) == "template":
+            continue
+        try:
+            existing = find_existing_record_for_discovery(connection, result, target_type)
+            if existing is not None:
+                link_discovery_result(
+                    connection,
+                    result["id"],
+                    {"targetType": target_type, "targetId": existing["id"]},
+                )
+                new_target_id = existing["id"]
+            else:
+                created = create_discovery_result_record(
+                    connection,
+                    result["id"],
+                    {"targetType": target_type},
+                    f"Discovery repair: {actor}",
+                    record_inventory_history=target_type != "service",
+                )
+                new_target_id = created.get("record", {}).get("id", "")
+            record_discovery_audit_event(
+                connection,
+                "discovery_orphan_recovered",
+                severity="warn",
+                agent_id=result["agent_id"],
+                agent_name=result["agent_name"] or "",
+                actor=actor,
+                message="Orphaned discovery match recovered from remaining discovery data.",
+                details={
+                    "resultId": result["id"],
+                    "source": result["source"],
+                    "sourceId": result["source_id"],
+                    "targetType": target_type,
+                    "oldTargetId": old_target_id,
+                    "newTargetId": new_target_id,
+                },
+            )
+            connection.commit()
+            repaired_count += 1
+        except (RequestError, ValueError, sqlite3.IntegrityError):
+            connection.execute(
+                """
+                UPDATE discovery_results
+                SET matched_device_id = CASE WHEN ? = 'device' THEN '' ELSE matched_device_id END,
+                    matched_service_id = CASE WHEN ? = 'service' THEN '' ELSE matched_service_id END,
+                    state = 'new',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (target_type, target_type, utc_now_iso(), result["id"]),
+            )
+            record_discovery_audit_event(
+                connection,
+                "discovery_orphan_unlinked",
+                severity="warn",
+                agent_id=result["agent_id"],
+                agent_name=result["agent_name"] or "",
+                actor=actor,
+                message="Orphaned discovery match was unlinked because registry recovery failed.",
+                details={
+                    "resultId": result["id"],
+                    "source": result["source"],
+                    "sourceId": result["source_id"],
+                    "targetType": target_type,
+                    "oldTargetId": old_target_id,
+                },
+            )
+            connection.commit()
+            unlinked_count += 1
+    return {
+        "checked": len(rows),
+        "repaired": repaired_count,
+        "unlinked": unlinked_count,
+    }
 
 
 def cleanup_stale_discovery_results(
@@ -4108,7 +5291,7 @@ def cleanup_stale_discovery_results(
         """
     ).fetchall()
     if not rows:
-        return {"status": "clean", "deletedResults": 0, "deletedLinkedRecords": 0}
+        return {"status": "clean", "deletedResults": 0, "deletedLinkedRecords": 0, "deletedAuditEvents": 0}
 
     linked_ids: set[str] = set()
     if delete_linked_records:
@@ -4122,6 +5305,7 @@ def cleanup_stale_discovery_results(
                     linked_ids.add(device_id)
 
     deleted_linked_count = 0
+    deleted_audit_count = 0
     with connection:
         if linked_ids:
             linked_rows = connection.execute(
@@ -4146,6 +5330,7 @@ def cleanup_stale_discovery_results(
             )
             deleted_linked_count = delete_cursor.rowcount
         result_ids = [row["id"] for row in rows]
+        deleted_audit_count = cleanup_discovery_audit_events_for_results(connection, rows)
         connection.execute(
             f"DELETE FROM discovery_results WHERE id IN ({','.join('?' for _ in result_ids)})",
             result_ids,
@@ -4159,18 +5344,24 @@ def cleanup_stale_discovery_results(
             details={
                 "deletedResults": len(result_ids),
                 "deletedLinkedRecords": deleted_linked_count,
+                "deletedAuditEvents": deleted_audit_count,
                 "deleteLinkedRecords": delete_linked_records,
             },
         )
     bump_revision(
         "discovery-stale-cleanup",
-        {"deletedResults": len(rows), "deletedLinkedRecords": deleted_linked_count},
+        {
+            "deletedResults": len(rows),
+            "deletedLinkedRecords": deleted_linked_count,
+            "deletedAuditEvents": deleted_audit_count,
+        },
     )
     signal_background_scanner(run_scan=True)
     return {
         "status": "cleaned",
         "deletedResults": len(rows),
         "deletedLinkedRecords": deleted_linked_count,
+        "deletedAuditEvents": deleted_audit_count,
     }
 
 
@@ -4317,6 +5508,20 @@ def enrich_linked_record_from_discovery(
                 target_id,
             ),
         )
+        if is_docker_container_identity(source, source_kind):
+            connection.execute(
+                """
+                UPDATE devices
+                SET source = ?,
+                    source_kind = ?,
+                    source_id = ?
+                WHERE id = ?
+                  AND type = 'service'
+                  AND note = 'Agent'
+                  AND (source = 'docker' OR COALESCE(source, '') = '')
+                """,
+                (source, source_kind, source_id, target_id),
+            )
 
 
 def discovery_device_type(source_kind: str, raw: dict) -> str:
@@ -4359,20 +5564,66 @@ def find_existing_record_for_discovery(
     if target_type == "template":
         return None
     type_condition = "type = 'service'" if target_type == "service" else "type != 'service'"
-    existing_row = connection.execute(
-        f"""
-        SELECT *
-        FROM devices
-        WHERE source = ?
-          AND source_id = ?
-          AND {type_condition}
-        ORDER BY created_at ASC
-        LIMIT 1
-        """,
-        (row["source"], row["source_id"]),
-    ).fetchone()
+    host_row = resolve_discovery_host_row(connection, row) if target_type == "service" else None
+    if target_type == "service" and host_row is not None:
+        existing_row = connection.execute(
+            """
+            SELECT *
+            FROM devices
+            WHERE source = ?
+              AND source_id = ?
+              AND type = 'service'
+              AND host_device_id = ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (row["source"], row["source_id"], host_row["id"]),
+        ).fetchone()
+    else:
+        existing_row = connection.execute(
+            f"""
+            SELECT *
+            FROM devices
+            WHERE source = ?
+              AND source_id = ?
+              AND {type_condition}
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (row["source"], row["source_id"]),
+        ).fetchone()
     if existing_row is not None:
         return device_from_row(existing_row)
+
+    replacement_policy = get_discovery_replacement_policy(connection)
+    if (
+        target_type == "service"
+        and bool(replacement_policy.get("autoReplaceDockerContainers", True))
+        and is_docker_container_identity(row["source"], row["source_kind"])
+    ):
+        service_name = str(row["name"] or "").strip()
+        if host_row is not None and service_name:
+            host_scoped_service = connection.execute(
+                """
+                SELECT *
+                FROM devices
+                WHERE type = 'service'
+                  AND host_device_id = ?
+                  AND lower(name) = lower(?)
+                  AND (
+                    source = 'docker'
+                    OR COALESCE(source, '') = ''
+                    OR note = 'Agent'
+                  )
+                ORDER BY
+                  CASE WHEN source = 'docker' THEN 0 ELSE 1 END,
+                  created_at ASC
+                LIMIT 1
+                """,
+                (host_row["id"], service_name),
+            ).fetchone()
+            if host_scoped_service is not None:
+                return device_from_row(host_scoped_service)
 
     if target_type == "device":
         raw = decode_discovery_raw(row)
@@ -4391,20 +5642,74 @@ def ensure_agent_linked_host(
     connection: sqlite3.Connection,
     agent_id: str,
     host_device_id: str,
-) -> None:
+) -> int:
     if not host_device_id:
-        return
+        return 0
     row = connection.execute(
         "SELECT linked_host_device_id FROM discovery_agents WHERE id = ?",
         (agent_id,),
     ).fetchone()
-    if row is None or row["linked_host_device_id"]:
-        return
-    connection.execute(
-        "UPDATE discovery_agents SET linked_host_device_id = ?, updated_at = ? WHERE id = ?",
-        (host_device_id, utc_now_iso(), agent_id),
+    if row is None:
+        return 0
+    changed_count = 0
+    now = utc_now_iso()
+    effective_host_device_id = row["linked_host_device_id"] or host_device_id
+    if not row["linked_host_device_id"]:
+        cursor = connection.execute(
+            "UPDATE discovery_agents SET linked_host_device_id = ?, updated_at = ? WHERE id = ?",
+            (host_device_id, now, agent_id),
+        )
+        changed_count += cursor.rowcount
+    cursor = connection.execute(
+        """
+        UPDATE discovery_results
+        SET host_device_id = ?,
+            updated_at = ?
+        WHERE agent_id = ?
+          AND host_device_id = ''
+          AND source_kind != 'host'
+          AND state NOT IN ('ignored', 'stale')
+        """,
+        (effective_host_device_id, now, agent_id),
     )
-    connection.commit()
+    changed_count += cursor.rowcount
+    if changed_count:
+        connection.commit()
+    return cursor.rowcount
+
+
+def repair_agent_host_links_from_matched_hosts(connection: sqlite3.Connection) -> int:
+    rows = connection.execute(
+        """
+        SELECT
+            discovery_results.agent_id,
+            discovery_results.matched_device_id
+        FROM discovery_results
+        JOIN devices ON devices.id = discovery_results.matched_device_id
+        WHERE discovery_results.state = 'matched'
+          AND discovery_results.source_kind = 'host'
+          AND discovery_results.matched_device_id != ''
+          AND devices.type != 'service'
+          AND EXISTS (
+            SELECT 1
+            FROM discovery_results AS pending
+            WHERE pending.agent_id = discovery_results.agent_id
+              AND pending.host_device_id = ''
+              AND pending.source_kind != 'host'
+              AND pending.state NOT IN ('ignored', 'stale')
+          )
+        ORDER BY discovery_results.updated_at DESC, discovery_results.created_at DESC
+        """
+    ).fetchall()
+    repaired_count = 0
+    seen_agent_ids: set[str] = set()
+    for row in rows:
+        agent_id = row["agent_id"]
+        if agent_id in seen_agent_ids:
+            continue
+        seen_agent_ids.add(agent_id)
+        repaired_count += ensure_agent_linked_host(connection, agent_id, row["matched_device_id"])
+    return repaired_count
 
 
 def create_discovery_result_record(
@@ -4412,6 +5717,8 @@ def create_discovery_result_record(
     result_id: str,
     payload: dict,
     actor: str,
+    *,
+    record_inventory_history: bool = True,
 ) -> dict:
     target_type = str(payload.get("targetType") or "").strip().lower()
     if target_type not in {"device", "service"}:
@@ -4450,7 +5757,7 @@ def create_discovery_result_record(
                 "note": "Agent",
             },
         )
-        created = insert_device(connection, device_payload, actor)
+        created = insert_device(connection, device_payload, actor, record_inventory_history=record_inventory_history)
         connection.execute(
             """
             UPDATE discovery_results
@@ -4490,7 +5797,7 @@ def create_discovery_result_record(
             "note": "Agent",
         },
     )
-    created = insert_device(connection, device_payload, actor)
+    created = insert_device(connection, device_payload, actor, record_inventory_history=record_inventory_history)
     connection.execute(
         """
         UPDATE discovery_results
@@ -4529,6 +5836,7 @@ def auto_create_discovery_records(
     )
 
     for row in ordered_rows:
+        row = get_discovery_result_row(connection, row["id"])
         if row["state"] in {"ignored", "matched", "stale"}:
             continue
         target_type = discovery_result_target_type(row)
@@ -4555,6 +5863,7 @@ def auto_create_discovery_records(
                 row["id"],
                 {"targetType": target_type},
                 f"Agent: {agent.get('name') or agent.get('id') or 'unknown'}",
+                record_inventory_history=target_type != "service",
             )
         except (RequestError, ValueError, sqlite3.IntegrityError):
             continue
@@ -4877,7 +6186,13 @@ def insert_group(connection: sqlite3.Connection, group: dict) -> dict:
     return group
 
 
-def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> dict:
+def insert_device(
+    connection: sqlite3.Connection,
+    device: dict,
+    actor: str,
+    *,
+    record_inventory_history: bool = True,
+) -> dict:
     connection.execute(
         """
         INSERT INTO devices (
@@ -4909,17 +6224,18 @@ def insert_device(connection: sqlite3.Connection, device: dict, actor: str) -> d
             device["createdAt"],
         ),
     )
-    record_history(
-        connection,
-        device_id=device["id"],
-        device_name=device["name"],
-        ip=device["ip"],
-        previous_ip="",
-        action="assigned",
-        actor=actor,
-        note=device.get("note", ""),
-        changed_at=device["createdAt"],
-    )
+    if record_inventory_history:
+        record_history(
+            connection,
+            device_id=device["id"],
+            device_name=device["name"],
+            ip=device["ip"],
+            previous_ip="",
+            action="assigned",
+            actor=actor,
+            note=device.get("note", ""),
+            changed_at=device["createdAt"],
+        )
     connection.commit()
     bump_revision("state-changed", {"entity": "device"})
     signal_background_scanner(run_scan=True)
@@ -5565,6 +6881,12 @@ class ATLASRequestHandler(BaseHTTPRequestHandler):
                 with connect_db() as connection:
                     user = require_authenticated_user(connection, self)
                     self.send_json(HTTPStatus.OK, load_snapshot(connection, user))
+                return
+
+            if parsed.path == "/api/topology":
+                with connect_db() as connection:
+                    user = require_authenticated_user(connection, self)
+                    self.send_json(HTTPStatus.OK, load_topology_snapshot(connection, user))
                 return
 
             if parsed.path == "/api/admin/discovery/agents":

@@ -638,14 +638,20 @@ def docker_container_name(container: dict[str, Any], inspect_data: dict[str, Any
     return str(container.get("Id") or "container")[:12]
 
 
-def docker_container_source_id(name: str, container_id: str) -> str:
-    stable_name = limit_text(name, 150)
+def docker_container_source_id(name: str, container_id: str, host_id: str) -> str:
+    host_scope = limit_text(host_id or stable_host_id(), 40)
+    stable_name = limit_text(name, 120)
     if stable_name:
-        return f"docker:name:{stable_name}"
-    return f"docker:id:{container_id}"
+        return f"docker:host:{host_scope}:name:{stable_name}"
+    return f"docker:host:{host_scope}:id:{limit_text(container_id, 80)}"
 
 
-def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str, Any], observed_at: str) -> dict[str, Any]:
+def docker_item_from_container(
+    container: dict[str, Any],
+    inspect_data: dict[str, Any],
+    observed_at: str,
+    host_id: str,
+) -> dict[str, Any]:
     container_id = str(container.get("Id") or inspect_data.get("Id") or "").strip()
     container_name = docker_container_name(container, inspect_data)
     ports, access_port = extract_docker_ports(inspect_data)
@@ -653,6 +659,7 @@ def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str
     networks = extract_docker_networks(inspect_data)
     raw = {
         "containerId": container_id[:12],
+        "hostSourceId": f"host:{host_id}",
         "image": limit_text(inspect_data.get("Config", {}).get("Image") or container.get("Image"), 300),
         "statusText": limit_text(container.get("Status"), 300),
         "dockerState": limit_text(inspect_data.get("State", {}).get("Status"), 80),
@@ -669,7 +676,7 @@ def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str
     }
     return {
         "source": "docker",
-        "sourceId": docker_container_source_id(container_name, container_id),
+        "sourceId": docker_container_source_id(container_name, container_id, host_id),
         "sourceKind": "container",
         "hostDeviceId": "",
         "name": container_name,
@@ -683,6 +690,7 @@ def docker_item_from_container(container: dict[str, Any], inspect_data: dict[str
 
 
 def collect_docker_inventory(config: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    host_id = stable_host_id()
     version = docker_request(config, "/version")
     docker_version = limit_text(version.get("Version"), 80) if isinstance(version, dict) else ""
     compose_version = docker_compose_cli_version()
@@ -701,7 +709,7 @@ def collect_docker_inventory(config: dict[str, Any], observed_at: str) -> dict[s
         inspect_data = docker_request(config, f"/containers/{quote(container_id, safe='')}/json")
         if not isinstance(inspect_data, dict):
             continue
-        items.append(docker_item_from_container(container, inspect_data, observed_at))
+        items.append(docker_item_from_container(container, inspect_data, observed_at, host_id))
 
     return {
         "source": "docker",

@@ -74,9 +74,8 @@
               <div class="hero-account-dropdown" id="user-menu-dropdown" hidden>
                 <p class="helper-text helper-text--tight" id="user-menu-note"></p>
                 <div class="hero-account-dropdown__actions">
-                  <button type="button" class="action-button action-button--ghost" data-settings-shortcut="profile" data-i18n="settings_section_profile">Профиль</button>
                   <button type="button" class="action-button action-button--ghost" id="user-menu-password-button" data-i18n="change_password_button">Сменить пароль</button>
-                  <button type="button" class="action-button action-button--ghost" data-settings-shortcut="interface" data-i18n="settings_button">Настройки</button>
+                  <button type="button" class="action-button action-button--ghost" data-settings-shortcut="profile" data-i18n="settings_button">Настройки</button>
                   <button type="button" class="action-button action-button--ghost" id="logout-button" data-i18n="logout_button">Выйти</button>
                 </div>
               </div>
@@ -121,6 +120,7 @@
 
     <nav class="view-switcher" aria-label="ATLAS sections">
       <button type="button" class="view-tab is-active" data-view-tab="dashboard" data-i18n="tab_dashboard">Dashboard</button>
+      <button type="button" class="view-tab" data-view-tab="map" data-i18n="tab_map">Map</button>
       <button type="button" class="view-tab" data-view-tab="registry" data-i18n="tab_registry">Реестр</button>
       <button type="button" class="view-tab" data-view-tab="history" data-i18n="tab_history">Журнал</button>
     </nav>
@@ -190,6 +190,62 @@
           </section>
         </div>
       </div>
+    </section>
+
+    <section class="page-view" data-view="map" hidden>
+      <section class="panel panel--map">
+        <div class="panel-heading panel-heading--split">
+          <div>
+            <p class="panel-kicker" data-i18n="topology_kicker">Network Map</p>
+            <h2 data-i18n="topology_title">Topology</h2>
+          </div>
+          <div class="panel-heading-actions">
+            <span class="table-counter" id="topology-summary-counter">0</span>
+          </div>
+        </div>
+
+        <div class="settings-grid topology-filter-grid">
+          <label class="setting-card registry-filter-card">
+            <span class="setting-title" data-i18n="topology_mode_label">Mode</span>
+            <select id="topology-mode-select">
+              <option value="simple" data-i18n="topology_mode_simple">Simple</option>
+              <option value="advanced" data-i18n="topology_mode_advanced">Advanced</option>
+            </select>
+          </label>
+          <label class="setting-card registry-filter-card">
+            <span class="setting-title" data-i18n="topology_subnet_filter_label">Subnet</span>
+            <select id="topology-subnet-filter">
+              <option value="all" data-i18n="topology_filter_all">All</option>
+            </select>
+          </label>
+          <label class="setting-card registry-filter-card">
+            <span class="setting-title" data-i18n="topology_layer_filter_label">Layer</span>
+            <select id="topology-layer-filter">
+              <option value="all" data-i18n="topology_filter_all">All</option>
+            </select>
+          </label>
+          <label class="setting-card registry-filter-card">
+            <span class="setting-title" data-i18n="topology_source_filter_label">Source</span>
+            <select id="topology-source-filter">
+              <option value="all" data-i18n="topology_filter_all">All</option>
+            </select>
+          </label>
+          <label class="setting-card registry-filter-card">
+            <span class="setting-title" data-i18n="topology_status_filter_label">Status</span>
+            <select id="topology-status-filter">
+              <option value="all" data-i18n="topology_filter_all">All</option>
+              <option value="up" data-i18n="topology_status_up">Up</option>
+              <option value="pending" data-i18n="topology_status_pending">Pending</option>
+              <option value="down" data-i18n="topology_status_down">Down</option>
+              <option value="known" data-i18n="topology_status_known">Known</option>
+              <option value="unknown" data-i18n="topology_status_unknown">Unknown</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="topology-summary-grid" id="topology-summary-grid"></div>
+        <div class="topology-map" id="topology-map-canvas"></div>
+      </section>
     </section>
 
     <section class="page-view" data-view="registry" hidden>
@@ -1035,16 +1091,9 @@
               <span class="setting-title" data-i18n="theme_label">Тема</span>
               <select id="settings-theme-select">
                 <option value="atlas" data-i18n="theme_atlas">Atlas Blue</option>
-                <option value="ember" data-i18n="theme_ember">Ember Signal</option>
-                <option value="aurora" data-i18n="theme_aurora">Silver Bloom</option>
-                <option value="fuchsia" data-i18n="theme_fuchsia">Fuchsia Flux</option>
-                <option value="mono" data-i18n="theme_mono">Mono Terminal</option>
-                <option value="solaris" data-i18n="theme_solaris">Solaris Gold</option>
-                <option value="forest" data-i18n="theme_forest">Pixel Orbit</option>
-                <option value="neon" data-i18n="theme_neon">Neon Circuit</option>
-                <option value="arctic" data-i18n="theme_arctic">Arctic Glass</option>
-                <option value="lotus" data-i18n="theme_lotus">Midnight Lotus</option>
-                <option value="ruby" data-i18n="theme_ruby">Velvet Ruby</option>
+                <option value="aurora" data-i18n="theme_aurora">Aurora Glass</option>
+                <option value="neon" data-i18n="theme_neon">Neon Grid</option>
+                <option value="forest" data-i18n="theme_forest">Prism Orbit</option>
                 <option value="tide" data-i18n="theme_tide">Abyss Tide</option>
               </select>
               <span class="setting-note" data-i18n="theme_note">Меняет палитру, акценты и атмосферу интерфейса.</span>
@@ -1510,6 +1559,13 @@
                   <span class="setting-note" data-i18n="discovery_policy_visible_note">Show accepted metadata summary in the discovery preview.</span>
                 </span>
               </label>
+              <label class="discovery-policy-option discovery-policy-option--wide">
+                <input type="checkbox" id="discovery-policy-auto-replace-docker">
+                <span>
+                  <span class="setting-title" data-i18n="discovery_policy_auto_replace_docker_title">Auto-replace updated Docker containers</span>
+                  <span class="setting-note" data-i18n="discovery_policy_auto_replace_docker_note">For Watchtower/recreate flows: if a Docker container keeps the same name on the same host, ATLAS updates the existing service instead of leaving an old duplicate.</span>
+                </span>
+              </label>
             </div>
 
             <div class="template-editor-actions">
@@ -1676,6 +1732,8 @@
 
             <div class="device-types-builtin">
               <span class="pill" data-i18n="device_type_server">Server</span>
+              <span class="pill" data-i18n="device_type_core_router">Core router</span>
+              <span class="pill" data-i18n="device_type_switch">Switch</span>
               <span class="pill" data-i18n="device_type_container">Container</span>
               <span class="pill" data-i18n="device_type_service">Service</span>
               <span class="pill" data-i18n="device_type_iot">IoT</span>

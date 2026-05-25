@@ -1,12 +1,12 @@
 const API_BASE = "/api";
 const GROUP_SUGGESTION_TEMPLATES_PATH = "/group-suggestion-templates.json";
 const INTERFACE_SETTINGS_CACHE_KEY = "atlas-interface-settings-cache";
-const THEME_ALIASES = {
-  ocean: "aurora",
-};
-const SUPPORTED_THEMES = ["atlas", "ember", "aurora", "fuchsia", "mono", "solaris", "forest", "neon", "arctic", "lotus", "ruby", "tide"];
+const THEME_ALIASES = {};
+const SUPPORTED_THEMES = ["atlas", "aurora", "neon", "forest", "tide"];
 const BUILTIN_DEVICE_TYPES = [
   { id: "server", labelKey: "device_type_server" },
+  { id: "core-router", labelKey: "device_type_core_router" },
+  { id: "switch", labelKey: "device_type_switch" },
   { id: "container", labelKey: "device_type_container" },
   { id: "service", labelKey: "device_type_service" },
   { id: "iot", labelKey: "device_type_iot" },
@@ -39,8 +39,11 @@ const DEFAULT_DISCOVERY_DATA_POLICY = {
   storeRawMetadata: false,
   showMetadataInPreview: false,
 };
+const DEFAULT_DISCOVERY_REPLACEMENT_POLICY = {
+  autoReplaceDockerContainers: true,
+};
 const NAVIGATION_HASH_OPTIONS = {
-  views: new Set(["dashboard", "registry", "history"]),
+  views: new Set(["dashboard", "map", "registry", "history"]),
   registry: new Set(["subnets", "groups", "devices", "services"]),
   settings: new Set(["profile", "interface", "templates", "administration"]),
   integrations: new Set(["automation", "discovery", "snmp", "push"]),
@@ -121,7 +124,7 @@ const DEFAULT_GROUP_SUGGESTION_TEMPLATES = [
   {
     id: "networking",
     label: "Networking",
-    deviceTypes: ["iot", "server"],
+    deviceTypes: ["iot", "server", "core-router", "switch"],
     keywords: ["network", "networking", "router", "switch", "firewall", "ap", "wifi"],
   },
   {
@@ -227,6 +230,14 @@ const state = {
   subnets: [],
   groups: [],
   devices: [],
+  topology: {
+    schema: "atlas.topology.v1",
+    nodes: [],
+    links: [],
+    interfaces: [],
+    summary: {},
+    capabilities: { advancedMode: false, layers: {} },
+  },
   scanResults: [],
   history: [],
   meta: {
@@ -437,6 +448,7 @@ const elements = {
   discoveryPolicyStoreNetwork: document.getElementById("discovery-policy-store-network"),
   discoveryPolicyStoreRaw: document.getElementById("discovery-policy-store-raw"),
   discoveryPolicyShowPreview: document.getElementById("discovery-policy-show-preview"),
+  discoveryPolicyAutoReplaceDocker: document.getElementById("discovery-policy-auto-replace-docker"),
   saveDiscoveryPolicyButton: document.getElementById("save-discovery-policy-button"),
   discoveryPolicyStatus: document.getElementById("discovery-policy-status"),
   discoverySummaryGrid: document.getElementById("discovery-summary-grid"),
@@ -448,6 +460,14 @@ const elements = {
   discoveryDebugAgentFilter: document.getElementById("discovery-debug-agent-filter"),
   discoveryDebugKindFilter: document.getElementById("discovery-debug-kind-filter"),
   discoveryDebugTableBody: document.getElementById("discovery-debug-table-body"),
+  topologyModeSelect: document.getElementById("topology-mode-select"),
+  topologySubnetFilter: document.getElementById("topology-subnet-filter"),
+  topologyLayerFilter: document.getElementById("topology-layer-filter"),
+  topologySourceFilter: document.getElementById("topology-source-filter"),
+  topologyStatusFilter: document.getElementById("topology-status-filter"),
+  topologySummaryCounter: document.getElementById("topology-summary-counter"),
+  topologySummaryGrid: document.getElementById("topology-summary-grid"),
+  topologyMapCanvas: document.getElementById("topology-map-canvas"),
   userAccessGroupOptions: document.getElementById("user-access-group-options"),
   adminPanels: [...document.querySelectorAll(".admin-only")],
   passwordToggleButtons: [...document.querySelectorAll("[data-password-toggle]")],
@@ -507,6 +527,10 @@ const elements = {
 let activeToastTimer = null;
 let pollIntervalId = null;
 let eventSource = null;
+let refreshInFlight = null;
+let queuedRefreshOptions = null;
+let refreshDebounceTimer = null;
+let pendingRefreshOptions = null;
 let isManualScanRunning = false;
 let isDeviceSubmitting = false;
 let deviceGroupSelectionMode = "auto";
@@ -521,6 +545,20 @@ let activeTemplateSection = "device-types";
 let activeDiscoverySection = "agents";
 let discoveryDebugAgentFilter = "all";
 let discoveryDebugKindFilter = "all";
+let topologyMode = "simple";
+let topologySubnetFilter = "all";
+let topologyLayerFilter = "all";
+let topologySourceFilter = "all";
+let topologyStatusFilter = "all";
+const TOPOLOGY_ZOOM_MIN = 0.22;
+const TOPOLOGY_ZOOM_MAX = 1.4;
+let topologyZoom = TOPOLOGY_ZOOM_MIN;
+let topologyZoomUserAdjusted = false;
+let topologyPanX = 0;
+let topologyPanY = 0;
+let topologyPanUserAdjusted = false;
+let topologyPanState = null;
+let topologyRenderFrame = 0;
 let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
@@ -1548,6 +1586,31 @@ function bindEvents() {
       setActiveView(button.dataset.viewTab);
     });
   });
+  elements.topologyModeSelect?.addEventListener("change", () => {
+    topologyMode = elements.topologyModeSelect.value === "advanced" ? "advanced" : "simple";
+    resetTopologyViewport();
+    renderTopologyMap();
+  });
+  elements.topologySubnetFilter?.addEventListener("change", () => {
+    topologySubnetFilter = elements.topologySubnetFilter.value || "all";
+    resetTopologyViewport();
+    renderTopologyMap();
+  });
+  elements.topologyLayerFilter?.addEventListener("change", () => {
+    topologyLayerFilter = elements.topologyLayerFilter.value || "all";
+    resetTopologyViewport();
+    renderTopologyMap();
+  });
+  elements.topologySourceFilter?.addEventListener("change", () => {
+    topologySourceFilter = elements.topologySourceFilter.value || "all";
+    resetTopologyViewport();
+    renderTopologyMap();
+  });
+  elements.topologyStatusFilter?.addEventListener("change", () => {
+    topologyStatusFilter = elements.topologyStatusFilter.value || "all";
+    resetTopologyViewport();
+    renderTopologyMap();
+  });
   elements.registrySectionTabs.forEach((button) => {
     button.addEventListener("click", () => {
       const sectionName = button.dataset.registrySectionTab;
@@ -1752,7 +1815,7 @@ function bindEvents() {
   elements.missingTypeForm?.addEventListener("submit", handleMissingTypeSubmit);
   document.addEventListener("pointerdown", handleFieldHelpPointerDown, true);
   document.addEventListener("click", handleDocumentClick);
-  window.addEventListener("focus", () => refreshState(true));
+  window.addEventListener("focus", () => scheduleStateRefresh({ silent: true, delay: 250 }));
   window.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("hashchange", () => restoreNavigationFromHash({ restoreModal: state.auth?.authenticated }));
 }
@@ -1814,7 +1877,7 @@ async function finishAuthenticatedBootstrap() {
     window.clearInterval(pollIntervalId);
   }
   pollIntervalId = window.setInterval(() => {
-    refreshState(true);
+    scheduleStateRefresh({ silent: true, delay: 500 });
   }, 30000);
 }
 
@@ -1859,17 +1922,7 @@ function syncSettingsForm() {
   elements.settingsAutoRescan.checked = preferences.settings.autoRescanAfterDeviceSave;
   elements.settingsModalBlur.checked = preferences.settings.modalBlurEnabled;
   elements.settingsSuggestionMode.value = preferences.settings.suggestionMode;
-  const currentUser = state.auth?.user;
-  elements.currentUserBadge.textContent = currentUser?.displayName || "ATLAS";
-  elements.currentUserDisplay.value = currentUser?.username || "";
-  elements.currentUserNameInput.value = currentUser?.displayName || "";
-  const userRoleLabel = currentUser?.role ? t(`role_summary_${currentUser.role}`) : t("role_summary_guest");
-  elements.userMenuNote.textContent = currentUser?.mustChangePassword
-    ? t("must_change_password_note")
-    : t("user_menu_note", { role: userRoleLabel });
-  elements.currentUserRoleNote.textContent = currentUser?.mustChangePassword
-    ? t("must_change_password_note")
-    : t("current_role_note", { role: userRoleLabel });
+  syncCurrentUserChrome();
   const currentScanInterval = state.settings?.scanIntervalSeconds || state.meta?.scanIntervalSeconds || 90;
   if (document.activeElement !== elements.settingsScanInterval) {
     elements.settingsScanInterval.value = String(currentScanInterval);
@@ -3033,6 +3086,18 @@ function normalizeDiscoveryDataPolicy(rawPolicy = {}) {
   };
 }
 
+function normalizeDiscoveryReplacementPolicy(rawPolicy = {}) {
+  return {
+    ...DEFAULT_DISCOVERY_REPLACEMENT_POLICY,
+    ...Object.fromEntries(
+      Object.keys(DEFAULT_DISCOVERY_REPLACEMENT_POLICY).map((key) => [
+        key,
+        typeof rawPolicy?.[key] === "boolean" ? rawPolicy[key] : DEFAULT_DISCOVERY_REPLACEMENT_POLICY[key],
+      ]),
+    ),
+  };
+}
+
 function getDiscoveryDataPolicyDraft() {
   const storeRawMetadata = Boolean(elements.discoveryPolicyStoreRaw?.checked);
   return normalizeDiscoveryDataPolicy({
@@ -3042,6 +3107,12 @@ function getDiscoveryDataPolicyDraft() {
     storeInternalIps: storeRawMetadata || Boolean(elements.discoveryPolicyStoreNetwork?.checked),
     storeRawMetadata,
     showMetadataInPreview: Boolean(elements.discoveryPolicyShowPreview?.checked),
+  });
+}
+
+function getDiscoveryReplacementPolicyDraft() {
+  return normalizeDiscoveryReplacementPolicy({
+    autoReplaceDockerContainers: Boolean(elements.discoveryPolicyAutoReplaceDocker?.checked),
   });
 }
 
@@ -3154,6 +3225,10 @@ function renderDiscoveryDataPolicySettings() {
   }
   if (elements.discoveryPolicyShowPreview) {
     elements.discoveryPolicyShowPreview.checked = Boolean(policy.showMetadataInPreview);
+  }
+  if (elements.discoveryPolicyAutoReplaceDocker) {
+    const replacementPolicy = normalizeDiscoveryReplacementPolicy(state.settings?.discoveryReplacementPolicy);
+    elements.discoveryPolicyAutoReplaceDocker.checked = Boolean(replacementPolicy.autoReplaceDockerContainers);
   }
   syncDiscoveryPolicyControls();
 }
@@ -3642,6 +3717,37 @@ function applyAuthSession(session) {
   } else {
     elements.bootstrapHint.hidden = true;
   }
+
+  syncCurrentUserChrome();
+}
+
+function syncCurrentUserChrome() {
+  const currentUser = state.auth?.user;
+  const userBadge = currentUser?.displayName || currentUser?.username || t("role_summary_guest");
+  const userRoleLabel = currentUser?.role ? t(`role_summary_${currentUser.role}`) : t("role_summary_guest");
+
+  if (elements.currentUserBadge) {
+    elements.currentUserBadge.textContent = userBadge;
+    elements.currentUserBadge.title = currentUser?.username
+      ? [currentUser.displayName, currentUser.username].filter(Boolean).join(" · ")
+      : "";
+  }
+  if (elements.currentUserDisplay) {
+    elements.currentUserDisplay.value = currentUser?.username || "";
+  }
+  if (elements.currentUserNameInput) {
+    elements.currentUserNameInput.value = currentUser?.displayName || "";
+  }
+  if (elements.userMenuNote) {
+    elements.userMenuNote.textContent = currentUser?.mustChangePassword
+      ? t("must_change_password_note")
+      : t("user_menu_note", { role: userRoleLabel });
+  }
+  if (elements.currentUserRoleNote) {
+    elements.currentUserRoleNote.textContent = currentUser?.mustChangePassword
+      ? t("must_change_password_note")
+      : t("current_role_note", { role: userRoleLabel });
+  }
 }
 
 function applyPreferences(nextPreferences) {
@@ -3837,6 +3943,7 @@ function renderPermissionAwareUi() {
     elements.discoveryPolicyStoreNetwork,
     elements.discoveryPolicyStoreRaw,
     elements.discoveryPolicyShowPreview,
+    elements.discoveryPolicyAutoReplaceDocker,
     elements.saveDiscoveryPolicyButton,
     elements.discoveryAgentPolicyUseDefault,
     elements.discoveryAgentPolicyStoreRuntime,
@@ -4059,6 +4166,10 @@ function setActiveView(viewName) {
 
   syncRegistrySections();
   updateNavigationHash();
+  if (activeView === "map") {
+    syncTopologyFilterOptions();
+    renderTopologyMapIfVisible();
+  }
 }
 
 function setActiveRegistrySection(sectionName) {
@@ -4122,7 +4233,54 @@ function syncRegistrySections() {
   });
 }
 
+function mergeRefreshOptions(currentOptions, nextOptions) {
+  if (!currentOptions) {
+    return nextOptions;
+  }
+  return {
+    silent: Boolean(currentOptions.silent && nextOptions.silent),
+    forceRender: Boolean(currentOptions.forceRender || nextOptions.forceRender),
+  };
+}
+
+function scheduleStateRefresh({ silent = true, forceRender = false, delay = 150 } = {}) {
+  pendingRefreshOptions = mergeRefreshOptions(pendingRefreshOptions, { silent, forceRender });
+  if (refreshDebounceTimer) {
+    window.clearTimeout(refreshDebounceTimer);
+  }
+  refreshDebounceTimer = window.setTimeout(() => {
+    const options = pendingRefreshOptions || { silent: true, forceRender: false };
+    pendingRefreshOptions = null;
+    refreshDebounceTimer = null;
+    void refreshState(options.silent, options.forceRender);
+  }, delay);
+}
+
 async function refreshState(silent = false, forceRender = false) {
+  if (refreshDebounceTimer) {
+    window.clearTimeout(refreshDebounceTimer);
+    refreshDebounceTimer = null;
+    pendingRefreshOptions = null;
+  }
+  if (refreshInFlight) {
+    queuedRefreshOptions = mergeRefreshOptions(queuedRefreshOptions, { silent, forceRender });
+    return refreshInFlight;
+  }
+
+  refreshInFlight = refreshStateInternal(silent, forceRender);
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+    if (queuedRefreshOptions) {
+      const options = queuedRefreshOptions;
+      queuedRefreshOptions = null;
+      scheduleStateRefresh({ ...options, delay: 80 });
+    }
+  }
+}
+
+async function refreshStateInternal(silent = false, forceRender = false) {
   try {
     const snapshot = await apiRequest("/state");
     const normalizedSnapshot = normalizeState(snapshot);
@@ -4135,10 +4293,16 @@ async function refreshState(silent = false, forceRender = false) {
 
     if (shouldSkipFullRender) {
       state.auth = normalizedSnapshot.auth || state.auth;
+      state.topology = normalizedSnapshot.topology;
       state.settings = normalizedSnapshot.settings;
       if (hasTimeSensitiveAvailabilityRecords()) {
         renderLiveData();
       }
+      if (shouldRenderTopologyNow()) {
+        syncTopologyFilterOptions();
+        renderTopologyMapIfVisible();
+      }
+      syncCurrentUserChrome();
       return true;
     }
 
@@ -4164,6 +4328,19 @@ async function refreshState(silent = false, forceRender = false) {
   }
 }
 
+function getLiveRefreshDelay(event) {
+  try {
+    const payload = JSON.parse(event?.data || "{}");
+    const eventType = String(payload?.type || "");
+    if (eventType.startsWith("discovery-")) {
+      return 900;
+    }
+  } catch {
+    // Keep the default delay when the stream sends a non-JSON heartbeat.
+  }
+  return 250;
+}
+
 function connectLiveStream() {
   if (!state.auth?.authenticated) {
     return;
@@ -4175,11 +4352,13 @@ function connectLiveStream() {
   eventSource = new EventSource(`${API_BASE}/stream`, { withCredentials: true });
   eventSource.onopen = () => {};
 
-  eventSource.onmessage = async () => {
-    await refreshState(true);
+  eventSource.onmessage = (event) => {
+    scheduleStateRefresh({ silent: true, delay: getLiveRefreshDelay(event) });
   };
 
-  eventSource.onerror = () => {};
+  eventSource.onerror = () => {
+    scheduleStateRefresh({ silent: true, delay: 1500 });
+  };
 }
 
 function disconnectLiveStream() {
@@ -4193,6 +4372,7 @@ function applyState(snapshot) {
   state.subnets = snapshot.subnets;
   state.groups = snapshot.groups;
   state.devices = snapshot.devices;
+  state.topology = snapshot.topology;
   state.scanResults = snapshot.scanResults;
   state.history = snapshot.history;
   state.meta = snapshot.meta;
@@ -4593,9 +4773,10 @@ async function handleDiscoveryAgentSubmit(event) {
 async function handleDiscoveryPolicySave() {
   try {
     const discoveryDataPolicy = getDiscoveryDataPolicyDraft();
+    const discoveryReplacementPolicy = getDiscoveryReplacementPolicyDraft();
     const updatedSettings = await apiRequest("/settings", {
       method: "PATCH",
-      body: JSON.stringify({ discoveryDataPolicy }),
+      body: JSON.stringify({ discoveryDataPolicy, discoveryReplacementPolicy }),
     });
     state.settings = normalizeServerSettings(updatedSettings, state.meta);
     renderDiscoveryDataPolicySettings();
@@ -5310,6 +5491,162 @@ function exportJson() {
     JSON.stringify(payload, null, 2),
     "application/json"
   );
+}
+
+function getTopologyExportPayload() {
+  const filteredTopology = getFilteredTopology();
+  return {
+    kind: "atlas-topology-map",
+    schema: state.topology?.schema || "atlas.topology.v1",
+    exportedAt: new Date().toISOString(),
+    mode: topologyMode,
+    filters: {
+      subnet: topologySubnetFilter,
+      layer: topologyLayerFilter,
+      source: topologySourceFilter,
+      status: topologyStatusFilter,
+    },
+    nodes: filteredTopology.nodes,
+    links: filteredTopology.links,
+    interfaces: filteredTopology.interfaces,
+    subnets: filteredTopology.subnets,
+    capabilities: state.topology?.capabilities || { advancedMode: false, layers: {} },
+  };
+}
+
+function getTopologyStandaloneSvgText() {
+  const svg = elements.topologyMapCanvas?.querySelector(".topology-graph-svg");
+  if (!svg) {
+    throw new Error(t("topology_export_empty"));
+  }
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("version", "1.1");
+  clone.removeAttribute("style");
+  const viewBox = clone.getAttribute("viewBox") || "";
+  const [, , viewBoxWidth, viewBoxHeight] = viewBox.split(/\s+/).map(Number);
+  if (viewBoxWidth && viewBoxHeight) {
+    clone.setAttribute("width", String(Math.ceil(viewBoxWidth)));
+    clone.setAttribute("height", String(Math.ceil(viewBoxHeight)));
+  }
+
+  const computed = getComputedStyle(document.body);
+  const variables = Array.from(computed)
+    .filter((name) => name.startsWith("--"))
+    .map((name) => `${name}: ${computed.getPropertyValue(name).trim()};`)
+    .join("\n");
+  const topologyRules = [];
+  Array.from(document.styleSheets).forEach((sheet) => {
+    try {
+      Array.from(sheet.cssRules || []).forEach((rule) => {
+        const cssText = rule.cssText || "";
+        if (
+          cssText.includes("topology-graph")
+          || cssText.includes("topology-arrow")
+          || cssText.includes("--topology-service-accent")
+        ) {
+          topologyRules.push(cssText);
+        }
+      });
+    } catch {
+      // Ignore stylesheets the browser refuses to expose.
+    }
+  });
+
+  const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = `
+    .topology-graph-svg {
+      ${variables}
+      color: ${computed.color};
+      background: ${computed.getPropertyValue("--bg-bottom").trim() || "#070a11"};
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    ${topologyRules.join("\n")}
+  `;
+  clone.insertBefore(style, clone.firstChild);
+
+  const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  background.setAttribute("x", "0");
+  background.setAttribute("y", "0");
+  background.setAttribute("width", String(viewBoxWidth || "100%"));
+  background.setAttribute("height", String(viewBoxHeight || "100%"));
+  background.setAttribute("fill", computed.getPropertyValue("--bg-bottom").trim() || "#070a11");
+  clone.insertBefore(background, style.nextSibling);
+
+  const serializer = new XMLSerializer();
+  return `<?xml version="1.0" encoding="UTF-8"?>\n${serializer.serializeToString(clone)}`;
+}
+
+function exportTopologySvg() {
+  try {
+    downloadFile(
+      `atlas-topology-${timestampForFile()}.svg`,
+      getTopologyStandaloneSvgText(),
+      "image/svg+xml;charset=utf-8"
+    );
+    showToast(t("topology_export_svg_done"));
+  } catch (error) {
+    showToast(error.message || t("topology_export_failed"), true);
+  }
+}
+
+async function exportTopologyPng() {
+  try {
+    const svgText = getTopologyStandaloneSvgText();
+    const svg = elements.topologyMapCanvas?.querySelector(".topology-graph-svg");
+    const viewBox = svg?.getAttribute("viewBox") || "";
+    const [, , rawWidth, rawHeight] = viewBox.split(/\s+/).map(Number);
+    const width = Math.max(1, Math.ceil(rawWidth || 1600));
+    const height = Math.max(1, Math.ceil(rawHeight || 1000));
+    const scale = Math.min(2, 4096 / Math.max(width, height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error(t("topology_export_failed"));
+    }
+    const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = url;
+      if (image.decode) {
+        await image.decode();
+      } else {
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = reject;
+        });
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const pngBlob = await new Promise((resolve, reject) => {
+      canvas.toBlob((value) => {
+        if (value) {
+          resolve(value);
+        } else {
+          reject(new Error(t("topology_export_failed")));
+        }
+      }, "image/png");
+    });
+    downloadBlob(`atlas-topology-${timestampForFile()}.png`, pngBlob);
+    showToast(t("topology_export_png_done"));
+  } catch (error) {
+    showToast(error.message || t("topology_export_failed"), true);
+  }
+}
+
+function exportTopologyJson() {
+  downloadFile(
+    `atlas-topology-${timestampForFile()}.json`,
+    JSON.stringify(getTopologyExportPayload(), null, 2),
+    "application/json"
+  );
+  showToast(t("topology_export_json_done"));
 }
 
 async function exportBackup() {
@@ -6162,12 +6499,36 @@ function renderFormChrome() {
   }
 }
 
+function shouldRenderTopologyNow() {
+  if (activeView !== "map" || !elements.topologyMapCanvas) {
+    return false;
+  }
+  return !elements.topologyMapCanvas.closest("[hidden]");
+}
+
+function renderTopologyMapIfVisible() {
+  if (!shouldRenderTopologyNow()) {
+    return;
+  }
+  if (topologyRenderFrame) {
+    return;
+  }
+  const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+  topologyRenderFrame = scheduleFrame(() => {
+    topologyRenderFrame = 0;
+    if (shouldRenderTopologyNow()) {
+      renderTopologyMap();
+    }
+  });
+}
+
 function renderLiveData() {
   renderDeviceGroupFilterOptions();
   renderSubnetsTable();
   renderGroupsTable();
   renderDevicesTable();
   renderServicesList();
+  renderTopologyMapIfVisible();
   renderHistoryTable();
   renderAdminPanels();
   renderStats();
@@ -6175,6 +6536,1769 @@ function renderLiveData() {
   syncRegistrySections();
   updateAutomationWidgets();
   renderPermissionAwareUi();
+}
+
+function topologyLabelKey(prefix, value) {
+  return `${prefix}_${String(value || "unknown").replace(/[^a-z0-9_]+/gi, "_").toLowerCase()}`;
+}
+
+function formatTopologyLabel(prefix, value) {
+  const key = topologyLabelKey(prefix, value);
+  const translated = t(key);
+  return translated === key ? String(value || "unknown") : translated;
+}
+
+function syncTopologyFilterOptions() {
+  if (!elements.topologySourceFilter || !elements.topologySubnetFilter || !elements.topologyModeSelect) {
+    return;
+  }
+  const topology = state.topology || {};
+  const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
+  const capabilityLayers = topology.capabilities?.layers && typeof topology.capabilities.layers === "object"
+    ? topology.capabilities.layers
+    : {};
+  const capabilityVisibleNodes = nodes.filter((node) => !node.layer || capabilityLayers[node.layer] !== false);
+  const subnetNodes = capabilityVisibleNodes
+    .filter((node) => node.kind === "subnet")
+    .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" }));
+  const subnetOptions = [
+    `<option value="all">${escapeHtml(t("topology_filter_all"))}</option>`,
+    ...subnetNodes.map((subnet) => `<option value="${escapeHtml(subnet.subnetId)}">${escapeHtml([subnet.label, subnet.cidr].filter(Boolean).join(" · "))}</option>`),
+  ];
+  elements.topologySubnetFilter.innerHTML = subnetOptions.join("");
+  const validSubnetValues = new Set(["all", ...subnetNodes.map((subnet) => subnet.subnetId)]);
+  elements.topologySubnetFilter.value = validSubnetValues.has(topologySubnetFilter) ? topologySubnetFilter : "all";
+  topologySubnetFilter = elements.topologySubnetFilter.value;
+
+  const layerOrder = ["hosts", "services", "containers", "kubernetes", "proxmox", "iot"];
+  const availableLayers = layerOrder.filter((layer) => (
+    capabilityVisibleNodes.some((node) => node.layer === layer)
+  ));
+  if (elements.topologyLayerFilter) {
+    const layerOptions = [
+      `<option value="all">${escapeHtml(t("topology_filter_all"))}</option>`,
+      ...availableLayers.map((layer) => `<option value="${escapeHtml(layer)}">${escapeHtml(formatTopologyLabel("topology_layer", layer))}</option>`),
+    ];
+    elements.topologyLayerFilter.innerHTML = layerOptions.join("");
+    elements.topologyLayerFilter.value = availableLayers.includes(topologyLayerFilter) ? topologyLayerFilter : "all";
+    topologyLayerFilter = elements.topologyLayerFilter.value;
+  }
+
+  const sources = [...new Set(capabilityVisibleNodes.map((node) => String(node.source || "").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, getLanguage(), { sensitivity: "base" }));
+  const sourceOptions = [
+    `<option value="all">${escapeHtml(t("topology_filter_all"))}</option>`,
+    ...sources.map((source) => `<option value="${escapeHtml(source)}">${escapeHtml(formatTopologyLabel("topology_source", source))}</option>`),
+  ];
+  elements.topologySourceFilter.innerHTML = sourceOptions.join("");
+  elements.topologySourceFilter.value = sources.includes(topologySourceFilter) ? topologySourceFilter : "all";
+  topologySourceFilter = elements.topologySourceFilter.value;
+
+  const advancedAllowed = Boolean(topology.capabilities?.advancedMode);
+  elements.topologyModeSelect.querySelector('option[value="advanced"]')?.toggleAttribute("disabled", !advancedAllowed);
+  if (!advancedAllowed && topologyMode === "advanced") {
+    topologyMode = "simple";
+  }
+  elements.topologyModeSelect.value = topologyMode;
+  if (elements.topologyStatusFilter) {
+    elements.topologyStatusFilter.value = topologyStatusFilter;
+  }
+}
+
+function getFilteredTopology() {
+  const topology = state.topology || {};
+  const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
+  const links = Array.isArray(topology.links) ? topology.links : [];
+  const interfaces = Array.isArray(topology.interfaces) ? topology.interfaces : [];
+  const nodesById = getTopologyNodeMap(nodes);
+  const capabilityLayers = topology.capabilities?.layers && typeof topology.capabilities.layers === "object"
+    ? topology.capabilities.layers
+    : {};
+  const coreBySubnetId = new Map();
+  links.forEach((link) => {
+    if (link.kind !== "core-subnet") {
+      return;
+    }
+    const subnetNode = nodesById.get(link.target);
+    if (subnetNode?.subnetId) {
+      coreBySubnetId.set(subnetNode.subnetId, link.source);
+    }
+  });
+  const subnetNodes = nodes.filter((node) => (
+    node.kind === "subnet"
+    && (!node.layer || capabilityLayers[node.layer] !== false)
+    && (topologySubnetFilter === "all" || node.subnetId === topologySubnetFilter)
+  ));
+  const filteredNodes = nodes.filter((node) => {
+    if (node.kind === "subnet") {
+      return false;
+    }
+    if (node.layer && capabilityLayers[node.layer] === false) {
+      return false;
+    }
+    if (topologySubnetFilter !== "all" && node.subnetId !== topologySubnetFilter) {
+      return false;
+    }
+    if (topologyLayerFilter === "all" && node.layer === "iot") {
+      return false;
+    }
+    if (topologyMode === "simple" && String(node.id || "").startsWith("discovery:")) {
+      return false;
+    }
+    if (node.kind === "template" || node.sourceKind === "template") {
+      return false;
+    }
+    if (topologyLayerFilter !== "all" && node.layer !== topologyLayerFilter) {
+      return false;
+    }
+    if (topologySourceFilter !== "all" && node.source !== topologySourceFilter) {
+      return false;
+    }
+    if (topologyStatusFilter !== "all" && node.status !== topologyStatusFilter) {
+      return false;
+    }
+    return true;
+  });
+  const visibleNodeIds = new Set(filteredNodes.map((node) => node.id));
+  filteredNodes.forEach((node) => {
+    const coreNodeId = node.subnetId ? coreBySubnetId.get(node.subnetId) : "";
+    if (coreNodeId) {
+      visibleNodeIds.add(coreNodeId);
+    }
+  });
+  links.forEach((link) => {
+    if (link.kind === "hypervisor-guest" && visibleNodeIds.has(link.target)) {
+      visibleNodeIds.add(link.source);
+    }
+    if (link.kind === "host-service" && visibleNodeIds.has(link.target)) {
+      visibleNodeIds.add(link.source);
+    }
+    if (link.kind === "kubernetes-service-workload" && visibleNodeIds.has(link.target)) {
+      visibleNodeIds.add(link.source);
+    }
+  });
+  const visibleNodes = nodes
+    .filter((node) => visibleNodeIds.has(node.id) && node.kind !== "subnet")
+    .filter((node) => !node.layer || capabilityLayers[node.layer] !== false);
+  const strongParentTargets = new Set(
+    links
+      .filter((link) => (
+        ["hypervisor-guest", "host-service", "kubernetes-service-workload"].includes(link.kind)
+        && visibleNodeIds.has(link.source)
+        && visibleNodeIds.has(link.target)
+      ))
+      .map((link) => link.target)
+  );
+  const collapsedSubnetLinks = links
+    .filter((link) => link.kind === "subnet-member")
+    .map((link) => {
+      const subnetNode = nodesById.get(link.source);
+      const coreNodeId = subnetNode?.subnetId ? coreBySubnetId.get(subnetNode.subnetId) : "";
+      if (!coreNodeId || !visibleNodeIds.has(link.target) || coreNodeId === link.target || strongParentTargets.has(link.target)) {
+        return null;
+      }
+      return {
+        ...link,
+        id: `link:core-member:${coreNodeId}:${link.target}`,
+        source: coreNodeId,
+        target: link.target,
+        kind: "core-member",
+        reason: "Subnet membership is shown through the core router.",
+      };
+    })
+    .filter(Boolean);
+  const collapsedLinkPairs = new Set(collapsedSubnetLinks.map((link) => `${link.source}:${link.target}`));
+  const existingLinkPairs = new Set(
+    links
+      .filter((link) => visibleNodeIds.has(link.source) && visibleNodeIds.has(link.target))
+      .map((link) => `${link.source}:${link.target}`)
+  );
+  const inferredCoreLinks = visibleNodes
+    .map((node) => {
+      const coreNodeId = node.subnetId ? coreBySubnetId.get(node.subnetId) : "";
+      const pairKey = `${coreNodeId}:${node.id}`;
+      if (!coreNodeId || coreNodeId === node.id || strongParentTargets.has(node.id) || existingLinkPairs.has(pairKey) || collapsedLinkPairs.has(pairKey)) {
+        return null;
+      }
+      return {
+        id: `link:core-member:${coreNodeId}:${node.id}`,
+        source: coreNodeId,
+        target: node.id,
+        kind: "core-member",
+        confidence: "medium",
+        reason: "Visible node belongs to the core subnet context.",
+        sourceType: "inferred",
+        graphSource: "inferred",
+      };
+    })
+    .filter(Boolean);
+  const visibleLinks = [
+    ...links.filter((link) => (
+      link.kind !== "core-subnet"
+      && link.kind !== "subnet-member"
+      && visibleNodeIds.has(link.source)
+      && visibleNodeIds.has(link.target)
+    )),
+    ...collapsedSubnetLinks,
+    ...inferredCoreLinks,
+  ];
+  const visibleInterfaces = interfaces.filter((item) => visibleNodeIds.has(item.nodeId));
+  return { nodes: visibleNodes, links: visibleLinks, interfaces: visibleInterfaces, subnets: subnetNodes };
+}
+
+function renderTopologySummary(nodes, links, interfaces, subnets = []) {
+  if (!elements.topologySummaryGrid || !elements.topologySummaryCounter) {
+    return;
+  }
+  const summaryItems = [
+    ["topology_summary_nodes", nodes.length],
+    ["topology_summary_links", links.length],
+    ["topology_summary_interfaces", interfaces.length],
+    ["topology_summary_subnets", subnets.length],
+    ["topology_summary_hosts", nodes.filter((node) => node.role === "host").length],
+    ["topology_summary_workloads", nodes.filter((node) => node.role === "workload").length],
+  ];
+  elements.topologySummaryCounter.textContent = t("topology_counter", { nodes: nodes.length, links: links.length });
+  elements.topologySummaryGrid.innerHTML = summaryItems.map(([labelKey, value]) => `
+    <div class="topology-summary-card">
+      <span>${escapeHtml(t(labelKey))}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+    </div>
+  `).join("");
+}
+
+function topologyStatusBadgeClass(status) {
+  if (status === "up") {
+    return "ok";
+  }
+  if (status === "down") {
+    return "danger";
+  }
+  if (status === "pending") {
+    return "warn";
+  }
+  return "muted";
+}
+
+function renderTopologyCompactNode(node, options = {}) {
+  const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
+  const details = [
+    node.cidr,
+    node.ip,
+    metadata.ports,
+    metadata.deviceClass,
+    metadata.location || metadata.room,
+  ].filter(Boolean).slice(0, options.maxDetails || 2);
+  return `
+    <div class="topology-mini-node topology-mini-node--${escapeHtml(node.role || "unknown")}">
+      <div class="topology-mini-node__main">
+        <strong>${escapeHtml(node.label || node.id)}</strong>
+        <span>${escapeHtml(formatTopologyLabel("topology_kind", node.kind))}</span>
+      </div>
+      <span class="status-badge status-badge--${topologyStatusBadgeClass(node.status)}">
+        ${escapeHtml(formatTopologyLabel("topology_status", node.status))}
+      </span>
+      ${details.length ? `<div class="topology-mini-node__details">${details.map((item) => `<code>${escapeHtml(String(item))}</code>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderTopologySubnetContext(subnets, nodes) {
+  if (!subnets.length) {
+    return "";
+  }
+  const cards = subnets.map((subnet) => {
+    const memberCount = nodes.filter((node) => node.subnetId === subnet.subnetId).length;
+    const metadata = subnet.metadata && typeof subnet.metadata === "object" ? subnet.metadata : {};
+    const details = [
+      subnet.cidr,
+      metadata.network ? `${metadata.network}${metadata.broadcast ? ` - ${metadata.broadcast}` : ""}` : "",
+      metadata.poolSize ? t("topology_subnet_pool", { count: metadata.poolSize }) : "",
+    ].filter(Boolean);
+    return `
+      <article class="topology-subnet-context-card">
+        <div>
+          <strong>${escapeHtml(subnet.label || subnet.id)}</strong>
+          ${details.length ? `<span>${escapeHtml(details.join(" · "))}</span>` : ""}
+        </div>
+        <code>${escapeHtml(t("topology_subnet_members", { count: memberCount }))}</code>
+      </article>
+    `;
+  }).join("");
+  return `<section class="topology-subnet-context">${cards}</section>`;
+}
+
+function getTopologyNodeMap(nodes) {
+  return new Map(nodes.map((node) => [node.id, node]));
+}
+
+function truncateTopologyGraphText(value, maxLength = 24) {
+  const text = String(value || "").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(1, maxLength - 3))}...`;
+}
+
+function topologyLinkMarkerId(kind) {
+  const normalized = String(kind || "related").replace(/[^a-z0-9-]+/gi, "-").toLowerCase();
+  return `topology-arrow-${normalized}`;
+}
+
+const TOPOLOGY_HOST_SERVICE_COLORS = [
+  "#a78bfa",
+  "#e879f9",
+  "#fb7185",
+  "#f97316",
+  "#f59e0b",
+  "#84cc16",
+  "#34d399",
+  "#2dd4bf",
+  "#f472b6",
+  "#c084fc",
+];
+
+function topologyStableColorIndex(value, size = TOPOLOGY_HOST_SERVICE_COLORS.length) {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) % Math.max(1, size);
+}
+
+function topologyHostServiceColor(sourceId) {
+  return TOPOLOGY_HOST_SERVICE_COLORS[topologyStableColorIndex(sourceId)];
+}
+
+function topologyHostServiceMarkerId(sourceId) {
+  return `topology-arrow-host-service-${topologyStableColorIndex(sourceId)}`;
+}
+
+function resetTopologyViewport() {
+  topologyZoom = TOPOLOGY_ZOOM_MIN;
+  topologyZoomUserAdjusted = false;
+  topologyPanUserAdjusted = false;
+  topologyPanState = null;
+}
+
+function clampTopologyZoom(value) {
+  const renderedMin = Number(elements.topologyMapCanvas?.querySelector("#topology-zoom-range")?.dataset.minZoom || 0);
+  const minimum = renderedMin || TOPOLOGY_ZOOM_MIN;
+  return Math.min(TOPOLOGY_ZOOM_MAX, Math.max(minimum, Number(value) || 1));
+}
+
+function getTopologyGraphViewport() {
+  const viewport = elements.topologyMapCanvas?.querySelector(".topology-graph-scroll");
+  const graphZoom = elements.topologyMapCanvas?.querySelector("[data-topology-graph-zoom]");
+  return { viewport, graphZoom };
+}
+
+function applyTopologyViewportToRenderedGraph() {
+  const graphZoom = elements.topologyMapCanvas?.querySelector("[data-topology-graph-zoom]");
+  const range = elements.topologyMapCanvas?.querySelector("#topology-zoom-range");
+  if (graphZoom) {
+    graphZoom.style.transform = `translate3d(${Math.round(topologyPanX)}px, ${Math.round(topologyPanY)}px, 0) scale(${topologyZoom})`;
+  }
+  if (range) {
+    const minZoom = Number(range.dataset.minZoom || TOPOLOGY_ZOOM_MIN);
+    const maxZoom = Number(range.dataset.maxZoom || TOPOLOGY_ZOOM_MAX);
+    const progress = maxZoom > minZoom ? ((topologyZoom - minZoom) / (maxZoom - minZoom)) * 100 : 0;
+    range.value = String(Math.min(100, Math.max(0, Math.round(progress))));
+  }
+}
+
+function centerTopologyGraphIfNeeded() {
+  if (topologyPanUserAdjusted) {
+    applyTopologyViewportToRenderedGraph();
+    return;
+  }
+  const { viewport, graphZoom } = getTopologyGraphViewport();
+  const graphWidth = Number(graphZoom?.dataset.topologyGraphWidth || 0);
+  const graphHeight = Number(graphZoom?.dataset.topologyGraphHeight || 0);
+  const rootX = Number(graphZoom?.dataset.topologyRootX || 0);
+  const rootY = Number(graphZoom?.dataset.topologyRootY || 0);
+  if (!viewport || !graphWidth || !graphHeight) {
+    applyTopologyViewportToRenderedGraph();
+    return;
+  }
+  const anchorX = rootX || graphWidth / 2;
+  const anchorY = rootY || graphHeight / 2;
+  topologyPanX = viewport.clientWidth / 2 - anchorX * topologyZoom;
+  topologyPanY = viewport.clientHeight / 2 - anchorY * topologyZoom;
+  applyTopologyViewportToRenderedGraph();
+}
+
+function setTopologyZoom(value, options = {}) {
+  const { viewport } = getTopologyGraphViewport();
+  const previousZoom = topologyZoom || 1;
+  const rect = viewport?.getBoundingClientRect();
+  const anchorX = options.anchorEvent && rect
+    ? options.anchorEvent.clientX - rect.left
+    : (rect ? rect.width / 2 : 0);
+  const anchorY = options.anchorEvent && rect
+    ? options.anchorEvent.clientY - rect.top
+    : (rect ? rect.height / 2 : 0);
+  const graphAnchorX = (anchorX - topologyPanX) / previousZoom;
+  const graphAnchorY = (anchorY - topologyPanY) / previousZoom;
+
+  topologyZoomUserAdjusted = true;
+  topologyZoom = clampTopologyZoom(value);
+  if (options.render) {
+    renderTopologyMap();
+    return;
+  }
+  topologyPanX = anchorX - graphAnchorX * topologyZoom;
+  topologyPanY = anchorY - graphAnchorY * topologyZoom;
+  topologyPanUserAdjusted = true;
+  applyTopologyViewportToRenderedGraph();
+}
+
+function topologyGraphNodeSortRank(node) {
+  const kind = String(node?.kind || "").toLowerCase();
+  const role = String(node?.role || "").toLowerCase();
+  if (kind === "core-router") {
+    return 0;
+  }
+  if (kind === "switch") {
+    return 1;
+  }
+  if (kind === "hypervisor") {
+    return 2;
+  }
+  if (kind === "vm" || kind === "lxc") {
+    return 3;
+  }
+  if (role === "host") {
+    return 4;
+  }
+  if (kind === "kubernetes-service") {
+    return 5;
+  }
+  if (kind === "kubernetes-pod" || kind === "kubernetes-workload") {
+    return 6;
+  }
+  if (role === "workload") {
+    return 5;
+  }
+  if (role === "iot") {
+    return 7;
+  }
+  return 9;
+}
+
+function resolveTopologyGraphCollisions(graphNodes, positions, bounds, lockedNodeIds = new Set()) {
+  const padding = topologyMode === "advanced" ? 26 : 20;
+  const centerX = bounds.width / 2;
+  const centerY = bounds.height / 2;
+  for (let iteration = 0; iteration < 90; iteration += 1) {
+    let moved = false;
+    for (let leftIndex = 0; leftIndex < graphNodes.length; leftIndex += 1) {
+      const leftNode = graphNodes[leftIndex];
+      const left = positions.get(leftNode.id);
+      if (!left) {
+        continue;
+      }
+      for (let rightIndex = leftIndex + 1; rightIndex < graphNodes.length; rightIndex += 1) {
+        const rightNode = graphNodes[rightIndex];
+        const right = positions.get(rightNode.id);
+        if (!right) {
+          continue;
+        }
+        const leftCenterX = left.x + left.width / 2;
+        const leftCenterY = left.y + left.height / 2;
+        const rightCenterX = right.x + right.width / 2;
+        const rightCenterY = right.y + right.height / 2;
+        const overlapX = ((left.width + right.width) / 2 + padding) - Math.abs(leftCenterX - rightCenterX);
+        const overlapY = ((left.height + right.height) / 2 + padding) - Math.abs(leftCenterY - rightCenterY);
+        if (overlapX <= 0 || overlapY <= 0) {
+          continue;
+        }
+        const separateX = overlapX < overlapY;
+        let direction = separateX ? Math.sign(rightCenterX - leftCenterX) : Math.sign(rightCenterY - leftCenterY);
+        if (!direction) {
+          direction = separateX
+            ? Math.sign(rightCenterX - centerX) || 1
+            : Math.sign(rightCenterY - centerY) || 1;
+        }
+        const leftLocked = lockedNodeIds.has(leftNode.id);
+        const rightLocked = lockedNodeIds.has(rightNode.id);
+        if (leftLocked && rightLocked) {
+          continue;
+        }
+        const push = (separateX ? overlapX : overlapY) / 2 + 1;
+        const lockedPush = (separateX ? overlapX : overlapY) + 2;
+        if (separateX) {
+          if (leftLocked) {
+            right.x += direction * lockedPush;
+          } else if (rightLocked) {
+            left.x -= direction * lockedPush;
+          } else {
+            left.x -= direction * push;
+            right.x += direction * push;
+          }
+        } else {
+          if (leftLocked) {
+            right.y += direction * lockedPush;
+          } else if (rightLocked) {
+            left.y -= direction * lockedPush;
+          } else {
+            left.y -= direction * push;
+            right.y += direction * push;
+          }
+        }
+        moved = true;
+      }
+    }
+    positions.forEach((position, nodeId) => {
+      if (lockedNodeIds.has(nodeId)) {
+        return;
+      }
+      position.x = Math.min(Math.max(24, position.x), Math.max(24, bounds.width - position.width - 24));
+      position.y = Math.min(Math.max(24, position.y), Math.max(24, bounds.height - position.height - 24));
+    });
+    if (!moved) {
+      break;
+    }
+  }
+}
+
+function topologyGraphEdgePoint(from, to) {
+  const fromCenterX = from.x + from.width / 2;
+  const fromCenterY = from.y + from.height / 2;
+  const toCenterX = to.x + to.width / 2;
+  const toCenterY = to.y + to.height / 2;
+  const dx = toCenterX - fromCenterX;
+  const dy = toCenterY - fromCenterY;
+  if (!dx && !dy) {
+    return { x: fromCenterX, y: fromCenterY };
+  }
+  const scale = 1 / Math.max(Math.abs(dx) / (from.width / 2), Math.abs(dy) / (from.height / 2));
+  return {
+    x: fromCenterX + dx * scale * 0.92,
+    y: fromCenterY + dy * scale * 0.92,
+  };
+}
+
+function topologyLayoutClass(node) {
+  const kind = String(node?.kind || "").toLowerCase();
+  const role = String(node?.role || "").toLowerCase();
+  const layer = String(node?.layer || "").toLowerCase();
+  if (kind === "core-router") {
+    return "core";
+  }
+  if (kind === "switch" || role === "network") {
+    return "network";
+  }
+  if (kind === "hypervisor" || kind === "vm" || kind === "lxc") {
+    return "compute";
+  }
+  if (layer === "kubernetes" || kind === "kubernetes-service" || kind === "kubernetes-pod" || kind === "kubernetes-workload") {
+    return "kubernetes";
+  }
+  if (role === "iot" || kind === "iot") {
+    return "iot";
+  }
+  if (role === "workload" || kind === "service" || kind === "container") {
+    return "service";
+  }
+  if (role === "host" || kind === "host") {
+    return "host";
+  }
+  return "other";
+}
+
+function topologyLayoutAngleRange(layoutClass) {
+  const ranges = {
+    network: [-1.68, -1.08],
+    compute: [2.55, 3.35],
+    host: [-0.78, 0.78],
+    service: [0.28, 1.08],
+    kubernetes: [1.02, 1.62],
+    iot: [1.9, 2.46],
+    other: [-2.28, 2.28],
+  };
+  return ranges[layoutClass] || ranges.other;
+}
+
+function topologyDistributedAngle(range, index, count) {
+  const [start, end] = range;
+  if (count <= 1) {
+    return (start + end) / 2;
+  }
+  return start + ((end - start) * index) / (count - 1);
+}
+
+function topologySemanticAngle(node, index, count) {
+  return topologyDistributedAngle(topologyLayoutAngleRange(topologyLayoutClass(node)), index, count);
+}
+
+function topologyChildFanAngle(parentAngle, node, siblingIndex, siblingCount) {
+  const layoutClass = topologyLayoutClass(node);
+  const offsets = {
+    compute: -0.08,
+    service: 0.14,
+    kubernetes: 0.12,
+    iot: 0.22,
+    host: 0,
+    network: -0.12,
+    other: 0,
+  };
+  if (siblingCount <= 1) {
+    return parentAngle + (offsets[layoutClass] || 0);
+  }
+  const minimumSpreadByClass = {
+    service: Math.PI * 0.34,
+    kubernetes: Math.PI * 0.28,
+    compute: Math.PI * 0.24,
+    iot: Math.PI * 0.32,
+  };
+  const maximumSpreadByClass = {
+    service: Math.PI * 0.86,
+    kubernetes: Math.PI * 0.7,
+    compute: Math.PI * 0.64,
+    iot: Math.PI * 0.72,
+  };
+  const minimumSpread = minimumSpreadByClass[layoutClass] || Math.PI * 0.2;
+  const maximumSpread = maximumSpreadByClass[layoutClass] || Math.PI * 0.62;
+  const spread = Math.min(maximumSpread, Math.max(minimumSpread, siblingCount * 0.16));
+  const step = spread / Math.max(1, siblingCount - 1);
+  return parentAngle + (siblingIndex - (siblingCount - 1) / 2) * step;
+}
+
+function topologyHostedServiceMaxColumns() {
+  return topologyMode === "advanced" ? 6 : 5;
+}
+
+function getTopologyHostedServiceClusters(graphNodes, graphLinks) {
+  const nodesById = new Map(graphNodes.map((node) => [node.id, node]));
+  const clustersByHostId = new Map();
+  graphLinks
+    .filter((link) => link.kind === "host-service")
+    .forEach((link) => {
+      const sourceNode = nodesById.get(link.source);
+      const targetNode = nodesById.get(link.target);
+      if (!sourceNode || !targetNode) {
+        return;
+      }
+      const sourceClass = topologyLayoutClass(sourceNode);
+      const targetClass = topologyLayoutClass(targetNode);
+      const hostNode = sourceClass === "host" ? sourceNode : (targetClass === "host" ? targetNode : sourceNode);
+      const serviceNode = hostNode.id === sourceNode.id ? targetNode : sourceNode;
+      if (topologyLayoutClass(serviceNode) !== "service") {
+        return;
+      }
+      const current = clustersByHostId.get(hostNode.id) || { host: hostNode, services: [] };
+      if (!current.services.some((node) => node.id === serviceNode.id)) {
+        current.services.push(serviceNode);
+      }
+      clustersByHostId.set(hostNode.id, current);
+    });
+  return [...clustersByHostId.values()]
+    .map((cluster) => ({
+      ...cluster,
+      services: cluster.services
+        .slice()
+        .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" })),
+    }))
+    .filter((cluster) => cluster.services.length)
+    .sort((left, right) => String(left.host.label || "").localeCompare(String(right.host.label || ""), getLanguage(), { sensitivity: "base" }));
+}
+
+function topologyClusterBounds(nodeIds, positions, padding = 18) {
+  const boxes = nodeIds.map((nodeId) => positions.get(nodeId)).filter(Boolean);
+  if (!boxes.length) {
+    return null;
+  }
+  const left = Math.min(...boxes.map((box) => box.x)) - padding;
+  const top = Math.min(...boxes.map((box) => box.y)) - padding;
+  const right = Math.max(...boxes.map((box) => box.x + box.width)) + padding;
+  const bottom = Math.max(...boxes.map((box) => box.y + box.height)) + padding;
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function shiftTopologyCluster(nodeIds, positions, deltaX, deltaY, bounds) {
+  nodeIds.forEach((nodeId) => {
+    const position = positions.get(nodeId);
+    if (!position) {
+      return;
+    }
+    position.x = Math.min(Math.max(24, position.x + deltaX), Math.max(24, bounds.width - position.width - 24));
+    position.y = Math.min(Math.max(24, position.y + deltaY), Math.max(24, bounds.height - position.height - 24));
+  });
+}
+
+function topologyPositionRect(position, padding = 0) {
+  return {
+    left: position.x - padding,
+    top: position.y - padding,
+    right: position.x + position.width + padding,
+    bottom: position.y + position.height + padding,
+    width: position.width + padding * 2,
+    height: position.height + padding * 2,
+  };
+}
+
+function topologyRectOverlapArea(left, right) {
+  const overlapX = Math.min(left.right, right.right) - Math.max(left.left, right.left);
+  const overlapY = Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top);
+  return overlapX > 0 && overlapY > 0 ? overlapX * overlapY : 0;
+}
+
+function topologyObstacleRects(obstacleNodeIds, positions, excludedNodeIds = new Set(), padding = 26) {
+  return [...obstacleNodeIds]
+    .filter((nodeId) => !excludedNodeIds.has(nodeId))
+    .map((nodeId) => positions.get(nodeId))
+    .filter(Boolean)
+    .map((position) => topologyPositionRect(position, padding));
+}
+
+function topologyRowCandidateBounds(anchorPosition, rowWidth, rowHeight, direction, gapX, bounds, padding = 18) {
+  const idealStartX = direction > 0
+    ? anchorPosition.x + anchorPosition.width + gapX
+    : anchorPosition.x - gapX - rowWidth;
+  const startX = Math.min(Math.max(24, idealStartX), Math.max(24, bounds.width - rowWidth - 24));
+  const startY = Math.min(
+    Math.max(24, anchorPosition.y + anchorPosition.height / 2 - rowHeight / 2),
+    Math.max(24, bounds.height - rowHeight - 24),
+  );
+  return {
+    direction,
+    startX,
+    startY,
+    idealStartX,
+    left: startX - padding,
+    top: startY - padding,
+    right: startX + rowWidth + padding,
+    bottom: startY + rowHeight + padding,
+    width: rowWidth + padding * 2,
+    height: rowHeight + padding * 2,
+  };
+}
+
+function topologyRowPlacementPenalty(candidate, obstacleRects, preferredDirection) {
+  const overlapPenalty = obstacleRects.reduce(
+    (sum, rect) => sum + topologyRectOverlapArea(candidate, rect) * 20,
+    0,
+  );
+  const clampPenalty = Math.abs(candidate.startX - candidate.idealStartX) * 6;
+  const directionPenalty = candidate.direction === preferredDirection ? 0 : 80;
+  return overlapPenalty + clampPenalty + directionPenalty;
+}
+
+function getTopologyProtectedNodeIds(graphNodes) {
+  return new Set(graphNodes
+    .filter((node) => {
+      const kind = String(node.kind || "").toLowerCase();
+      const role = String(node.role || "").toLowerCase();
+      const layoutClass = topologyLayoutClass(node);
+      return kind === "subnet"
+        || role === "host"
+        || layoutClass === "core"
+        || layoutClass === "network"
+        || layoutClass === "compute";
+    })
+    .map((node) => node.id));
+}
+
+function getTopologyClusterDirectionFromParent(cluster, positions, parentById, nodesById, fallbackCenterX) {
+  const hostPosition = positions.get(cluster.host.id);
+  const parentId = parentById.get(cluster.host.id);
+  const parentNode = nodesById.get(parentId);
+  const parentPosition = parentId ? positions.get(parentId) : null;
+  if (hostPosition && parentPosition && parentNode?.kind === "hypervisor") {
+    const hostCenterX = hostPosition.x + hostPosition.width / 2;
+    const parentCenterX = parentPosition.x + parentPosition.width / 2;
+    return hostCenterX >= parentCenterX ? 1 : -1;
+  }
+  if (!hostPosition) {
+    return 1;
+  }
+  return hostPosition.x + hostPosition.width / 2 < fallbackCenterX ? -1 : 1;
+}
+
+function layoutTopologyHostedServiceRows(clusters, positions, bounds, nodeWidth, nodeHeight, parentById, nodesById, obstacleNodeIds = new Set()) {
+  const clusterNodeIds = new Set();
+  const gapX = topologyMode === "advanced" ? 42 : 36;
+  const gapY = 14;
+  const maxColumns = topologyHostedServiceMaxColumns();
+  const centerX = bounds.width / 2;
+  const placedClusterRects = [];
+
+  clusters.forEach((cluster) => {
+    const hostPosition = positions.get(cluster.host.id);
+    if (!hostPosition) {
+      return;
+    }
+    const columns = Math.max(1, Math.min(maxColumns, cluster.services.length));
+    const rows = Math.ceil(cluster.services.length / columns);
+    const rowWidth = columns * nodeWidth + (columns - 1) * gapX;
+    const rowHeight = rows * nodeHeight + (rows - 1) * gapY;
+    const preferredDirection = getTopologyClusterDirectionFromParent(cluster, positions, parentById, nodesById, centerX);
+    const ownNodeIds = new Set([cluster.host.id, ...cluster.services.map((node) => node.id)]);
+    const obstacleRects = [
+      ...topologyObstacleRects(obstacleNodeIds, positions, ownNodeIds),
+      ...placedClusterRects,
+    ];
+    const candidates = [preferredDirection, -preferredDirection]
+      .map((direction) => topologyRowCandidateBounds(hostPosition, rowWidth, rowHeight, direction, gapX, bounds))
+      .sort((left, right) => topologyRowPlacementPenalty(left, obstacleRects, preferredDirection)
+        - topologyRowPlacementPenalty(right, obstacleRects, preferredDirection));
+    const placement = candidates[0];
+    const { direction, startX, startY } = placement;
+
+    clusterNodeIds.add(cluster.host.id);
+    cluster.services.forEach((serviceNode, index) => {
+      const row = Math.floor(index / columns);
+      const column = index % columns;
+      const visualColumn = direction > 0 ? column : columns - column - 1;
+      positions.set(serviceNode.id, {
+        x: startX + visualColumn * (nodeWidth + gapX),
+        y: startY + row * (nodeHeight + gapY),
+        width: nodeWidth,
+        height: nodeHeight,
+      });
+      clusterNodeIds.add(serviceNode.id);
+    });
+    const clusterBounds = topologyClusterBounds([...ownNodeIds], positions, 24);
+    if (clusterBounds) {
+      placedClusterRects.push(clusterBounds);
+    }
+  });
+
+  return clusterNodeIds;
+}
+
+function getTopologyHypervisorGuestClusters(graphNodes, graphLinks) {
+  const nodesById = new Map(graphNodes.map((node) => [node.id, node]));
+  const clustersByHypervisorId = new Map();
+  graphLinks
+    .filter((link) => link.kind === "hypervisor-guest")
+    .forEach((link) => {
+      const sourceNode = nodesById.get(link.source);
+      const targetNode = nodesById.get(link.target);
+      if (!sourceNode || !targetNode) {
+        return;
+      }
+      const hypervisorNode = sourceNode.kind === "hypervisor" ? sourceNode : (targetNode.kind === "hypervisor" ? targetNode : null);
+      const guestNode = hypervisorNode?.id === sourceNode.id ? targetNode : sourceNode;
+      if (!hypervisorNode || !["vm", "lxc", "host"].includes(String(guestNode.kind || guestNode.role || "").toLowerCase())) {
+        return;
+      }
+      const current = clustersByHypervisorId.get(hypervisorNode.id) || { host: hypervisorNode, services: [] };
+      if (!current.services.some((node) => node.id === guestNode.id)) {
+        current.services.push(guestNode);
+      }
+      clustersByHypervisorId.set(hypervisorNode.id, current);
+    });
+  return [...clustersByHypervisorId.values()]
+    .map((cluster) => ({
+      ...cluster,
+      services: cluster.services
+        .slice()
+        .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" })),
+    }))
+    .filter((cluster) => cluster.services.length)
+    .sort((left, right) => String(left.host.label || "").localeCompare(String(right.host.label || ""), getLanguage(), { sensitivity: "base" }));
+}
+
+function layoutTopologyHypervisorGuestRows(clusters, positions, bounds, nodeWidth, nodeHeight, obstacleNodeIds = new Set()) {
+  const clusterNodeIds = new Set();
+  const gapX = topologyMode === "advanced" ? 52 : 44;
+  const gapY = 16;
+  const maxRows = topologyMode === "advanced" ? 6 : 5;
+  const placedClusterRects = [];
+
+  clusters.forEach((cluster) => {
+    const hypervisorPosition = positions.get(cluster.host.id);
+    if (!hypervisorPosition) {
+      return;
+    }
+    const rows = Math.max(1, Math.min(maxRows, cluster.services.length));
+    const columns = Math.ceil(cluster.services.length / rows);
+    const columnWidth = nodeWidth + gapX;
+    const blockWidth = columns * nodeWidth + (columns - 1) * gapX;
+    const blockHeight = rows * nodeHeight + (rows - 1) * gapY;
+    const preferredDirection = hypervisorPosition.x + hypervisorPosition.width / 2 < bounds.width / 2 ? -1 : 1;
+    const ownNodeIds = new Set([cluster.host.id, ...cluster.services.map((node) => node.id)]);
+    const obstacleRects = [
+      ...topologyObstacleRects(obstacleNodeIds, positions, ownNodeIds),
+      ...placedClusterRects,
+    ];
+    const candidates = [preferredDirection, -preferredDirection]
+      .map((direction) => topologyRowCandidateBounds(hypervisorPosition, blockWidth, blockHeight, direction, gapX, bounds))
+      .sort((left, right) => topologyRowPlacementPenalty(left, obstacleRects, preferredDirection)
+        - topologyRowPlacementPenalty(right, obstacleRects, preferredDirection));
+    const placement = candidates[0];
+    const { direction, startX, startY } = placement;
+
+    clusterNodeIds.add(cluster.host.id);
+    cluster.services.forEach((guestNode, index) => {
+      const row = index % rows;
+      const column = Math.floor(index / rows);
+      const visualColumn = direction > 0 ? column : columns - column - 1;
+      positions.set(guestNode.id, {
+        x: startX + visualColumn * columnWidth,
+        y: startY + row * (nodeHeight + gapY),
+        width: nodeWidth,
+        height: nodeHeight,
+      });
+      clusterNodeIds.add(guestNode.id);
+    });
+    const clusterBounds = topologyClusterBounds([...ownNodeIds], positions, 24);
+    if (clusterBounds) {
+      placedClusterRects.push(clusterBounds);
+    }
+  });
+
+  return clusterNodeIds;
+}
+
+function topologyNodeIdListsShareNode(leftIds, rightIds) {
+  const rightSet = new Set(rightIds);
+  return leftIds.some((nodeId) => rightSet.has(nodeId));
+}
+
+function resolveTopologyHostedServiceClusterCollisions(clusters, positions, bounds) {
+  const clusterNodeIds = clusters.map((cluster) => [cluster.host.id, ...cluster.services.map((node) => node.id)]);
+  for (let iteration = 0; iteration < 36; iteration += 1) {
+    let moved = false;
+    for (let leftIndex = 0; leftIndex < clusterNodeIds.length; leftIndex += 1) {
+      const leftIds = clusterNodeIds[leftIndex];
+      const leftBounds = topologyClusterBounds(leftIds, positions);
+      if (!leftBounds) {
+        continue;
+      }
+      for (let rightIndex = leftIndex + 1; rightIndex < clusterNodeIds.length; rightIndex += 1) {
+        const rightIds = clusterNodeIds[rightIndex];
+        if (topologyNodeIdListsShareNode(leftIds, rightIds)) {
+          continue;
+        }
+        const rightBounds = topologyClusterBounds(rightIds, positions);
+        if (!rightBounds) {
+          continue;
+        }
+        const overlapX = Math.min(leftBounds.right, rightBounds.right) - Math.max(leftBounds.left, rightBounds.left);
+        const overlapY = Math.min(leftBounds.bottom, rightBounds.bottom) - Math.max(leftBounds.top, rightBounds.top);
+        if (overlapX <= 0 || overlapY <= 0) {
+          continue;
+        }
+        const leftCenterY = leftBounds.top + leftBounds.height / 2;
+        const rightCenterY = rightBounds.top + rightBounds.height / 2;
+        const direction = Math.sign(rightCenterY - leftCenterY) || (rightIndex % 2 ? 1 : -1);
+        const push = overlapY / 2 + 12;
+        shiftTopologyCluster(leftIds, positions, 0, -direction * push, bounds);
+        shiftTopologyCluster(rightIds, positions, 0, direction * push, bounds);
+        moved = true;
+      }
+    }
+    if (!moved) {
+      break;
+    }
+  }
+}
+
+function resolveTopologyClusterObstacleCollisions(clusters, positions, bounds, obstacleNodeIds) {
+  const clusterNodeIds = clusters.map((cluster) => [cluster.host.id, ...cluster.services.map((node) => node.id)]);
+  for (let iteration = 0; iteration < 48; iteration += 1) {
+    let moved = false;
+    for (const nodeIds of clusterNodeIds) {
+      const ownNodeIds = new Set(nodeIds);
+      const clusterBounds = topologyClusterBounds(nodeIds, positions);
+      if (!clusterBounds) {
+        continue;
+      }
+      const clusterCenterX = clusterBounds.left + clusterBounds.width / 2;
+      const clusterCenterY = clusterBounds.top + clusterBounds.height / 2;
+      for (const obstacleId of obstacleNodeIds) {
+        if (ownNodeIds.has(obstacleId)) {
+          continue;
+        }
+        const obstaclePosition = positions.get(obstacleId);
+        if (!obstaclePosition) {
+          continue;
+        }
+        const obstacleBounds = topologyPositionRect(obstaclePosition, 30);
+        const overlapX = Math.min(clusterBounds.right, obstacleBounds.right) - Math.max(clusterBounds.left, obstacleBounds.left);
+        const overlapY = Math.min(clusterBounds.bottom, obstacleBounds.bottom) - Math.max(clusterBounds.top, obstacleBounds.top);
+        if (overlapX <= 0 || overlapY <= 0) {
+          continue;
+        }
+        const obstacleCenterX = obstacleBounds.left + obstacleBounds.width / 2;
+        const obstacleCenterY = obstacleBounds.top + obstacleBounds.height / 2;
+        if (overlapX < overlapY) {
+          const direction = Math.sign(clusterCenterX - obstacleCenterX) || (clusterCenterX < bounds.width / 2 ? -1 : 1);
+          shiftTopologyCluster(nodeIds, positions, direction * (overlapX + 22), 0, bounds);
+        } else {
+          const direction = Math.sign(clusterCenterY - obstacleCenterY) || (clusterCenterY < bounds.height / 2 ? -1 : 1);
+          shiftTopologyCluster(nodeIds, positions, 0, direction * (overlapY + 22), bounds);
+        }
+        moved = true;
+      }
+    }
+    if (!moved) {
+      break;
+    }
+  }
+}
+
+function renderTopologyGraph(nodes, links) {
+  if (!nodes.length) {
+    return "";
+  }
+  const nodeLimit = topologyMode === "advanced" ? 160 : 90;
+  const nodesById = getTopologyNodeMap(nodes);
+  const rootNode = nodes.find((node) => node.kind === "core-router")
+    || nodes.find((node) => node.role === "network" && node.kind !== "subnet")
+    || nodes.find((node) => node.kind === "subnet")
+    || nodes[0];
+  const adjacency = new Map();
+  links.forEach((link) => {
+    if (!nodesById.has(link.source) || !nodesById.has(link.target)) {
+      return;
+    }
+    adjacency.set(link.source, [...(adjacency.get(link.source) || []), link.target]);
+    adjacency.set(link.target, [...(adjacency.get(link.target) || []), link.source]);
+  });
+  const orderedNodeIds = [];
+  const visited = new Set();
+  const queue = [rootNode.id];
+  while (queue.length) {
+    const nodeId = queue.shift();
+    if (!nodeId || visited.has(nodeId) || !nodesById.has(nodeId)) {
+      continue;
+    }
+    visited.add(nodeId);
+    orderedNodeIds.push(nodeId);
+    const neighbors = (adjacency.get(nodeId) || [])
+      .filter((neighborId) => !visited.has(neighborId))
+      .sort((left, right) => {
+        const leftNode = nodesById.get(left);
+        const rightNode = nodesById.get(right);
+        const rankDelta = topologyGraphNodeSortRank(leftNode) - topologyGraphNodeSortRank(rightNode);
+        if (rankDelta) {
+          return rankDelta;
+        }
+        return String(leftNode?.label || "").localeCompare(String(rightNode?.label || ""), getLanguage(), { sensitivity: "base" });
+      });
+    queue.push(...neighbors);
+  }
+  const graphNodes = orderedNodeIds.slice(0, nodeLimit).map((nodeId) => nodesById.get(nodeId)).filter(Boolean);
+  const graphNodeIds = new Set(graphNodes.map((node) => node.id));
+  const graphLinks = links.filter((link) => graphNodeIds.has(link.source) && graphNodeIds.has(link.target));
+  const hostedServiceClusters = getTopologyHostedServiceClusters(graphNodes, graphLinks);
+  const hypervisorGuestClusters = getTopologyHypervisorGuestClusters(graphNodes, graphLinks);
+  const nodeServiceAccentById = new Map();
+  graphLinks
+    .filter((link) => link.kind === "host-service")
+    .forEach((link) => {
+      const accent = topologyHostServiceColor(link.source);
+      nodeServiceAccentById.set(link.source, accent);
+      nodeServiceAccentById.set(link.target, accent);
+    });
+
+  const linkParentPriority = {
+    "core-subnet": 100,
+    "hypervisor-guest": 90,
+    "host-service": 80,
+    "kubernetes-service-workload": 70,
+    "core-member": 50,
+    "subnet-member": 40,
+  };
+  const parentById = new Map();
+  graphLinks
+    .slice()
+    .sort((left, right) => (linkParentPriority[right.kind] || 1) - (linkParentPriority[left.kind] || 1))
+    .forEach((link) => {
+      if (link.target === rootNode.id || parentById.has(link.target)) {
+        return;
+      }
+      if (link.kind === "subnet-member" && nodesById.get(link.target)?.kind === "core-router") {
+        return;
+      }
+      parentById.set(link.target, link.source);
+    });
+
+  const depthById = new Map([[rootNode.id, 0]]);
+  const resolveDepth = (nodeId, stack = new Set()) => {
+    if (depthById.has(nodeId)) {
+      return depthById.get(nodeId);
+    }
+    if (stack.has(nodeId)) {
+      depthById.set(nodeId, 2);
+      return 2;
+    }
+    stack.add(nodeId);
+    const parentId = parentById.get(nodeId);
+    const node = nodesById.get(nodeId);
+    let depth = 2;
+    if (parentId && graphNodeIds.has(parentId)) {
+      depth = resolveDepth(parentId, stack) + 1;
+    } else if (node?.kind === "subnet") {
+      depth = rootNode.kind === "core-router" ? 1 : 0;
+    } else if (node?.kind === "hypervisor" || node?.kind === "switch") {
+      depth = 2;
+    } else if (node?.role === "workload") {
+      depth = 4;
+    }
+    stack.delete(nodeId);
+    depthById.set(nodeId, Math.min(6, depth));
+    return depthById.get(nodeId);
+  };
+  graphNodes.forEach((node) => {
+    resolveDepth(node.id);
+  });
+
+  const nodeWidth = 172;
+  const nodeHeight = 58;
+  const ringGap = topologyMode === "advanced" ? 190 : 154;
+  const maxHostedServiceColumns = Math.max(
+    0,
+    ...hostedServiceClusters.map((cluster) => Math.min(topologyHostedServiceMaxColumns(), cluster.services.length)),
+  );
+  const maxHypervisorGuestColumns = Math.max(
+    0,
+    ...hypervisorGuestClusters.map((cluster) => Math.ceil(cluster.services.length / (topologyMode === "advanced" ? 6 : 5))),
+  );
+  const hostedClusterWidth = maxHostedServiceColumns
+    ? nodeWidth * (maxHostedServiceColumns + 1) + 42 * maxHostedServiceColumns + 180
+    : 0;
+  const hypervisorClusterWidth = maxHypervisorGuestColumns
+    ? nodeWidth * (maxHypervisorGuestColumns + 1) + 52 * maxHypervisorGuestColumns + 180
+    : 0;
+  const nodesByDepth = new Map();
+  graphNodes.forEach((node) => {
+    const depth = Math.min(6, depthById.get(node.id) || 0);
+    nodesByDepth.set(depth, [...(nodesByDepth.get(depth) || []), node]);
+  });
+  const sortedDepths = [...nodesByDepth.keys()].sort((left, right) => left - right);
+  const widestDepthCount = Math.max(1, ...[...nodesByDepth.values()].map((items) => items.length));
+  const deepestDepth = Math.max(1, ...sortedDepths);
+  const breadthPressure = Math.min(0.72, widestDepthCount * 0.024);
+  const depthPressure = Math.min(0.28, deepestDepth * 0.035);
+  const ringScaleX = (topologyMode === "advanced" ? 1.34 : 1.24) + breadthPressure;
+  const ringScaleY = (topologyMode === "advanced" ? 0.72 : 0.78) + depthPressure;
+  const ringRadii = new Map([[0, 0]]);
+  let previousRadius = 0;
+  sortedDepths.forEach((depth) => {
+    if (depth === 0) {
+      return;
+    }
+    const count = nodesByDepth.get(depth)?.length || 1;
+    const circumferenceSpacing = topologyMode === "advanced" ? 252 : 224;
+    const minimumForCount = Math.ceil((count * circumferenceSpacing) / (Math.PI * 2));
+    const radius = Math.max(previousRadius + ringGap, 124 + depth * 44, minimumForCount);
+    ringRadii.set(depth, radius);
+    previousRadius = radius;
+  });
+  const maxRadius = Math.max(260, ...ringRadii.values());
+  const maxRadiusX = maxRadius * ringScaleX;
+  const maxRadiusY = maxRadius * ringScaleY;
+  const width = Math.ceil(Math.max(1160, (maxRadiusX + nodeWidth + 144) * 2, hostedClusterWidth * 2, hypervisorClusterWidth * 2));
+  const height = Math.ceil(Math.max(760, (maxRadiusY + nodeHeight + 118) * 2));
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const availableWidth = Math.max(720, (elements.topologyMapCanvas?.clientWidth || 1120) - 36);
+  const availableHeight = Math.max(420, Math.min(window.innerHeight * 0.82, 1040) - 24);
+  const fitZoomRaw = Math.max(
+    TOPOLOGY_ZOOM_MIN,
+    Math.min(1, availableWidth / width, availableHeight / height),
+  );
+  const fitZoom = Math.round(fitZoomRaw * 100) / 100;
+  const effectiveZoom = topologyZoomUserAdjusted ? Math.max(topologyZoom, fitZoom) : fitZoom;
+  if (!topologyZoomUserAdjusted) {
+    topologyZoom = effectiveZoom;
+  }
+  const zoomSliderValue = TOPOLOGY_ZOOM_MAX > fitZoom
+    ? Math.min(100, Math.max(0, Math.round(((effectiveZoom - fitZoom) / (TOPOLOGY_ZOOM_MAX - fitZoom)) * 100)))
+    : 0;
+  const positions = new Map();
+  const angleById = new Map([[rootNode.id, -Math.PI / 2]]);
+  sortedDepths.forEach((depth) => {
+    const depthNodes = nodesByDepth.get(depth) || [];
+    const sortedDepthNodes = depthNodes
+      .slice()
+      .sort((left, right) => {
+        const leftParentAngle = angleById.get(parentById.get(left.id)) ?? 0;
+        const rightParentAngle = angleById.get(parentById.get(right.id)) ?? 0;
+        if (leftParentAngle !== rightParentAngle) {
+          return leftParentAngle - rightParentAngle;
+        }
+        const rankDelta = topologyGraphNodeSortRank(left) - topologyGraphNodeSortRank(right);
+        if (rankDelta) {
+          return rankDelta;
+        }
+        return String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" });
+      });
+    const siblingsByParent = new Map();
+    sortedDepthNodes.forEach((node) => {
+      const parentId = parentById.get(node.id);
+      if (!parentId) {
+        return;
+      }
+      siblingsByParent.set(parentId, [...(siblingsByParent.get(parentId) || []), node]);
+    });
+    const nodesByLayoutClass = new Map();
+    sortedDepthNodes.forEach((node) => {
+      const layoutClass = topologyLayoutClass(node);
+      nodesByLayoutClass.set(layoutClass, [...(nodesByLayoutClass.get(layoutClass) || []), node]);
+    });
+    if (depth === 0) {
+      sortedDepthNodes.forEach((node, index) => {
+        positions.set(node.id, {
+          x: centerX - nodeWidth / 2,
+          y: centerY - nodeHeight / 2 + index * (nodeHeight + 10),
+          width: nodeWidth,
+          height: nodeHeight,
+        });
+      });
+      return;
+    }
+    const radius = ringRadii.get(depth) || previousRadius || ringGap;
+    const radiusX = radius * ringScaleX;
+    const radiusY = radius * ringScaleY;
+    const count = sortedDepthNodes.length;
+    sortedDepthNodes.forEach((node, index) => {
+      const layoutClass = topologyLayoutClass(node);
+      const classNodes = nodesByLayoutClass.get(layoutClass) || sortedDepthNodes;
+      const classIndex = Math.max(0, classNodes.findIndex((item) => item.id === node.id));
+      let angle = topologySemanticAngle(node, classIndex, classNodes.length);
+      const parentId = parentById.get(node.id);
+      const parentAngle = angleById.get(parentId);
+      const siblingGroup = siblingsByParent.get(parentId) || [];
+      if (depth > 1 && parentId && parentAngle !== undefined && siblingGroup.length <= 18) {
+        const siblingIndex = siblingGroup.findIndex((sibling) => sibling.id === node.id);
+        angle = topologyChildFanAngle(parentAngle, node, siblingIndex, siblingGroup.length);
+      }
+      if (node.role === "iot") {
+        angle = topologySemanticAngle(node, classIndex, classNodes.length);
+      } else if (node.kind === "hypervisor") {
+        angle -= 0.08;
+      } else if (node.role === "workload") {
+        angle += 0.08;
+      }
+      const layoutRadiusMultiplier = layoutClass === "service" || layoutClass === "kubernetes"
+        ? 1.08
+        : (layoutClass === "iot" ? 1.06 : 1);
+      angleById.set(node.id, angle);
+      positions.set(node.id, {
+        x: centerX + Math.cos(angle) * radiusX * layoutRadiusMultiplier - nodeWidth / 2,
+        y: centerY + Math.sin(angle) * radiusY * layoutRadiusMultiplier - nodeHeight / 2,
+        width: nodeWidth,
+        height: nodeHeight,
+      });
+    });
+  });
+  resolveTopologyGraphCollisions(graphNodes, positions, { width, height }, new Set([rootNode.id]));
+  const protectedNodeIds = getTopologyProtectedNodeIds(graphNodes);
+  const hypervisorClusterNodeIds = layoutTopologyHypervisorGuestRows(
+    hypervisorGuestClusters,
+    positions,
+    { width, height },
+    nodeWidth,
+    nodeHeight,
+    protectedNodeIds,
+  );
+  resolveTopologyClusterObstacleCollisions(hypervisorGuestClusters, positions, { width, height }, protectedNodeIds);
+  resolveTopologyHostedServiceClusterCollisions(hypervisorGuestClusters, positions, { width, height });
+  const hostedClusterNodeIds = layoutTopologyHostedServiceRows(
+    hostedServiceClusters,
+    positions,
+    { width, height },
+    nodeWidth,
+    nodeHeight,
+    parentById,
+    nodesById,
+    new Set([...protectedNodeIds, ...hypervisorClusterNodeIds]),
+  );
+  resolveTopologyClusterObstacleCollisions(
+    hostedServiceClusters,
+    positions,
+    { width, height },
+    new Set([...protectedNodeIds, ...hypervisorClusterNodeIds]),
+  );
+  resolveTopologyHostedServiceClusterCollisions(hostedServiceClusters, positions, { width, height });
+  resolveTopologyHostedServiceClusterCollisions([...hypervisorGuestClusters, ...hostedServiceClusters], positions, { width, height });
+  resolveTopologyClusterObstacleCollisions(
+    [...hypervisorGuestClusters, ...hostedServiceClusters],
+    positions,
+    { width, height },
+    protectedNodeIds,
+  );
+  resolveTopologyGraphCollisions(
+    graphNodes,
+    positions,
+    { width, height },
+    new Set([rootNode.id, ...hypervisorClusterNodeIds, ...hostedClusterNodeIds]),
+  );
+  const rootPosition = positions.get(rootNode.id) || {
+    x: centerX - nodeWidth / 2,
+    y: centerY - nodeHeight / 2,
+    width: nodeWidth,
+    height: nodeHeight,
+  };
+  const rootCenterX = rootPosition.x + rootPosition.width / 2;
+  const rootCenterY = rootPosition.y + rootPosition.height / 2;
+
+  const linkPaths = graphLinks.map((link) => {
+    const sourceDepth = depthById.get(link.source) || 0;
+    const targetDepth = depthById.get(link.target) || 0;
+    const displaySourceId = sourceDepth > targetDepth ? link.target : link.source;
+    const displayTargetId = sourceDepth > targetDepth ? link.source : link.target;
+    const source = positions.get(displaySourceId);
+    const target = positions.get(displayTargetId);
+    if (!source || !target) {
+      return "";
+    }
+    const sourcePoint = topologyGraphEdgePoint(source, target);
+    const targetPoint = topologyGraphEdgePoint(target, source);
+    const sx = sourcePoint.x;
+    const sy = sourcePoint.y;
+    const tx = targetPoint.x;
+    const ty = targetPoint.y;
+    const midpointX = (sx + tx) / 2;
+    const midpointY = (sy + ty) / 2;
+    const bend = link.kind === "core-member" ? 0.06 : (link.kind === "subnet-member" ? 0.08 : 0.14);
+    const c1x = midpointX + (centerY - midpointY) * bend;
+    const c1y = midpointY - (centerX - midpointX) * bend;
+    const hostServiceAccent = link.kind === "host-service" ? topologyHostServiceColor(link.source) : "";
+    const linkStyle = hostServiceAccent ? ` style="--topology-service-accent: ${escapeHtml(hostServiceAccent)};"` : "";
+    const markerId = link.kind === "host-service"
+      ? topologyHostServiceMarkerId(link.source)
+      : topologyLinkMarkerId(link.kind);
+    return `
+      <path
+        class="topology-graph-link topology-graph-link--${escapeHtml(link.confidence || "low")} topology-graph-link--${escapeHtml(link.kind || "related")}"
+        ${linkStyle}
+        d="M ${sx} ${sy} Q ${c1x} ${c1y}, ${tx} ${ty}"
+        marker-end="url(#${escapeHtml(markerId)})"
+      >
+        <title>${escapeHtml(`${formatTopologyLabel("topology_link", link.kind)} · ${formatTopologyLabel("topology_confidence", link.confidence)}`)}</title>
+      </path>
+    `;
+  }).join("");
+
+  const ringItems = sortedDepths
+    .filter((depth) => depth > 0)
+    .map((depth) => {
+      const radius = ringRadii.get(depth) || 0;
+      return `<ellipse class="topology-graph-ring" cx="${centerX}" cy="${centerY}" rx="${radius * ringScaleX}" ry="${radius * ringScaleY}"></ellipse>`;
+    }).join("");
+  const nodeItems = graphNodes.map((node) => {
+    const position = positions.get(node.id);
+    if (!position) {
+      return "";
+    }
+    const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
+    const detail = node.cidr || node.ip || metadata.deviceClass || metadata.location || metadata.room || formatTopologyLabel("topology_source", node.source);
+    const serviceAccent = nodeServiceAccentById.get(node.id) || "";
+    const serviceAccentClass = serviceAccent ? " topology-graph-node--service-accent" : "";
+    const serviceAccentStyle = serviceAccent ? ` style="--topology-service-accent: ${escapeHtml(serviceAccent)};"` : "";
+    return `
+      <g class="topology-graph-node topology-graph-node--${escapeHtml(node.role || "unknown")} topology-graph-node--kind-${escapeHtml(node.kind || "unknown")} topology-graph-node--${escapeHtml(node.status || "unknown")}${serviceAccentClass}"${serviceAccentStyle} transform="translate(${position.x} ${position.y})">
+        <title>${escapeHtml([node.label || node.id, node.cidr || node.ip, formatTopologyLabel("topology_kind", node.kind)].filter(Boolean).join(" · "))}</title>
+        <rect width="${nodeWidth}" height="${nodeHeight}" rx="8" ry="8"></rect>
+        <circle class="topology-graph-node__status" cx="16" cy="19" r="5"></circle>
+        <text class="topology-graph-node__label" x="28" y="24">${escapeHtml(truncateTopologyGraphText(node.label || node.id, 22))}</text>
+        <text class="topology-graph-node__meta" x="14" y="44">${escapeHtml(truncateTopologyGraphText(`${formatTopologyLabel("topology_kind", node.kind)}${detail ? ` · ${detail}` : ""}`, 28))}</text>
+      </g>
+    `;
+  }).join("");
+  const limitedNote = nodes.length > graphNodes.length
+    ? `<p class="secondary-line">${escapeHtml(t("topology_graph_limited", { shown: graphNodes.length, total: nodes.length }))}</p>`
+    : "";
+  const graphSources = [...new Set([
+    ...graphNodes.map((node) => node.graphSource),
+    ...graphLinks.map((link) => link.graphSource),
+  ].filter(Boolean))].sort();
+  const linkKinds = [...new Set(graphLinks.map((link) => link.kind || "related"))]
+    .sort((left, right) => String(left).localeCompare(String(right), getLanguage(), { sensitivity: "base" }));
+  const confidences = [...new Set(graphLinks.map((link) => link.confidence || "low"))]
+    .sort((left, right) => ({ high: 0, medium: 1, low: 2 }[left] ?? 3) - ({ high: 0, medium: 1, low: 2 }[right] ?? 3));
+  const hostServiceMarkerDefs = TOPOLOGY_HOST_SERVICE_COLORS.map((color, index) => `
+    <marker id="topology-arrow-host-service-${index}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="${escapeHtml(color)}"></path>
+    </marker>
+  `).join("");
+
+  return `
+    <section class="topology-graph-panel">
+      <div class="topology-column__heading">
+        <span>${escapeHtml(t("topology_graph_title"))}</span>
+        <div class="topology-graph-tools">
+          <label>
+            <span>${escapeHtml(t("topology_zoom_label"))}</span>
+            <input id="topology-zoom-range" type="range" min="0" max="100" step="1" value="${zoomSliderValue}" data-min-zoom="${fitZoom}" data-max-zoom="${TOPOLOGY_ZOOM_MAX}">
+          </label>
+          <button type="button" class="row-button" id="topology-fullscreen-button">${escapeHtml(t("topology_fullscreen_label"))}</button>
+          <button type="button" class="row-button" id="topology-export-svg-button">${escapeHtml(t("topology_export_svg_label"))}</button>
+          <button type="button" class="row-button" id="topology-export-png-button">${escapeHtml(t("topology_export_png_label"))}</button>
+          <button type="button" class="row-button" id="topology-export-json-button">${escapeHtml(t("topology_export_json_label"))}</button>
+          <strong>${escapeHtml(t("topology_counter", { nodes: graphNodes.length, links: graphLinks.length }))}</strong>
+        </div>
+      </div>
+      <div class="topology-graph-legend" aria-label="${escapeHtml(t("topology_graph_legend"))}">
+        ${linkKinds.map((kind) => `
+          <span class="topology-graph-legend__item">
+            <i class="topology-graph-legend__line topology-graph-legend__line--${escapeHtml(kind)}"></i>
+            ${escapeHtml(formatTopologyLabel("topology_link", kind))}
+          </span>
+        `).join("")}
+        ${confidences.map((confidence) => `
+          <span class="topology-graph-legend__item">
+            <i class="topology-graph-legend__line topology-graph-legend__line--${escapeHtml(confidence)}"></i>
+            ${escapeHtml(formatTopologyLabel("topology_confidence", confidence))}
+          </span>
+        `).join("")}
+        ${graphSources.map((source) => `
+          <span class="topology-graph-legend__item">
+            <i class="topology-graph-legend__dot"></i>
+            ${escapeHtml(formatTopologyLabel("topology_graph_source", source))}
+          </span>
+        `).join("")}
+      </div>
+      <div class="topology-graph-scroll">
+        <div class="topology-graph-zoom" data-topology-graph-zoom data-topology-graph-width="${width}" data-topology-graph-height="${height}" data-topology-root-x="${rootCenterX}" data-topology-root-y="${rootCenterY}" style="width: ${width}px; height: ${height}px;">
+          <svg class="topology-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(t("topology_graph_title"))}">
+            <defs>
+              ${hostServiceMarkerDefs}
+              ${[...new Set([...linkKinds, "related"])].map((kind) => `
+                <marker id="${escapeHtml(topologyLinkMarkerId(kind))}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                </marker>
+              `).join("")}
+            </defs>
+            <g class="topology-graph-grid">${ringItems}</g>
+            <g class="topology-graph-links">${linkPaths}</g>
+            <g class="topology-graph-nodes">${nodeItems}</g>
+          </svg>
+        </div>
+      </div>
+      ${limitedNote}
+    </section>
+  `;
+}
+
+function renderTopologySubnetMap(nodes, links) {
+  const nodesById = getTopologyNodeMap(nodes);
+  const hostServiceTargets = new Set(
+    links
+      .filter((link) => link.kind === "host-service")
+      .map((link) => link.target)
+  );
+  const subnetNodes = nodes
+    .filter((node) => node.kind === "subnet")
+    .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" }));
+  if (!subnetNodes.length) {
+    return "";
+  }
+
+  const subnetCards = subnetNodes.map((subnet) => {
+    const memberLinks = links.filter((link) => link.kind === "subnet-member" && link.source === subnet.id);
+    const directMembers = memberLinks
+      .map((link) => nodesById.get(link.target))
+      .filter(Boolean)
+      .filter((node) => !hostServiceTargets.has(node.id))
+      .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" }));
+    const memberIds = new Set(directMembers.map((node) => node.id));
+    const orphanServices = memberLinks
+      .map((link) => nodesById.get(link.target))
+      .filter(Boolean)
+      .filter((node) => hostServiceTargets.has(node.id) && !links.some((link) => link.kind === "host-service" && memberIds.has(link.source) && link.target === node.id));
+    const branches = [...directMembers, ...orphanServices].map((member) => {
+      const services = links
+        .filter((link) => link.kind === "host-service" && link.source === member.id)
+        .map((link) => nodesById.get(link.target))
+        .filter(Boolean)
+        .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" }));
+      return `
+        <div class="topology-flow-branch">
+          ${renderTopologyCompactNode(member)}
+          ${services.length ? `
+            <div class="topology-flow-children" aria-label="${escapeHtml(t("topology_branch_services"))}">
+              ${services.map((service) => renderTopologyCompactNode(service, { maxDetails: 1 })).join("")}
+            </div>
+          ` : ""}
+        </div>
+      `;
+    }).join("");
+    return `
+      <article class="topology-flow-card">
+        <div class="topology-flow-card__heading">
+          <div>
+            <strong>${escapeHtml(subnet.label || subnet.id)}</strong>
+            <span>${escapeHtml(subnet.cidr || "")}</span>
+          </div>
+          <code>${escapeHtml(t("topology_branch_hosts", { count: directMembers.length + orphanServices.length }))}</code>
+        </div>
+        <div class="topology-flow-chain">
+          <div class="topology-flow-root">${renderTopologyCompactNode(subnet)}</div>
+          <div class="topology-flow-branches">
+            ${branches || `<div class="secondary-line">${escapeHtml(t("topology_subnet_empty"))}</div>`}
+          </div>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <section class="topology-flow-section">
+      <div class="topology-column__heading">
+        <span>${escapeHtml(t("topology_subnet_map_title"))}</span>
+        <strong>${escapeHtml(String(subnetNodes.length))}</strong>
+      </div>
+      <div class="topology-flow-grid">${subnetCards}</div>
+    </section>
+  `;
+}
+
+function renderTopologyComputeMap(nodes, links) {
+  const nodesById = getTopologyNodeMap(nodes);
+  const hypervisorNodes = nodes
+    .filter((node) => node.kind === "hypervisor")
+    .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" }));
+  if (!hypervisorNodes.length) {
+    return "";
+  }
+
+  const computeCards = hypervisorNodes.map((hypervisor) => {
+    const guests = links
+      .filter((link) => link.kind === "hypervisor-guest" && link.source === hypervisor.id)
+      .map((link) => nodesById.get(link.target))
+      .filter(Boolean)
+      .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" }));
+    return `
+      <article class="topology-flow-card topology-flow-card--compute">
+        <div class="topology-flow-card__heading">
+          <div>
+            <strong>${escapeHtml(hypervisor.label || hypervisor.id)}</strong>
+            <span>${escapeHtml(formatTopologyLabel("topology_kind", hypervisor.kind))}</span>
+          </div>
+          <code>${escapeHtml(t("topology_branch_guests", { count: guests.length }))}</code>
+        </div>
+        <div class="topology-flow-chain">
+          <div class="topology-flow-root">${renderTopologyCompactNode(hypervisor)}</div>
+          <div class="topology-flow-branches">
+            ${guests.length ? guests.map((guest) => `
+              <div class="topology-flow-branch">${renderTopologyCompactNode(guest)}</div>
+            `).join("") : `<div class="secondary-line">${escapeHtml(t("topology_compute_empty"))}</div>`}
+          </div>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <section class="topology-flow-section">
+      <div class="topology-column__heading">
+        <span>${escapeHtml(t("topology_compute_map_title"))}</span>
+        <strong>${escapeHtml(String(hypervisorNodes.length))}</strong>
+      </div>
+      <div class="topology-flow-grid">${computeCards}</div>
+    </section>
+  `;
+}
+
+function renderTopologyNodeCard(node, linksByNode, interfacesByNode) {
+  const nodeLinks = linksByNode.get(node.id) || [];
+  const nodeInterfaces = interfacesByNode.get(node.id) || [];
+  const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
+  const details = [
+    node.cidr,
+    node.ip,
+    node.mac,
+    metadata.os,
+    metadata.ports,
+    metadata.deviceClass,
+    metadata.manufacturer,
+    metadata.model,
+    metadata.location || metadata.room,
+    metadata.battery ? `${t("topology_iot_battery")}: ${metadata.battery}` : "",
+    metadata.signal ? `${t("topology_iot_signal")}: ${metadata.signal}` : "",
+  ].filter(Boolean).slice(0, topologyMode === "advanced" ? 5 : 3);
+  return `
+    <article class="topology-node topology-node--${escapeHtml(node.role || "unknown")}">
+      <div class="topology-node__top">
+        <strong>${escapeHtml(node.label || node.id)}</strong>
+        <span class="status-badge status-badge--${topologyStatusBadgeClass(node.status)}">
+          ${escapeHtml(formatTopologyLabel("topology_status", node.status))}
+        </span>
+      </div>
+      <div class="topology-node__meta">
+        <span>${escapeHtml(formatTopologyLabel("topology_kind", node.kind))}</span>
+        <span>${escapeHtml(formatTopologyLabel("topology_source", node.source))}</span>
+        ${node.graphSource ? `<span>${escapeHtml(formatTopologyLabel("topology_graph_source", node.graphSource))}</span>` : ""}
+        ${nodeLinks.length ? `<span>${escapeHtml(t("topology_node_links", { count: nodeLinks.length }))}</span>` : ""}
+      </div>
+      ${details.length ? `<div class="topology-node__details">${details.map((item) => `<code>${escapeHtml(String(item))}</code>`).join("")}</div>` : ""}
+      ${topologyMode === "advanced" && nodeInterfaces.length ? `
+        <div class="topology-node__interfaces">
+          ${nodeInterfaces.map((item) => `<span>${escapeHtml([item.ip, item.mac].filter(Boolean).join(" / "))}</span>`).join("")}
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function renderTopologyMap() {
+  if (!elements.topologyMapCanvas) {
+    return;
+  }
+  syncTopologyFilterOptions();
+  const { nodes, links, interfaces, subnets } = getFilteredTopology();
+  renderTopologySummary(nodes, links, interfaces, subnets);
+  const subnetContext = renderTopologySubnetContext(subnets, nodes);
+  if (!nodes.length) {
+    elements.topologyMapCanvas.innerHTML = `
+      ${subnetContext}
+      <div class="result-card result-card--muted">${escapeHtml(t("topology_empty"))}</div>
+    `;
+    return;
+  }
+
+  const linksByNode = new Map();
+  links.forEach((link) => {
+    linksByNode.set(link.source, [...(linksByNode.get(link.source) || []), link]);
+    linksByNode.set(link.target, [...(linksByNode.get(link.target) || []), link]);
+  });
+  const interfacesByNode = new Map();
+  interfaces.forEach((item) => {
+    interfacesByNode.set(item.nodeId, [...(interfacesByNode.get(item.nodeId) || []), item]);
+  });
+
+  const roleOrder = ["network", "host", "compute", "workload", "iot"];
+  const groupedNodes = roleOrder.map((role) => ({
+    role,
+    nodes: nodes
+      .filter((node) => node.role === role)
+      .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" })),
+  })).filter((group) => group.nodes.length);
+
+  const linkRows = links.slice(0, topologyMode === "advanced" ? 80 : 24).map((link) => {
+    const source = nodes.find((node) => node.id === link.source);
+    const target = nodes.find((node) => node.id === link.target);
+    return `
+      <li class="topology-link-row topology-link-row--${escapeHtml(link.confidence || "low")}">
+        <span>${escapeHtml(source?.label || link.source)}</span>
+        <span>${escapeHtml(formatTopologyLabel("topology_link", link.kind))}</span>
+        <span>${escapeHtml(target?.label || link.target)}</span>
+        <code>${escapeHtml([
+          formatTopologyLabel("topology_confidence", link.confidence),
+          link.graphSource ? formatTopologyLabel("topology_graph_source", link.graphSource) : "",
+        ].filter(Boolean).join(" · "))}</code>
+      </li>
+    `;
+  }).join("");
+  const graphMap = renderTopologyGraph(nodes, links);
+  const computeMap = renderTopologyComputeMap(nodes, links);
+  const detailPanels = topologyMode === "advanced" ? `
+    ${computeMap}
+    <div class="topology-columns">
+      ${groupedNodes.map((group) => `
+        <section class="topology-column">
+          <div class="topology-column__heading">
+            <span>${escapeHtml(formatTopologyLabel("topology_role", group.role))}</span>
+            <strong>${escapeHtml(String(group.nodes.length))}</strong>
+          </div>
+          <div class="topology-column__nodes">
+            ${group.nodes.map((node) => renderTopologyNodeCard(node, linksByNode, interfacesByNode)).join("")}
+          </div>
+        </section>
+      `).join("")}
+    </div>
+    <section class="topology-links-panel">
+      <div class="topology-column__heading">
+        <span>${escapeHtml(t("topology_links_title"))}</span>
+        <strong>${escapeHtml(String(links.length))}</strong>
+      </div>
+      ${links.length ? `<ul class="topology-link-list">${linkRows}</ul>` : `<div class="secondary-line">${escapeHtml(t("topology_links_empty"))}</div>`}
+    </section>
+  ` : "";
+
+  elements.topologyMapCanvas.innerHTML = `
+    ${subnetContext}
+    ${graphMap}
+    ${detailPanels}
+  `;
+  elements.topologyMapCanvas.querySelector("#topology-zoom-range")?.addEventListener("input", (event) => {
+    const range = event.currentTarget;
+    const minZoom = Number(range.dataset.minZoom || TOPOLOGY_ZOOM_MIN);
+    const maxZoom = Number(range.dataset.maxZoom || TOPOLOGY_ZOOM_MAX);
+    const progress = Math.min(1, Math.max(0, Number(range.value || 0) / 100));
+    setTopologyZoom(minZoom + (maxZoom - minZoom) * progress, { render: false });
+  });
+  const graphScroll = elements.topologyMapCanvas.querySelector(".topology-graph-scroll");
+  const graphPanel = elements.topologyMapCanvas.querySelector(".topology-graph-panel");
+  centerTopologyGraphIfNeeded();
+  graphScroll?.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey && !event.metaKey) {
+      if (!document.fullscreenElement) {
+        event.preventDefault();
+        window.scrollBy({
+          top: event.deltaY,
+          left: event.shiftKey ? event.deltaY : event.deltaX,
+          behavior: "auto",
+        });
+      }
+      return;
+    }
+    event.preventDefault();
+    const currentZoom = topologyZoom;
+    const wheelUnits = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+    const zoomFactor = Math.exp(-wheelUnits * 0.001);
+    setTopologyZoom(currentZoom * zoomFactor, { render: false, anchorEvent: event });
+  }, { passive: false });
+  graphScroll?.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    topologyPanState = {
+      startX: event.clientX,
+      startY: event.clientY,
+      panX: topologyPanX,
+      panY: topologyPanY,
+    };
+    graphScroll.classList.add("topology-graph-scroll--dragging");
+    event.preventDefault();
+  });
+  graphScroll?.addEventListener("mousemove", (event) => {
+    if (!topologyPanState) {
+      return;
+    }
+    topologyPanUserAdjusted = true;
+    topologyPanX = topologyPanState.panX + (event.clientX - topologyPanState.startX);
+    topologyPanY = topologyPanState.panY + (event.clientY - topologyPanState.startY);
+    applyTopologyViewportToRenderedGraph();
+  });
+  const stopTopologyPan = () => {
+    topologyPanState = null;
+    graphScroll?.classList.remove("topology-graph-scroll--dragging");
+  };
+  graphScroll?.addEventListener("mouseup", stopTopologyPan);
+  graphScroll?.addEventListener("mouseleave", stopTopologyPan);
+  elements.topologyMapCanvas.querySelector("#topology-fullscreen-button")?.addEventListener("click", async () => {
+    if (!graphPanel) {
+      return;
+    }
+    try {
+      if (document.fullscreenElement === graphPanel) {
+        await document.exitFullscreen();
+      } else if (graphPanel.requestFullscreen) {
+        await graphPanel.requestFullscreen();
+      }
+      window.setTimeout(() => {
+        topologyPanUserAdjusted = false;
+        centerTopologyGraphIfNeeded();
+      }, 80);
+    } catch (error) {
+      console.warn("Topology fullscreen failed", error);
+    }
+  });
+  elements.topologyMapCanvas.querySelector("#topology-export-svg-button")?.addEventListener("click", exportTopologySvg);
+  elements.topologyMapCanvas.querySelector("#topology-export-png-button")?.addEventListener("click", () => {
+    void exportTopologyPng();
+  });
+  elements.topologyMapCanvas.querySelector("#topology-export-json-button")?.addEventListener("click", exportTopologyJson);
 }
 
 function renderDeviceGroupFilterOptions() {
@@ -7338,15 +9462,19 @@ function renderDiscoveryActions(result) {
 }
 
 function getDiscoveryPreviewGroup(result) {
-  const hostLabel = result.hostName || result.hostDeviceId || (
-    getDiscoveryTargetKind(result) === "device" && normalizeMetadataToken(result.sourceKind, "") === "host"
-      ? result.name
-      : t("no_binding")
-  );
+  const isHostResult = getDiscoveryTargetKind(result) === "device"
+    && normalizeMetadataToken(result.sourceKind, "") === "host";
+  const fallbackHostIdentity = isHostResult
+    ? result.name
+    : (result.agentName || result.agentId || "");
+  const hostGroupId = isHostResult
+    ? (result.matchedDeviceId || result.hostDeviceId || "")
+    : (result.hostDeviceId || "");
+  const hostLabel = result.hostName || result.hostDeviceId || fallbackHostIdentity || t("no_binding");
   const agentLabel = result.agentName || result.agentId || t("no_data");
   const keyParts = [
     result.agentId || result.agentName || "agent",
-    result.hostDeviceId || result.hostName || result.name || "unbound",
+    hostGroupId || result.hostName || fallbackHostIdentity || result.name || "unbound",
   ];
   return {
     key: keyParts.map((part) => String(part || "").trim()).join("::"),
@@ -7608,6 +9736,7 @@ async function handleDiscoveryStaleCleanup() {
     showToast(t("discovery_bulk_cleanup_stale_done", {
       results: result.deletedResults || 0,
       records: result.deletedLinkedRecords || 0,
+      audit: result.deletedAuditEvents || 0,
     }));
   } catch (error) {
     showToast(error.message, true);
@@ -9422,6 +11551,7 @@ function normalizeState(rawState, baseGroups = []) {
   const groups = normalizeGroupsList(rawGroups, subnets, baseGroups);
   const rawDevices = Array.isArray(rawState?.devices) ? rawState.devices : [];
   const devices = rawDevices.map((entry) => normalizeDevice(entry, subnets, groups, preferences.customDeviceTypes));
+  const topology = normalizeTopology(rawState?.topology);
   const scanResults = Array.isArray(rawState?.scanResults)
     ? rawState.scanResults.map(normalizeScanResult)
     : [];
@@ -9441,7 +11571,66 @@ function normalizeState(rawState, baseGroups = []) {
   const auth = normalizeAuthState(rawState?.auth);
   const admin = normalizeAdminState(rawState?.admin);
 
-  return { subnets, groups, devices, scanResults, history, meta, settings, accessGroups, auth, admin, preferences };
+  return { subnets, groups, devices, topology, scanResults, history, meta, settings, accessGroups, auth, admin, preferences };
+}
+
+function normalizeTopology(rawTopology) {
+  const normalizeNode = (node) => ({
+    id: String(node?.id || ""),
+    kind: String(node?.kind || "unknown"),
+    role: String(node?.role || "unknown"),
+    layer: String(node?.layer || ""),
+    label: String(node?.label || node?.id || ""),
+    cidr: String(node?.cidr || ""),
+    ip: String(node?.ip || ""),
+    mac: String(node?.mac || ""),
+    status: String(node?.status || "unknown"),
+    source: String(node?.source || "ipam"),
+    sourceKind: String(node?.sourceKind || ""),
+    graphSource: String(node?.graphSource || ""),
+    subnetId: String(node?.subnetId || ""),
+    deviceId: String(node?.deviceId || ""),
+    serviceId: String(node?.serviceId || ""),
+    hostDeviceId: String(node?.hostDeviceId || ""),
+    discoveryResultId: String(node?.discoveryResultId || ""),
+    agentId: String(node?.agentId || ""),
+    agentName: String(node?.agentName || ""),
+    accessGroupId: String(node?.accessGroupId || ""),
+    accessGroupName: String(node?.accessGroupName || ""),
+    metadata: node?.metadata && typeof node.metadata === "object" ? node.metadata : {},
+  });
+  const normalizeLink = (link) => ({
+    id: String(link?.id || ""),
+    source: String(link?.source || ""),
+    target: String(link?.target || ""),
+    kind: String(link?.kind || "related"),
+    confidence: String(link?.confidence || "low"),
+    reason: String(link?.reason || ""),
+    sourceType: String(link?.sourceType || ""),
+    graphSource: String(link?.graphSource || ""),
+  });
+  const normalizeInterface = (item) => ({
+    id: String(item?.id || ""),
+    nodeId: String(item?.nodeId || ""),
+    name: String(item?.name || ""),
+    ip: String(item?.ip || ""),
+    mac: String(item?.mac || ""),
+    subnetId: String(item?.subnetId || ""),
+    source: String(item?.source || ""),
+    graphSource: String(item?.graphSource || ""),
+    confidence: String(item?.confidence || "low"),
+  });
+  return {
+    schema: String(rawTopology?.schema || "atlas.topology.v1"),
+    generatedAt: String(rawTopology?.generatedAt || ""),
+    nodes: Array.isArray(rawTopology?.nodes) ? rawTopology.nodes.map(normalizeNode).filter((node) => node.id) : [],
+    links: Array.isArray(rawTopology?.links) ? rawTopology.links.map(normalizeLink).filter((link) => link.id && link.source && link.target) : [],
+    interfaces: Array.isArray(rawTopology?.interfaces) ? rawTopology.interfaces.map(normalizeInterface).filter((item) => item.id && item.nodeId) : [],
+    summary: rawTopology?.summary && typeof rawTopology.summary === "object" ? rawTopology.summary : {},
+    capabilities: rawTopology?.capabilities && typeof rawTopology.capabilities === "object"
+      ? rawTopology.capabilities
+      : { advancedMode: false, layers: {} },
+  };
 }
 
 function normalizeServerSettings(rawSettings, meta = {}) {
@@ -9457,6 +11646,7 @@ function normalizeServerSettings(rawSettings, meta = {}) {
     scanIntervalSeconds,
     defaultSubnetScanEnabled: normalizeBoolean(rawSettings?.defaultSubnetScanEnabled, true),
     discoveryDataPolicy: normalizeDiscoveryDataPolicy(rawSettings?.discoveryDataPolicy),
+    discoveryReplacementPolicy: normalizeDiscoveryReplacementPolicy(rawSettings?.discoveryReplacementPolicy),
     scanTimeoutMs,
     scanConcurrency,
     limits: {
@@ -9647,6 +11837,7 @@ function applyStateToTarget(targetState, snapshot) {
   targetState.subnets = snapshot.subnets;
   targetState.groups = snapshot.groups;
   targetState.devices = snapshot.devices;
+  targetState.topology = snapshot.topology;
   targetState.scanResults = snapshot.scanResults;
   targetState.history = snapshot.history;
   targetState.meta = snapshot.meta;
@@ -9661,6 +11852,7 @@ function cloneState(snapshot) {
     subnets: snapshot.subnets.map((entry) => ({ ...entry })),
     groups: snapshot.groups.map((entry) => ({ ...entry })),
     devices: snapshot.devices.map((entry) => ({ ...entry })),
+    topology: snapshot.topology ? JSON.parse(JSON.stringify(snapshot.topology)) : normalizeTopology(null),
     scanResults: snapshot.scanResults.map((entry) => ({ ...entry })),
     history: snapshot.history.map((entry) => ({ ...entry })),
     meta: { ...snapshot.meta },
@@ -10776,6 +12968,23 @@ function normalizeDeviceTypeValue(value) {
     сервер: "server",
     "сервери": "server",
     "серверы": "server",
+    router: "core-router",
+    "core-router": "core-router",
+    "core router": "core-router",
+    "root-router": "core-router",
+    "root router": "core-router",
+    gateway: "core-router",
+    роутер: "core-router",
+    маршрутизатор: "core-router",
+    шлюз: "core-router",
+    ядро: "core-router",
+    "ядро сети": "core-router",
+    switch: "switch",
+    "network-switch": "switch",
+    "network switch": "switch",
+    свитч: "switch",
+    свич: "switch",
+    коммутатор: "switch",
     container: "container",
     containers: "container",
     контейнер: "container",
@@ -10830,6 +13039,10 @@ function escapeCsvCell(value, delimiter = ";") {
 
 function downloadFile(filename, content, contentType) {
   const blob = new Blob([content], { type: contentType });
+  downloadBlob(filename, blob);
+}
+
+function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
