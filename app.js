@@ -559,6 +559,7 @@ let topologyPanY = 0;
 let topologyPanUserAdjusted = false;
 let topologyPanState = null;
 let topologyRenderFrame = 0;
+let topologyLastRenderRequestSignature = "";
 let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
@@ -1589,27 +1590,32 @@ function bindEvents() {
   elements.topologyModeSelect?.addEventListener("change", () => {
     topologyMode = elements.topologyModeSelect.value === "advanced" ? "advanced" : "simple";
     resetTopologyViewport();
-    renderTopologyMap();
+    resetTopologyRenderCache();
+    renderTopologyMapIfVisible({ force: true });
   });
   elements.topologySubnetFilter?.addEventListener("change", () => {
     topologySubnetFilter = elements.topologySubnetFilter.value || "all";
     resetTopologyViewport();
-    renderTopologyMap();
+    resetTopologyRenderCache();
+    renderTopologyMapIfVisible({ force: true });
   });
   elements.topologyLayerFilter?.addEventListener("change", () => {
     topologyLayerFilter = elements.topologyLayerFilter.value || "all";
     resetTopologyViewport();
-    renderTopologyMap();
+    resetTopologyRenderCache();
+    renderTopologyMapIfVisible({ force: true });
   });
   elements.topologySourceFilter?.addEventListener("change", () => {
     topologySourceFilter = elements.topologySourceFilter.value || "all";
     resetTopologyViewport();
-    renderTopologyMap();
+    resetTopologyRenderCache();
+    renderTopologyMapIfVisible({ force: true });
   });
   elements.topologyStatusFilter?.addEventListener("change", () => {
     topologyStatusFilter = elements.topologyStatusFilter.value || "all";
     resetTopologyViewport();
-    renderTopologyMap();
+    resetTopologyRenderCache();
+    renderTopologyMapIfVisible({ force: true });
   });
   elements.registrySectionTabs.forEach((button) => {
     button.addEventListener("click", () => {
@@ -6506,12 +6512,53 @@ function shouldRenderTopologyNow() {
   return !elements.topologyMapCanvas.closest("[hidden]");
 }
 
-function renderTopologyMapIfVisible() {
+function getTopologyRenderRequestSignature() {
+  const topology = state.topology || {};
+  const summary = topology.summary && typeof topology.summary === "object" ? topology.summary : {};
+  return [
+    state.meta?.revision || "",
+    state.auth?.user?.id || "",
+    getLanguage(),
+    topologyMode,
+    topologySubnetFilter,
+    topologyLayerFilter,
+    topologySourceFilter,
+    topologyStatusFilter,
+    summary.nodes || 0,
+    summary.links || 0,
+    summary.interfaces || 0,
+    elements.topologyMapCanvas?.clientWidth || 0,
+    Boolean(document.fullscreenElement),
+  ].join("|");
+}
+
+function resetTopologyRenderCache() {
+  topologyLastRenderRequestSignature = "";
+  if (elements.topologyMapCanvas) {
+    delete elements.topologyMapCanvas.dataset.topologyRenderSignature;
+  }
+}
+
+function renderTopologyMapIfVisible({ force = false } = {}) {
   if (!shouldRenderTopologyNow()) {
     return;
   }
-  if (topologyRenderFrame) {
+  const requestSignature = getTopologyRenderRequestSignature();
+  if (
+    !force
+    && requestSignature
+    && topologyLastRenderRequestSignature === requestSignature
+    && elements.topologyMapCanvas?.dataset.topologyRenderSignature === requestSignature
+  ) {
     return;
+  }
+  if (topologyRenderFrame) {
+    if (!force) {
+      return;
+    }
+    const cancelFrame = window.cancelAnimationFrame || window.clearTimeout;
+    cancelFrame(topologyRenderFrame);
+    topologyRenderFrame = 0;
   }
   const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
   topologyRenderFrame = scheduleFrame(() => {
@@ -6987,11 +7034,24 @@ function topologyGraphNodeSortRank(node) {
   return 9;
 }
 
+function topologyNowMs() {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function topologyExceededLayoutBudget(startedAt, budgetMs) {
+  return topologyNowMs() - startedAt > budgetMs;
+}
+
 function resolveTopologyGraphCollisions(graphNodes, positions, bounds, lockedNodeIds = new Set()) {
   const padding = topologyMode === "advanced" ? 26 : 20;
   const centerX = bounds.width / 2;
   const centerY = bounds.height / 2;
-  for (let iteration = 0; iteration < 90; iteration += 1) {
+  const iterationLimit = graphNodes.length > 130 ? 34 : (graphNodes.length > 80 ? 48 : 70);
+  const startedAt = topologyNowMs();
+  const budgetMs = topologyMode === "advanced" ? 34 : 24;
+  for (let iteration = 0; iteration < iterationLimit; iteration += 1) {
     let moved = false;
     for (let leftIndex = 0; leftIndex < graphNodes.length; leftIndex += 1) {
       const leftNode = graphNodes[leftIndex];
@@ -7058,6 +7118,9 @@ function resolveTopologyGraphCollisions(graphNodes, positions, bounds, lockedNod
       position.y = Math.min(Math.max(24, position.y), Math.max(24, bounds.height - position.height - 24));
     });
     if (!moved) {
+      break;
+    }
+    if (iteration % 4 === 3 && topologyExceededLayoutBudget(startedAt, budgetMs)) {
       break;
     }
   }
@@ -7461,7 +7524,10 @@ function topologyNodeIdListsShareNode(leftIds, rightIds) {
 
 function resolveTopologyHostedServiceClusterCollisions(clusters, positions, bounds) {
   const clusterNodeIds = clusters.map((cluster) => [cluster.host.id, ...cluster.services.map((node) => node.id)]);
-  for (let iteration = 0; iteration < 36; iteration += 1) {
+  const iterationLimit = clusters.length > 30 ? 16 : (clusters.length > 16 ? 24 : 32);
+  const startedAt = topologyNowMs();
+  const budgetMs = topologyMode === "advanced" ? 22 : 16;
+  for (let iteration = 0; iteration < iterationLimit; iteration += 1) {
     let moved = false;
     for (let leftIndex = 0; leftIndex < clusterNodeIds.length; leftIndex += 1) {
       const leftIds = clusterNodeIds[leftIndex];
@@ -7495,12 +7561,18 @@ function resolveTopologyHostedServiceClusterCollisions(clusters, positions, boun
     if (!moved) {
       break;
     }
+    if (iteration % 4 === 3 && topologyExceededLayoutBudget(startedAt, budgetMs)) {
+      break;
+    }
   }
 }
 
 function resolveTopologyClusterObstacleCollisions(clusters, positions, bounds, obstacleNodeIds) {
   const clusterNodeIds = clusters.map((cluster) => [cluster.host.id, ...cluster.services.map((node) => node.id)]);
-  for (let iteration = 0; iteration < 48; iteration += 1) {
+  const iterationLimit = clusters.length > 30 || obstacleNodeIds.size > 70 ? 16 : 30;
+  const startedAt = topologyNowMs();
+  const budgetMs = topologyMode === "advanced" ? 24 : 18;
+  for (let iteration = 0; iteration < iterationLimit; iteration += 1) {
     let moved = false;
     for (const nodeIds of clusterNodeIds) {
       const ownNodeIds = new Set(nodeIds);
@@ -7537,6 +7609,9 @@ function resolveTopologyClusterObstacleCollisions(clusters, positions, bounds, o
       }
     }
     if (!moved) {
+      break;
+    }
+    if (iteration % 4 === 3 && topologyExceededLayoutBudget(startedAt, budgetMs)) {
       break;
     }
   }
@@ -8101,7 +8176,7 @@ function renderTopologyComputeMap(nodes, links) {
 
 function renderTopologyNodeCard(node, linksByNode, interfacesByNode) {
   const nodeLinks = linksByNode.get(node.id) || [];
-  const nodeInterfaces = interfacesByNode.get(node.id) || [];
+  const nodeInterfaces = (interfacesByNode.get(node.id) || []).slice(0, 6);
   const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
   const details = [
     node.cidr,
@@ -8144,6 +8219,14 @@ function renderTopologyMap() {
   if (!elements.topologyMapCanvas) {
     return;
   }
+  const effectiveRequestSignature = getTopologyRenderRequestSignature();
+  if (
+    effectiveRequestSignature
+    && topologyLastRenderRequestSignature === effectiveRequestSignature
+    && elements.topologyMapCanvas.dataset.topologyRenderSignature === effectiveRequestSignature
+  ) {
+    return;
+  }
   syncTopologyFilterOptions();
   const { nodes, links, interfaces, subnets } = getFilteredTopology();
   renderTopologySummary(nodes, links, interfaces, subnets);
@@ -8153,9 +8236,12 @@ function renderTopologyMap() {
       ${subnetContext}
       <div class="result-card result-card--muted">${escapeHtml(t("topology_empty"))}</div>
     `;
+    topologyLastRenderRequestSignature = effectiveRequestSignature;
+    elements.topologyMapCanvas.dataset.topologyRenderSignature = effectiveRequestSignature;
     return;
   }
 
+  const nodesById = getTopologyNodeMap(nodes);
   const linksByNode = new Map();
   links.forEach((link) => {
     linksByNode.set(link.source, [...(linksByNode.get(link.source) || []), link]);
@@ -8167,16 +8253,23 @@ function renderTopologyMap() {
   });
 
   const roleOrder = ["network", "host", "compute", "workload", "iot"];
+  const detailNodeLimitPerGroup = 90;
   const groupedNodes = roleOrder.map((role) => ({
     role,
     nodes: nodes
       .filter((node) => node.role === role)
       .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" })),
-  })).filter((group) => group.nodes.length);
+  }))
+    .map((group) => ({
+      ...group,
+      total: group.nodes.length,
+      nodes: group.nodes.slice(0, detailNodeLimitPerGroup),
+    }))
+    .filter((group) => group.total);
 
   const linkRows = links.slice(0, topologyMode === "advanced" ? 80 : 24).map((link) => {
-    const source = nodes.find((node) => node.id === link.source);
-    const target = nodes.find((node) => node.id === link.target);
+    const source = nodesById.get(link.source);
+    const target = nodesById.get(link.target);
     return `
       <li class="topology-link-row topology-link-row--${escapeHtml(link.confidence || "low")}">
         <span>${escapeHtml(source?.label || link.source)}</span>
@@ -8198,10 +8291,11 @@ function renderTopologyMap() {
         <section class="topology-column">
           <div class="topology-column__heading">
             <span>${escapeHtml(formatTopologyLabel("topology_role", group.role))}</span>
-            <strong>${escapeHtml(String(group.nodes.length))}</strong>
+            <strong>${escapeHtml(String(group.total))}</strong>
           </div>
           <div class="topology-column__nodes">
             ${group.nodes.map((node) => renderTopologyNodeCard(node, linksByNode, interfacesByNode)).join("")}
+            ${group.total > group.nodes.length ? `<p class="secondary-line">${escapeHtml(t("topology_graph_limited", { shown: group.nodes.length, total: group.total }))}</p>` : ""}
           </div>
         </section>
       `).join("")}
@@ -8220,6 +8314,8 @@ function renderTopologyMap() {
     ${graphMap}
     ${detailPanels}
   `;
+  topologyLastRenderRequestSignature = effectiveRequestSignature;
+  elements.topologyMapCanvas.dataset.topologyRenderSignature = effectiveRequestSignature;
   elements.topologyMapCanvas.querySelector("#topology-zoom-range")?.addEventListener("input", (event) => {
     const range = event.currentTarget;
     const minZoom = Number(range.dataset.minZoom || TOPOLOGY_ZOOM_MIN);
