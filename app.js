@@ -554,8 +554,9 @@ let topologyLayerFilter = "all";
 let topologySourceFilter = "all";
 let topologyStatusFilter = "all";
 const TOPOLOGY_ZOOM_MIN = 0.22;
+const TOPOLOGY_ZOOM_DEFAULT = 0.25;
 const TOPOLOGY_ZOOM_MAX = 1.4;
-let topologyZoom = TOPOLOGY_ZOOM_MIN;
+let topologyZoom = TOPOLOGY_ZOOM_DEFAULT;
 let topologyZoomUserAdjusted = false;
 let topologyPanX = 0;
 let topologyPanY = 0;
@@ -7157,7 +7158,7 @@ function topologyHostServiceMarkerId(sourceId) {
 }
 
 function resetTopologyViewport() {
-  topologyZoom = TOPOLOGY_ZOOM_MIN;
+  topologyZoom = TOPOLOGY_ZOOM_DEFAULT;
   topologyZoomUserAdjusted = false;
   topologyPanUserAdjusted = false;
   topologyPanState = null;
@@ -8099,7 +8100,8 @@ function renderTopologyGraph(nodes, links) {
     Math.min(1, availableWidth / width, availableHeight / height),
   );
   const fitZoom = Math.round(fitZoomRaw * 100) / 100;
-  const effectiveZoom = topologyZoomUserAdjusted ? Math.max(topologyZoom, fitZoom) : fitZoom;
+  const defaultZoom = Math.max(fitZoom, TOPOLOGY_ZOOM_DEFAULT);
+  const effectiveZoom = topologyZoomUserAdjusted ? Math.max(topologyZoom, fitZoom) : defaultZoom;
   if (!topologyZoomUserAdjusted) {
     topologyZoom = effectiveZoom;
   }
