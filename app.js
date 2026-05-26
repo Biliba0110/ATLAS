@@ -560,6 +560,8 @@ let topologyPanUserAdjusted = false;
 let topologyPanState = null;
 let topologyRenderFrame = 0;
 let topologyLastRenderRequestSignature = "";
+let topologyPopoverNodeById = new Map();
+let topologyPopoverInterfacesByNode = new Map();
 let showAllSubnetsInRegistry = false;
 let showAllGroupsInRegistry = false;
 let showAllDevicesInRegistry = false;
@@ -6966,6 +6968,19 @@ function applyTopologyViewportToRenderedGraph() {
   }
 }
 
+function revealTopologyGraphWhenPainted(graphScroll) {
+  if (!graphScroll) {
+    return;
+  }
+  const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+  scheduleFrame(() => {
+    centerTopologyGraphIfNeeded();
+    scheduleFrame(() => {
+      graphScroll.classList.remove("topology-graph-scroll--preparing");
+    });
+  });
+}
+
 function centerTopologyGraphIfNeeded() {
   if (topologyPanUserAdjusted) {
     applyTopologyViewportToRenderedGraph();
@@ -8143,7 +8158,8 @@ function renderTopologyGraph(nodes, links) {
           </span>
         `).join("")}
       </div>
-      <div class="topology-graph-scroll">
+      <div class="topology-graph-scroll topology-graph-scroll--preparing">
+        <div class="topology-graph-loading" aria-hidden="true"></div>
         <div class="topology-graph-zoom" data-topology-graph-zoom data-topology-graph-width="${width}" data-topology-graph-height="${height}" data-topology-root-x="${rootCenterX}" data-topology-root-y="${rootCenterY}" style="width: ${width}px; height: ${height}px;">
           <svg class="topology-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(t("topology_graph_title"))}">
             <defs>
@@ -8347,6 +8363,20 @@ function hideTopologyNodePopover() {
   }
 }
 
+function buildTopologyNodePopoverIndex(nodes, interfaces) {
+  topologyPopoverNodeById = new Map(nodes.map((node) => [node.id, node]));
+  topologyPopoverInterfacesByNode = new Map();
+  interfaces.forEach((item) => {
+    if (!topologyPopoverNodeById.has(item.nodeId)) {
+      return;
+    }
+    if (!topologyPopoverInterfacesByNode.has(item.nodeId)) {
+      topologyPopoverInterfacesByNode.set(item.nodeId, []);
+    }
+    topologyPopoverInterfacesByNode.get(item.nodeId).push(item);
+  });
+}
+
 function topologyNodeMetadataValue(node, ...keys) {
   const metadata = node?.metadata && typeof node.metadata === "object" ? node.metadata : {};
   for (const key of keys) {
@@ -8428,15 +8458,12 @@ function positionTopologyNodePopover(popover, clientX, clientY) {
 }
 
 function showTopologyNodePopover(nodeId, clientX, clientY) {
-  const topology = state.topology || {};
-  const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
-  const interfaces = Array.isArray(topology.interfaces) ? topology.interfaces : [];
-  const node = nodes.find((item) => item.id === nodeId);
+  const node = topologyPopoverNodeById.get(nodeId);
   if (!node) {
     hideTopologyNodePopover();
     return;
   }
-  const nodeInterfaces = interfaces.filter((item) => item.nodeId === nodeId).slice(0, 8);
+  const nodeInterfaces = (topologyPopoverInterfacesByNode.get(nodeId) || []).slice(0, 8);
   const popover = getTopologyNodePopover();
   popover.innerHTML = renderTopologyNodePopover(node, nodeInterfaces);
   popover.hidden = false;
@@ -8459,6 +8486,7 @@ function renderTopologyMap() {
   }
   syncTopologyFilterOptions();
   const { nodes, links, interfaces, subnets } = getFilteredTopology();
+  buildTopologyNodePopoverIndex(nodes, interfaces);
   renderTopologySummary(nodes, links, interfaces, subnets);
   const subnetContext = renderTopologySubnetContext(subnets, nodes);
   if (!nodes.length) {
@@ -8570,6 +8598,7 @@ function renderTopologyMap() {
   const graphScroll = elements.topologyMapCanvas.querySelector(".topology-graph-scroll");
   const graphPanel = elements.topologyMapCanvas.querySelector(".topology-graph-panel");
   centerTopologyGraphIfNeeded();
+  revealTopologyGraphWhenPainted(graphScroll);
   graphScroll?.addEventListener("click", (event) => {
     const nodeElement = event.target.closest(".topology-graph-node");
     if (!nodeElement) {
