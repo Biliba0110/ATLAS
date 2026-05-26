@@ -327,6 +327,11 @@ body.auth-open {
   overflow: hidden;
 }
 
+body.page-resuming .app-shell,
+body.page-resuming .page-view.is-active {
+  transform: translateZ(0);
+}
+
 button,
 input,
 select,

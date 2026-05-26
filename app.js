@@ -534,6 +534,7 @@ let pendingRefreshOptions = null;
 let hiddenRefreshPending = false;
 let visibilityResumeTimer = null;
 let visibilityResumeGraceUntil = 0;
+let resumePaintFrame = 0;
 let isManualScanRunning = false;
 let isDeviceSubmitting = false;
 let deviceGroupSelectionMode = "auto";
@@ -1832,7 +1833,8 @@ function bindEvents() {
   document.addEventListener("pointerdown", handleFieldHelpPointerDown, true);
   document.addEventListener("click", handleDocumentClick);
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  window.addEventListener("focus", () => scheduleResumeRefresh({ delay: 650 }));
+  window.addEventListener("pageshow", handlePageResume);
+  window.addEventListener("focus", handlePageResume);
   window.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("hashchange", () => restoreNavigationFromHash({ restoreModal: state.auth?.authenticated }));
 }
@@ -4282,6 +4284,33 @@ function markHiddenRefreshPending() {
   }
 }
 
+function forceResumePaint() {
+  if (isPageHidden()) {
+    return;
+  }
+  if (resumePaintFrame) {
+    window.cancelAnimationFrame?.(resumePaintFrame);
+    resumePaintFrame = 0;
+  }
+  document.body.classList.add("page-resuming");
+  const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+  resumePaintFrame = scheduleFrame(() => {
+    resumePaintFrame = 0;
+    const scrollX = window.scrollX || window.pageXOffset || 0;
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const activeViewElement = document.querySelector(".page-view.is-active");
+    document.documentElement.getBoundingClientRect();
+    document.body.getBoundingClientRect();
+    activeViewElement?.getBoundingClientRect();
+    const nudgeY = scrollY > 0 ? scrollY - 1 : scrollY + 1;
+    window.scrollTo(scrollX, nudgeY);
+    window.scrollTo(scrollX, scrollY);
+    scheduleFrame(() => {
+      document.body.classList.remove("page-resuming");
+    });
+  });
+}
+
 function scheduleResumeRefresh({ delay = 800, forceRender = false } = {}) {
   if (!state.auth?.authenticated || isPageHidden()) {
     return;
@@ -4297,6 +4326,14 @@ function scheduleResumeRefresh({ delay = 800, forceRender = false } = {}) {
     hiddenRefreshPending = false;
     void refreshState(true, forceRender);
   }, resumeDelay);
+}
+
+function handlePageResume() {
+  if (isPageHidden()) {
+    return;
+  }
+  forceResumePaint();
+  scheduleResumeRefresh({ delay: hiddenRefreshPending ? 900 : 650 });
 }
 
 function handleVisibilityChange() {
@@ -4317,7 +4354,7 @@ function handleVisibilityChange() {
 
   if (state.auth?.authenticated) {
     connectLiveStream();
-    scheduleResumeRefresh({ delay: hiddenRefreshPending ? 900 : 650 });
+    handlePageResume();
   }
 }
 
