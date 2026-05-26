@@ -531,6 +531,9 @@ let refreshInFlight = null;
 let queuedRefreshOptions = null;
 let refreshDebounceTimer = null;
 let pendingRefreshOptions = null;
+let hiddenRefreshPending = false;
+let visibilityResumeTimer = null;
+let visibilityResumeGraceUntil = 0;
 let isManualScanRunning = false;
 let isDeviceSubmitting = false;
 let deviceGroupSelectionMode = "auto";
@@ -1827,7 +1830,8 @@ function bindEvents() {
   elements.missingTypeForm?.addEventListener("submit", handleMissingTypeSubmit);
   document.addEventListener("pointerdown", handleFieldHelpPointerDown, true);
   document.addEventListener("click", handleDocumentClick);
-  window.addEventListener("focus", () => scheduleStateRefresh({ silent: true, delay: 250 }));
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener("focus", () => scheduleResumeRefresh({ delay: 650 }));
   window.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("hashchange", () => restoreNavigationFromHash({ restoreModal: state.auth?.authenticated }));
 }
@@ -1889,6 +1893,10 @@ async function finishAuthenticatedBootstrap() {
     window.clearInterval(pollIntervalId);
   }
   pollIntervalId = window.setInterval(() => {
+    if (isPageHidden()) {
+      markHiddenRefreshPending();
+      return;
+    }
     scheduleStateRefresh({ silent: true, delay: 500 });
   }, 30000);
 }
@@ -4263,7 +4271,63 @@ function mergeRefreshOptions(currentOptions, nextOptions) {
   };
 }
 
+function isPageHidden() {
+  return document.visibilityState === "hidden";
+}
+
+function markHiddenRefreshPending() {
+  if (state.auth?.authenticated || isAuthReady) {
+    hiddenRefreshPending = true;
+  }
+}
+
+function scheduleResumeRefresh({ delay = 800, forceRender = false } = {}) {
+  if (!state.auth?.authenticated || isPageHidden()) {
+    return;
+  }
+  if (visibilityResumeTimer) {
+    window.clearTimeout(visibilityResumeTimer);
+  }
+  const resumeDelay = Math.max(250, delay);
+  visibilityResumeGraceUntil = Date.now() + resumeDelay;
+  visibilityResumeTimer = window.setTimeout(() => {
+    visibilityResumeTimer = null;
+    visibilityResumeGraceUntil = 0;
+    hiddenRefreshPending = false;
+    void refreshState(true, forceRender);
+  }, resumeDelay);
+}
+
+function handleVisibilityChange() {
+  if (isPageHidden()) {
+    markHiddenRefreshPending();
+    if (refreshDebounceTimer) {
+      window.clearTimeout(refreshDebounceTimer);
+      refreshDebounceTimer = null;
+      pendingRefreshOptions = null;
+    }
+    if (visibilityResumeTimer) {
+      window.clearTimeout(visibilityResumeTimer);
+      visibilityResumeTimer = null;
+    }
+    disconnectLiveStream();
+    return;
+  }
+
+  if (state.auth?.authenticated) {
+    connectLiveStream();
+    scheduleResumeRefresh({ delay: hiddenRefreshPending ? 900 : 650 });
+  }
+}
+
 function scheduleStateRefresh({ silent = true, forceRender = false, delay = 150 } = {}) {
+  if (isPageHidden() && isAuthReady) {
+    markHiddenRefreshPending();
+    return;
+  }
+  if (visibilityResumeGraceUntil > Date.now()) {
+    delay = Math.max(delay, visibilityResumeGraceUntil - Date.now());
+  }
   pendingRefreshOptions = mergeRefreshOptions(pendingRefreshOptions, { silent, forceRender });
   if (refreshDebounceTimer) {
     window.clearTimeout(refreshDebounceTimer);
@@ -4277,6 +4341,10 @@ function scheduleStateRefresh({ silent = true, forceRender = false, delay = 150 
 }
 
 async function refreshState(silent = false, forceRender = false) {
+  if (isPageHidden() && isAuthReady) {
+    markHiddenRefreshPending();
+    return false;
+  }
   if (refreshDebounceTimer) {
     window.clearTimeout(refreshDebounceTimer);
     refreshDebounceTimer = null;
@@ -4295,6 +4363,10 @@ async function refreshState(silent = false, forceRender = false) {
     if (queuedRefreshOptions) {
       const options = queuedRefreshOptions;
       queuedRefreshOptions = null;
+      if (isPageHidden()) {
+        markHiddenRefreshPending();
+        return;
+      }
       scheduleStateRefresh({ ...options, delay: 80 });
     }
   }
@@ -4304,6 +4376,10 @@ async function refreshStateInternal(silent = false, forceRender = false) {
   try {
     const snapshot = await apiRequest("/state");
     const normalizedSnapshot = normalizeState(snapshot);
+    if (isPageHidden() && isAuthReady) {
+      markHiddenRefreshPending();
+      return true;
+    }
     const shouldSkipFullRender =
       !forceRender &&
       isAuthReady &&
@@ -4371,10 +4447,18 @@ function connectLiveStream() {
   eventSource.onopen = () => {};
 
   eventSource.onmessage = (event) => {
+    if (isPageHidden()) {
+      markHiddenRefreshPending();
+      return;
+    }
     scheduleStateRefresh({ silent: true, delay: getLiveRefreshDelay(event) });
   };
 
   eventSource.onerror = () => {
+    if (isPageHidden()) {
+      markHiddenRefreshPending();
+      return;
+    }
     scheduleStateRefresh({ silent: true, delay: 1500 });
   };
 }
