@@ -140,7 +140,7 @@ Supported link kinds:
 
 `confidence` is `high`, `medium`, or `low`. `graphSource` is `manual`, `ipam`, `discovery`, or `inferred`.
 
-The map is generated automatically. Manual map editing, pinned node positions, and manual topology overrides are intentionally kept for a later version.
+The map is generated automatically from IPAM, service, and discovery data.
 
 ## Discovery Security
 
@@ -160,7 +160,7 @@ Short version:
 1. Open ATLAS as admin.
 2. Go to `Integrations -> Discovery -> Agents`.
 3. Create an agent and copy the generated config while the token is visible.
-4. Put `agent/atlas_agent.py` and `atlas-agent.json` on the machine that should report inventory.
+4. Put `agent/atlas_agent.py` and `atlas-agent.json` on the machine that reports inventory.
 5. Test with:
 
 ```bash

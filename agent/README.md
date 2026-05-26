@@ -295,7 +295,7 @@ How to create the Proxmox token:
 2. Create an API token, for example `discovery`.
 3. Use the full token id: `atlas@pve!discovery`.
 4. Copy the token secret into `proxmox_token_secret`.
-5. Give the token read-only permissions for the nodes/VMs/LXCs ATLAS should see.
+5. Give the token read-only permissions for the nodes/VMs/LXCs collected by ATLAS.
 
 Collects hypervisor/node data:
 
@@ -320,7 +320,7 @@ Collects VM/LXC data:
 
 Guest IP notes:
 
-- For VMs, install and enable QEMU Guest Agent for best IP and OS results.
+- QEMU Guest Agent provides VM IP and OS data when installed and enabled.
 - The collector ignores internal guest interfaces such as `lo`, `docker0`, `br-*`, `veth*`, `cni0`, `flannel*`, and similar CNI/Docker interfaces.
 - IPv6 guest addresses are skipped unless `proxmox_include_ipv6` is true.
 

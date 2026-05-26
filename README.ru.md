@@ -140,7 +140,7 @@ GET /api/topology
 
 `confidence` может быть `high`, `medium`, `low`. `graphSource` может быть `manual`, `ipam`, `discovery`, `inferred`.
 
-Карта строится автоматически. Ручное редактирование карты, pinned positions и manual topology overrides лучше вынести в следующую версию.
+Карта строится автоматически из IPAM, service и discovery data.
 
 ## Безопасность discovery
 

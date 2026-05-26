@@ -295,7 +295,7 @@ Out-of-cluster пример:
 2. Создайте API token, например `discovery`.
 3. Используйте полный token id: `atlas@pve!discovery`.
 4. Скопируйте token secret в `proxmox_token_secret`.
-5. Дайте token read-only permissions на nodes/VMs/LXCs, которые должен видеть ATLAS.
+5. Дайте token read-only permissions на nodes/VMs/LXCs, которые собирает ATLAS.
 
 Собирает hypervisor/node data:
 
@@ -320,7 +320,7 @@ Out-of-cluster пример:
 
 Заметки по guest IP:
 
-- Для VM лучший результат даёт установленный и включенный QEMU Guest Agent.
+- QEMU Guest Agent предоставляет VM IP и OS data, когда он установлен и включен.
 - Collector игнорирует внутренние guest interfaces вроде `lo`, `docker0`, `br-*`, `veth*`, `cni0`, `flannel*` и похожие CNI/Docker interfaces.
 - Guest IPv6 пропускаются, если не включён `proxmox_include_ipv6`.
 
