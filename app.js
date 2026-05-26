@@ -6518,11 +6518,55 @@ function shouldRenderTopologyNow() {
   return !elements.topologyMapCanvas.closest("[hidden]");
 }
 
+function getTopologyDataSignature(topology) {
+  const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
+  const links = Array.isArray(topology.links) ? topology.links : [];
+  const interfaces = Array.isArray(topology.interfaces) ? topology.interfaces : [];
+  const capabilities = topology.capabilities && typeof topology.capabilities === "object" ? topology.capabilities : {};
+  const nodeSignature = nodes.map((node) => {
+    const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
+    return [
+      node.id,
+      node.kind,
+      node.role,
+      node.layer,
+      node.label,
+      node.status,
+      node.ip,
+      node.mac,
+      node.source,
+      node.subnetId,
+      metadata.primaryIp,
+      metadata.ports,
+      metadata.accessPort,
+      metadata.serviceUrl,
+      metadata.hostSourceId,
+      metadata.nodeName,
+    ].map((value) => String(value || "")).join("~");
+  }).join("|");
+  const linkSignature = links.map((link) => [
+    link.id,
+    link.source,
+    link.target,
+    link.kind,
+    link.confidence,
+    link.graphSource,
+  ].map((value) => String(value || "")).join("~")).join("|");
+  return [
+    topology.schema || "",
+    Boolean(capabilities.advancedMode),
+    JSON.stringify(capabilities.layers || {}),
+    nodes.length,
+    links.length,
+    interfaces.length,
+    nodeSignature,
+    linkSignature,
+  ].join("::");
+}
+
 function getTopologyRenderRequestSignature() {
   const topology = state.topology || {};
-  const summary = topology.summary && typeof topology.summary === "object" ? topology.summary : {};
   return [
-    state.meta?.revision || "",
     state.auth?.user?.id || "",
     getLanguage(),
     topologyMode,
@@ -6530,9 +6574,7 @@ function getTopologyRenderRequestSignature() {
     topologyLayerFilter,
     topologySourceFilter,
     topologyStatusFilter,
-    summary.nodes || 0,
-    summary.links || 0,
-    summary.interfaces || 0,
+    getTopologyDataSignature(topology),
     elements.topologyMapCanvas?.clientWidth || 0,
     Boolean(document.fullscreenElement),
   ].join("|");
@@ -6565,6 +6607,10 @@ function renderTopologyMapIfVisible({ force = false } = {}) {
     const cancelFrame = window.cancelAnimationFrame || window.clearTimeout;
     cancelFrame(topologyRenderFrame);
     topologyRenderFrame = 0;
+  }
+  if (force || !elements.topologyMapCanvas?.dataset.topologyRenderSignature) {
+    renderTopologyMap();
+    return;
   }
   const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
   topologyRenderFrame = scheduleFrame(() => {
@@ -6966,19 +7012,6 @@ function applyTopologyViewportToRenderedGraph() {
     const progress = maxZoom > minZoom ? ((topologyZoom - minZoom) / (maxZoom - minZoom)) * 100 : 0;
     range.value = String(Math.min(100, Math.max(0, Math.round(progress))));
   }
-}
-
-function revealTopologyGraphWhenPainted(graphScroll) {
-  if (!graphScroll) {
-    return;
-  }
-  const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
-  scheduleFrame(() => {
-    centerTopologyGraphIfNeeded();
-    scheduleFrame(() => {
-      graphScroll.classList.remove("topology-graph-scroll--preparing");
-    });
-  });
 }
 
 function centerTopologyGraphIfNeeded() {
@@ -8158,8 +8191,7 @@ function renderTopologyGraph(nodes, links) {
           </span>
         `).join("")}
       </div>
-      <div class="topology-graph-scroll topology-graph-scroll--preparing">
-        <div class="topology-graph-loading" aria-hidden="true"></div>
+      <div class="topology-graph-scroll">
         <div class="topology-graph-zoom" data-topology-graph-zoom data-topology-graph-width="${width}" data-topology-graph-height="${height}" data-topology-root-x="${rootCenterX}" data-topology-root-y="${rootCenterY}" style="width: ${width}px; height: ${height}px;">
           <svg class="topology-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(t("topology_graph_title"))}">
             <defs>
@@ -8598,7 +8630,6 @@ function renderTopologyMap() {
   const graphScroll = elements.topologyMapCanvas.querySelector(".topology-graph-scroll");
   const graphPanel = elements.topologyMapCanvas.querySelector(".topology-graph-panel");
   centerTopologyGraphIfNeeded();
-  revealTopologyGraphWhenPainted(graphScroll);
   graphScroll?.addEventListener("click", (event) => {
     const nodeElement = event.target.closest(".topology-graph-node");
     if (!nodeElement) {
