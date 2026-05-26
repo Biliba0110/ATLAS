@@ -2999,12 +2999,10 @@ def load_snapshot(connection: sqlite3.Connection, user: dict) -> dict:
         group for group in all_access_groups if group["id"] in set(user.get("accessGroupIds", []))
     ]
     preferences = load_user_preferences(connection, user["id"])
-    topology = build_topology_payload(connection, user, subnets, devices, access_groups_map)
     return {
         "subnets": subnets,
         "groups": groups,
         "devices": devices,
-        "topology": topology,
         "scanResults": scan_results,
         "history": history,
         "accessGroups": auth_access_groups,

@@ -560,6 +560,10 @@ let topologyPanUserAdjusted = false;
 let topologyPanState = null;
 let topologyRenderFrame = 0;
 let topologyLastRenderRequestSignature = "";
+let topologyLoaded = false;
+let topologyLoadedRevision = 0;
+let topologyLoadInFlight = null;
+let topologyLastDataSignature = "";
 let topologyPopoverNodeById = new Map();
 let topologyPopoverInterfacesByNode = new Map();
 let showAllSubnetsInRegistry = false;
@@ -1593,31 +1597,31 @@ function bindEvents() {
     topologyMode = elements.topologyModeSelect.value === "advanced" ? "advanced" : "simple";
     resetTopologyViewport();
     resetTopologyRenderCache();
-    renderTopologyMapIfVisible({ force: true });
+    ensureTopologyMapReady({ forceRender: true });
   });
   elements.topologySubnetFilter?.addEventListener("change", () => {
     topologySubnetFilter = elements.topologySubnetFilter.value || "all";
     resetTopologyViewport();
     resetTopologyRenderCache();
-    renderTopologyMapIfVisible({ force: true });
+    ensureTopologyMapReady({ forceRender: true });
   });
   elements.topologyLayerFilter?.addEventListener("change", () => {
     topologyLayerFilter = elements.topologyLayerFilter.value || "all";
     resetTopologyViewport();
     resetTopologyRenderCache();
-    renderTopologyMapIfVisible({ force: true });
+    ensureTopologyMapReady({ forceRender: true });
   });
   elements.topologySourceFilter?.addEventListener("change", () => {
     topologySourceFilter = elements.topologySourceFilter.value || "all";
     resetTopologyViewport();
     resetTopologyRenderCache();
-    renderTopologyMapIfVisible({ force: true });
+    ensureTopologyMapReady({ forceRender: true });
   });
   elements.topologyStatusFilter?.addEventListener("change", () => {
     topologyStatusFilter = elements.topologyStatusFilter.value || "all";
     resetTopologyViewport();
     resetTopologyRenderCache();
-    renderTopologyMapIfVisible({ force: true });
+    ensureTopologyMapReady({ forceRender: true });
   });
   elements.registrySectionTabs.forEach((button) => {
     button.addEventListener("click", () => {
@@ -3700,6 +3704,7 @@ function openIntegrationsModal(sectionName = activeIntegrationsSection) {
 }
 
 function applyAuthSession(session) {
+  const previousUserId = state.auth?.user?.id || "";
   state.auth = session && session.authenticated
     ? {
       authenticated: true,
@@ -3719,6 +3724,10 @@ function applyAuthSession(session) {
         canManageAccessGroups: false,
       },
     };
+  const nextUserId = state.auth?.user?.id || "";
+  if (previousUserId !== nextUserId) {
+    resetTopologyState({ clearCanvas: true });
+  }
 
   if (session?.bootstrapLoginHint) {
     elements.bootstrapHint.hidden = false;
@@ -4179,8 +4188,7 @@ function setActiveView(viewName) {
   syncRegistrySections();
   updateNavigationHash();
   if (activeView === "map") {
-    syncTopologyFilterOptions();
-    renderTopologyMapIfVisible();
+    ensureTopologyMapReady();
   }
 }
 
@@ -4305,14 +4313,12 @@ async function refreshStateInternal(silent = false, forceRender = false) {
 
     if (shouldSkipFullRender) {
       state.auth = normalizedSnapshot.auth || state.auth;
-      state.topology = normalizedSnapshot.topology;
       state.settings = normalizedSnapshot.settings;
       if (hasTimeSensitiveAvailabilityRecords()) {
         renderLiveData();
       }
       if (shouldRenderTopologyNow()) {
-        syncTopologyFilterOptions();
-        renderTopologyMapIfVisible();
+        ensureTopologyMapReady();
       }
       syncCurrentUserChrome();
       return true;
@@ -4384,10 +4390,15 @@ function applyState(snapshot) {
   state.subnets = snapshot.subnets;
   state.groups = snapshot.groups;
   state.devices = snapshot.devices;
-  state.topology = snapshot.topology;
   state.scanResults = snapshot.scanResults;
   state.history = snapshot.history;
   state.meta = snapshot.meta;
+  if (snapshot.topology) {
+    state.topology = snapshot.topology;
+    topologyLoaded = true;
+    topologyLoadedRevision = Number(state.meta?.revision || 0);
+    topologyLastDataSignature = getTopologyDataSignature(state.topology);
+  }
   state.settings = snapshot.settings;
   state.accessGroups = snapshot.accessGroups || [];
   state.auth = snapshot.auth || state.auth;
@@ -6518,6 +6529,28 @@ function shouldRenderTopologyNow() {
   return !elements.topologyMapCanvas.closest("[hidden]");
 }
 
+function resetTopologyState({ clearCanvas = false } = {}) {
+  state.topology = normalizeTopology(null);
+  topologyLoaded = false;
+  topologyLoadedRevision = 0;
+  topologyLastDataSignature = "";
+  topologyPopoverNodeById = new Map();
+  topologyPopoverInterfacesByNode = new Map();
+  resetTopologyRenderCache();
+  if (clearCanvas && elements.topologyMapCanvas) {
+    elements.topologyMapCanvas.innerHTML = "";
+  }
+}
+
+function renderTopologyLoadingState() {
+  if (!elements.topologyMapCanvas || elements.topologyMapCanvas.dataset.topologyRenderSignature) {
+    return;
+  }
+  elements.topologyMapCanvas.innerHTML = `
+    <div class="result-card result-card--muted">${escapeHtml(t("topology_loading"))}</div>
+  `;
+}
+
 function getTopologyDataSignature(topology) {
   const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
   const links = Array.isArray(topology.links) ? topology.links : [];
@@ -6587,6 +6620,64 @@ function resetTopologyRenderCache() {
   }
 }
 
+async function refreshTopologySnapshot({ force = false, silent = true } = {}) {
+  if (!state.auth?.authenticated) {
+    return false;
+  }
+  const currentRevision = Number(state.meta?.revision || 0);
+  if (!force && topologyLoaded && topologyLoadedRevision === currentRevision) {
+    renderTopologyMapIfVisible();
+    return true;
+  }
+  if (topologyLoadInFlight) {
+    return topologyLoadInFlight;
+  }
+
+  topologyLoadInFlight = (async () => {
+    try {
+      const topology = normalizeTopology(await apiRequest("/topology"));
+      const nextSignature = getTopologyDataSignature(topology);
+      const changed = nextSignature !== topologyLastDataSignature;
+      state.topology = topology;
+      topologyLoaded = true;
+      topologyLoadedRevision = Number(state.meta?.revision || 0);
+      topologyLastDataSignature = nextSignature;
+      if (shouldRenderTopologyNow()) {
+        syncTopologyFilterOptions();
+        renderTopologyMapIfVisible({ force: !elements.topologyMapCanvas?.dataset.topologyRenderSignature || changed });
+      }
+      return true;
+    } catch (error) {
+      console.error(error);
+      if (!silent) {
+        showToast(error.message || t("server_data_load_failed"), true);
+      }
+      return false;
+    } finally {
+      topologyLoadInFlight = null;
+    }
+  })();
+  return topologyLoadInFlight;
+}
+
+function ensureTopologyMapReady({ forceRender = false, refresh = false } = {}) {
+  if (!shouldRenderTopologyNow()) {
+    return;
+  }
+
+  if (topologyLoaded) {
+    syncTopologyFilterOptions();
+    renderTopologyMapIfVisible({ force: forceRender });
+  } else {
+    renderTopologyLoadingState();
+  }
+
+  const currentRevision = Number(state.meta?.revision || 0);
+  if (refresh || !topologyLoaded || topologyLoadedRevision !== currentRevision) {
+    void refreshTopologySnapshot({ force: true, silent: true });
+  }
+}
+
 function renderTopologyMapIfVisible({ force = false } = {}) {
   if (!shouldRenderTopologyNow()) {
     return;
@@ -6627,7 +6718,7 @@ function renderLiveData() {
   renderGroupsTable();
   renderDevicesTable();
   renderServicesList();
-  renderTopologyMapIfVisible();
+  ensureTopologyMapReady();
   renderHistoryTable();
   renderAdminPanels();
   renderStats();
@@ -11980,7 +12071,8 @@ function normalizeState(rawState, baseGroups = []) {
   const groups = normalizeGroupsList(rawGroups, subnets, baseGroups);
   const rawDevices = Array.isArray(rawState?.devices) ? rawState.devices : [];
   const devices = rawDevices.map((entry) => normalizeDevice(entry, subnets, groups, preferences.customDeviceTypes));
-  const topology = normalizeTopology(rawState?.topology);
+  const hasTopology = Boolean(rawState && Object.prototype.hasOwnProperty.call(rawState, "topology"));
+  const topology = hasTopology ? normalizeTopology(rawState?.topology) : null;
   const scanResults = Array.isArray(rawState?.scanResults)
     ? rawState.scanResults.map(normalizeScanResult)
     : [];
@@ -12266,7 +12358,9 @@ function applyStateToTarget(targetState, snapshot) {
   targetState.subnets = snapshot.subnets;
   targetState.groups = snapshot.groups;
   targetState.devices = snapshot.devices;
-  targetState.topology = snapshot.topology;
+  if (snapshot.topology) {
+    targetState.topology = snapshot.topology;
+  }
   targetState.scanResults = snapshot.scanResults;
   targetState.history = snapshot.history;
   targetState.meta = snapshot.meta;

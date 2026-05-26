@@ -155,6 +155,15 @@ def node_by_label(topology: dict, label: str) -> dict:
 
 
 class TopologyBuilderTest(unittest.TestCase):
+    def test_main_snapshot_excludes_topology_payload(self) -> None:
+        connection = connect_memory_db()
+        self.addCleanup(connection.close)
+        add_subnet(connection)
+
+        snapshot = server.load_snapshot(connection, ADMIN_USER)
+
+        self.assertNotIn("topology", snapshot)
+
     def test_ipam_subnet_host_and_service_relationships(self) -> None:
         connection = connect_memory_db()
         self.addCleanup(connection.close)
