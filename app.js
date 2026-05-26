@@ -3657,6 +3657,10 @@ function handleDocumentClick(event) {
     hideFieldHelp(true);
   }
 
+  if (!event.target.closest(".topology-graph-node") && !event.target.closest(".topology-node-popover")) {
+    hideTopologyNodePopover();
+  }
+
   if (elements.userMenuDropdown && !elements.userMenuDropdown.hidden && !event.target.closest("#hero-account-menu")) {
     closeUserMenu();
   }
@@ -6854,8 +6858,15 @@ function renderTopologySubnetContext(subnets, nodes) {
   if (!subnets.length) {
     return "";
   }
+  const memberCounts = new Map();
+  nodes.forEach((node) => {
+    if (!node.subnetId) {
+      return;
+    }
+    memberCounts.set(node.subnetId, (memberCounts.get(node.subnetId) || 0) + 1);
+  });
   const cards = subnets.map((subnet) => {
-    const memberCount = nodes.filter((node) => node.subnetId === subnet.subnetId).length;
+    const memberCount = memberCounts.get(subnet.subnetId) || 0;
     const metadata = subnet.metadata && typeof subnet.metadata === "object" ? subnet.metadata : {};
     const details = [
       subnet.cidr,
@@ -7194,6 +7205,73 @@ function topologyDistributedAngle(range, index, count) {
 
 function topologySemanticAngle(node, index, count) {
   return topologyDistributedAngle(topologyLayoutAngleRange(topologyLayoutClass(node)), index, count);
+}
+
+function topologyDirectedLane(node, depth) {
+  const kind = String(node?.kind || "").toLowerCase();
+  const role = String(node?.role || "").toLowerCase();
+  const layoutClass = topologyLayoutClass(node);
+  if (layoutClass === "core") {
+    return 0;
+  }
+  if (layoutClass === "network") {
+    return 1;
+  }
+  if (kind === "hypervisor") {
+    return 1;
+  }
+  if (kind === "vm" || kind === "lxc" || role === "host") {
+    return 2;
+  }
+  if (layoutClass === "service" || layoutClass === "kubernetes") {
+    return 3;
+  }
+  if (layoutClass === "iot") {
+    return 4;
+  }
+  return Math.min(5, Math.max(1, depth || 1));
+}
+
+function layoutTopologyDirectedRows(graphNodes, positions, bounds, nodeWidth, nodeHeight, rootNode, depthById, parentById, nodesById) {
+  const laneGapX = topologyMode === "advanced" ? 328 : 292;
+  const rowGapY = topologyMode === "advanced" ? 54 : 46;
+  const laneItems = new Map();
+  graphNodes.forEach((node) => {
+    const lane = node.id === rootNode.id ? 0 : topologyDirectedLane(node, depthById.get(node.id) || 1);
+    laneItems.set(lane, [...(laneItems.get(lane) || []), node]);
+  });
+
+  const lanes = [...laneItems.keys()].sort((left, right) => left - right);
+  const totalWidth = (lanes.length - 1) * laneGapX + nodeWidth;
+  const startX = Math.max(36, bounds.width / 2 - totalWidth / 2);
+  lanes.forEach((lane, laneIndex) => {
+    const items = (laneItems.get(lane) || [])
+      .slice()
+      .sort((left, right) => {
+        const leftParent = nodesById.get(parentById.get(left.id));
+        const rightParent = nodesById.get(parentById.get(right.id));
+        const parentDelta = String(leftParent?.label || "").localeCompare(String(rightParent?.label || ""), getLanguage(), { sensitivity: "base" });
+        if (parentDelta) {
+          return parentDelta;
+        }
+        const rankDelta = topologyGraphNodeSortRank(left) - topologyGraphNodeSortRank(right);
+        if (rankDelta) {
+          return rankDelta;
+        }
+        return String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" });
+      });
+    const rowStep = nodeHeight + rowGapY;
+    const totalHeight = Math.max(nodeHeight, items.length * rowStep - rowGapY);
+    const startY = Math.max(36, bounds.height / 2 - totalHeight / 2);
+    items.forEach((node, index) => {
+      positions.set(node.id, {
+        x: Math.min(startX + laneIndex * laneGapX, Math.max(36, bounds.width - nodeWidth - 36)),
+        y: Math.min(startY + index * rowStep, Math.max(36, bounds.height - nodeHeight - 36)),
+        width: nodeWidth,
+        height: nodeHeight,
+      });
+    });
+  });
 }
 
 function topologyChildFanAngle(parentAngle, node, siblingIndex, siblingCount) {
@@ -7621,7 +7699,7 @@ function renderTopologyGraph(nodes, links) {
   if (!nodes.length) {
     return "";
   }
-  const nodeLimit = topologyMode === "advanced" ? 160 : 90;
+  const nodeLimit = topologyMode === "advanced" ? 96 : 64;
   const nodesById = getTopologyNodeMap(nodes);
   const rootNode = nodes.find((node) => node.kind === "core-router")
     || nodes.find((node) => node.role === "network" && node.kind !== "subnet")
@@ -7632,14 +7710,20 @@ function renderTopologyGraph(nodes, links) {
     if (!nodesById.has(link.source) || !nodesById.has(link.target)) {
       return;
     }
-    adjacency.set(link.source, [...(adjacency.get(link.source) || []), link.target]);
-    adjacency.set(link.target, [...(adjacency.get(link.target) || []), link.source]);
+    if (!adjacency.has(link.source)) {
+      adjacency.set(link.source, []);
+    }
+    if (!adjacency.has(link.target)) {
+      adjacency.set(link.target, []);
+    }
+    adjacency.get(link.source).push(link.target);
+    adjacency.get(link.target).push(link.source);
   });
   const orderedNodeIds = [];
   const visited = new Set();
   const queue = [rootNode.id];
-  while (queue.length) {
-    const nodeId = queue.shift();
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+    const nodeId = queue[queueIndex];
     if (!nodeId || visited.has(nodeId) || !nodesById.has(nodeId)) {
       continue;
     }
@@ -7749,6 +7833,16 @@ function renderTopologyGraph(nodes, links) {
   const sortedDepths = [...nodesByDepth.keys()].sort((left, right) => left - right);
   const widestDepthCount = Math.max(1, ...[...nodesByDepth.values()].map((items) => items.length));
   const deepestDepth = Math.max(1, ...sortedDepths);
+  const directedLaneCounts = new Map();
+  graphNodes.forEach((node) => {
+    const lane = node.id === rootNode.id ? 0 : topologyDirectedLane(node, depthById.get(node.id) || 1);
+    directedLaneCounts.set(lane, (directedLaneCounts.get(lane) || 0) + 1);
+  });
+  const directedLaneCount = Math.max(1, directedLaneCounts.size);
+  const directedMaxRows = Math.max(1, ...directedLaneCounts.values());
+  const useDirectedLayout = graphNodes.length > (topologyMode === "advanced" ? 78 : 52)
+    || graphLinks.length > (topologyMode === "advanced" ? 120 : 76)
+    || hostedServiceClusters.reduce((sum, cluster) => sum + cluster.services.length, 0) > (topologyMode === "advanced" ? 42 : 28);
   const breadthPressure = Math.min(0.72, widestDepthCount * 0.024);
   const depthPressure = Math.min(0.28, deepestDepth * 0.035);
   const ringScaleX = (topologyMode === "advanced" ? 1.34 : 1.24) + breadthPressure;
@@ -7769,8 +7863,10 @@ function renderTopologyGraph(nodes, links) {
   const maxRadius = Math.max(260, ...ringRadii.values());
   const maxRadiusX = maxRadius * ringScaleX;
   const maxRadiusY = maxRadius * ringScaleY;
-  const width = Math.ceil(Math.max(1160, (maxRadiusX + nodeWidth + 144) * 2, hostedClusterWidth * 2, hypervisorClusterWidth * 2));
-  const height = Math.ceil(Math.max(760, (maxRadiusY + nodeHeight + 118) * 2));
+  const directedWidth = directedLaneCount * (topologyMode === "advanced" ? 328 : 292) + nodeWidth + 144;
+  const directedHeight = directedMaxRows * (nodeHeight + (topologyMode === "advanced" ? 54 : 46)) + 140;
+  const width = Math.ceil(Math.max(1160, (maxRadiusX + nodeWidth + 144) * 2, hostedClusterWidth * 2, hypervisorClusterWidth * 2, directedWidth));
+  const height = Math.ceil(Math.max(760, (maxRadiusY + nodeHeight + 118) * 2, directedHeight));
   const centerX = width / 2;
   const centerY = height / 2;
   const availableWidth = Math.max(720, (elements.topologyMapCanvas?.clientWidth || 1120) - 36);
@@ -7789,7 +7885,10 @@ function renderTopologyGraph(nodes, links) {
     : 0;
   const positions = new Map();
   const angleById = new Map([[rootNode.id, -Math.PI / 2]]);
-  sortedDepths.forEach((depth) => {
+  if (useDirectedLayout) {
+    layoutTopologyDirectedRows(graphNodes, positions, { width, height }, nodeWidth, nodeHeight, rootNode, depthById, parentById, nodesById);
+  } else {
+    sortedDepths.forEach((depth) => {
     const depthNodes = nodesByDepth.get(depth) || [];
     const sortedDepthNodes = depthNodes
       .slice()
@@ -7864,18 +7963,26 @@ function renderTopologyGraph(nodes, links) {
       });
     });
   });
-  resolveTopologyGraphCollisions(graphNodes, positions, { width, height }, new Set([rootNode.id]));
+  }
+  if (!useDirectedLayout) {
+    resolveTopologyGraphCollisions(graphNodes, positions, { width, height }, new Set([rootNode.id]));
+  }
   const protectedNodeIds = getTopologyProtectedNodeIds(graphNodes);
+  const clusterObstacleNodeIds = useDirectedLayout ? new Set() : protectedNodeIds;
   const hypervisorClusterNodeIds = layoutTopologyHypervisorGuestRows(
     hypervisorGuestClusters,
     positions,
     { width, height },
     nodeWidth,
     nodeHeight,
-    protectedNodeIds,
+    clusterObstacleNodeIds,
   );
-  resolveTopologyClusterObstacleCollisions(hypervisorGuestClusters, positions, { width, height }, protectedNodeIds);
-  resolveTopologyHostedServiceClusterCollisions(hypervisorGuestClusters, positions, { width, height });
+  if (!useDirectedLayout) {
+    resolveTopologyClusterObstacleCollisions(hypervisorGuestClusters, positions, { width, height }, protectedNodeIds);
+  }
+  if (!useDirectedLayout) {
+    resolveTopologyHostedServiceClusterCollisions(hypervisorGuestClusters, positions, { width, height });
+  }
   const hostedClusterNodeIds = layoutTopologyHostedServiceRows(
     hostedServiceClusters,
     positions,
@@ -7884,28 +7991,32 @@ function renderTopologyGraph(nodes, links) {
     nodeHeight,
     parentById,
     nodesById,
-    new Set([...protectedNodeIds, ...hypervisorClusterNodeIds]),
+    useDirectedLayout ? new Set([...hypervisorClusterNodeIds]) : new Set([...protectedNodeIds, ...hypervisorClusterNodeIds]),
   );
-  resolveTopologyClusterObstacleCollisions(
-    hostedServiceClusters,
-    positions,
-    { width, height },
-    new Set([...protectedNodeIds, ...hypervisorClusterNodeIds]),
-  );
-  resolveTopologyHostedServiceClusterCollisions(hostedServiceClusters, positions, { width, height });
-  resolveTopologyHostedServiceClusterCollisions([...hypervisorGuestClusters, ...hostedServiceClusters], positions, { width, height });
-  resolveTopologyClusterObstacleCollisions(
-    [...hypervisorGuestClusters, ...hostedServiceClusters],
-    positions,
-    { width, height },
-    protectedNodeIds,
-  );
-  resolveTopologyGraphCollisions(
-    graphNodes,
-    positions,
-    { width, height },
-    new Set([rootNode.id, ...hypervisorClusterNodeIds, ...hostedClusterNodeIds]),
-  );
+  if (!useDirectedLayout) {
+    resolveTopologyClusterObstacleCollisions(
+      hostedServiceClusters,
+      positions,
+      { width, height },
+      new Set([...protectedNodeIds, ...hypervisorClusterNodeIds]),
+    );
+    resolveTopologyHostedServiceClusterCollisions(hostedServiceClusters, positions, { width, height });
+    resolveTopologyHostedServiceClusterCollisions([...hypervisorGuestClusters, ...hostedServiceClusters], positions, { width, height });
+    resolveTopologyClusterObstacleCollisions(
+      [...hypervisorGuestClusters, ...hostedServiceClusters],
+      positions,
+      { width, height },
+      protectedNodeIds,
+    );
+  }
+  if (!useDirectedLayout) {
+    resolveTopologyGraphCollisions(
+      graphNodes,
+      positions,
+      { width, height },
+      new Set([rootNode.id, ...hypervisorClusterNodeIds, ...hostedClusterNodeIds]),
+    );
+  }
   const rootPosition = positions.get(rootNode.id) || {
     x: centerX - nodeWidth / 2,
     y: centerY - nodeHeight / 2,
@@ -7953,7 +8064,7 @@ function renderTopologyGraph(nodes, links) {
     `;
   }).join("");
 
-  const ringItems = sortedDepths
+  const ringItems = useDirectedLayout ? "" : sortedDepths
     .filter((depth) => depth > 0)
     .map((depth) => {
       const radius = ringRadii.get(depth) || 0;
@@ -7970,7 +8081,7 @@ function renderTopologyGraph(nodes, links) {
     const serviceAccentClass = serviceAccent ? " topology-graph-node--service-accent" : "";
     const serviceAccentStyle = serviceAccent ? ` style="--topology-service-accent: ${escapeHtml(serviceAccent)};"` : "";
     return `
-      <g class="topology-graph-node topology-graph-node--${escapeHtml(node.role || "unknown")} topology-graph-node--kind-${escapeHtml(node.kind || "unknown")} topology-graph-node--${escapeHtml(node.status || "unknown")}${serviceAccentClass}"${serviceAccentStyle} transform="translate(${position.x} ${position.y})">
+      <g class="topology-graph-node topology-graph-node--${escapeHtml(node.role || "unknown")} topology-graph-node--kind-${escapeHtml(node.kind || "unknown")} topology-graph-node--${escapeHtml(node.status || "unknown")}${serviceAccentClass}"${serviceAccentStyle} transform="translate(${position.x} ${position.y})" role="button" tabindex="0" data-topology-node-id="${escapeHtml(node.id)}">
         <title>${escapeHtml([node.label || node.id, node.cidr || node.ip, formatTopologyLabel("topology_kind", node.kind)].filter(Boolean).join(" · "))}</title>
         <rect width="${nodeWidth}" height="${nodeHeight}" rx="8" ry="8"></rect>
         <circle class="topology-graph-node__status" cx="16" cy="19" r="5"></circle>
@@ -8215,10 +8326,129 @@ function renderTopologyNodeCard(node, linksByNode, interfacesByNode) {
   `;
 }
 
+function getTopologyNodePopover() {
+  let popover = document.querySelector(".topology-node-popover");
+  if (popover) {
+    return popover;
+  }
+
+  popover = document.createElement("aside");
+  popover.className = "topology-node-popover";
+  popover.hidden = true;
+  popover.setAttribute("role", "dialog");
+  document.body.append(popover);
+  return popover;
+}
+
+function hideTopologyNodePopover() {
+  const popover = document.querySelector(".topology-node-popover");
+  if (popover) {
+    popover.hidden = true;
+  }
+}
+
+function topologyNodeMetadataValue(node, ...keys) {
+  const metadata = node?.metadata && typeof node.metadata === "object" ? node.metadata : {};
+  for (const key of keys) {
+    const value = metadata[key];
+    if (Array.isArray(value) && value.length) {
+      return value.map((item) => String(item || "").trim()).filter(Boolean).join(", ");
+    }
+    if (value !== undefined && value !== null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  return "";
+}
+
+function getTopologyNodePopoverRows(node, interfaces) {
+  const ip = node.ip
+    || topologyNodeMetadataValue(node, "primaryIp", "ip", "podIP", "clusterIP")
+    || interfaces.map((item) => item.ip).filter(Boolean)[0]
+    || "";
+  const ports = topologyNodeMetadataValue(node, "ports", "port", "containerPorts");
+  const accessPort = topologyNodeMetadataValue(node, "accessPort", "nodePort", "publishedPort");
+  const serviceUrl = topologyNodeMetadataValue(node, "serviceUrl", "url", "publicUrl");
+  const host = topologyNodeMetadataValue(node, "host", "hostName", "hostSourceId", "nodeName");
+  const os = topologyNodeMetadataValue(node, "os", "image", "version");
+  const reachable = serviceUrl || (ip && accessPort ? `${ip}:${accessPort}` : "");
+  return [
+    ["IP", ip],
+    ["Access", reachable],
+    ["Ports", [ports, accessPort && !String(ports).includes(accessPort) ? accessPort : ""].filter(Boolean).join(" / ")],
+    ["URL", serviceUrl],
+    ["Host", host],
+    ["Kind", formatTopologyLabel("topology_kind", node.kind)],
+    ["Status", formatTopologyLabel("topology_status", node.status)],
+    ["Source", formatTopologyLabel("topology_source", node.source)],
+    ["OS/Image", os],
+    ["MAC", node.mac || topologyNodeMetadataValue(node, "mac")],
+  ].filter(([, value]) => String(value || "").trim());
+}
+
+function renderTopologyNodePopover(node, interfaces) {
+  const rows = getTopologyNodePopoverRows(node, interfaces);
+  const primaryAccess = rows.find(([label]) => ["Access", "URL", "IP"].includes(label))?.[1] || "";
+  return `
+    <div class="topology-node-popover__header">
+      <div>
+        <strong>${escapeHtml(node.label || node.id)}</strong>
+        <span>${escapeHtml([formatTopologyLabel("topology_kind", node.kind), node.agentName].filter(Boolean).join(" · "))}</span>
+      </div>
+      <button type="button" class="ghost-button topology-node-popover__close" aria-label="${escapeHtml(t("close_button"))}">×</button>
+    </div>
+    ${primaryAccess ? `<code class="topology-node-popover__primary">${escapeHtml(primaryAccess)}</code>` : ""}
+    <dl class="topology-node-popover__details">
+      ${rows.map(([label, value]) => `
+        <div>
+          <dt>${escapeHtml(label)}</dt>
+          <dd>${escapeHtml(value)}</dd>
+        </div>
+      `).join("")}
+    </dl>
+  `;
+}
+
+function positionTopologyNodePopover(popover, clientX, clientY) {
+  const gap = 14;
+  const padding = 12;
+  popover.style.left = `${padding}px`;
+  popover.style.top = `${padding}px`;
+  const rect = popover.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(padding, clientX + gap),
+    Math.max(padding, window.innerWidth - rect.width - padding),
+  );
+  const top = Math.min(
+    Math.max(padding, clientY + gap),
+    Math.max(padding, window.innerHeight - rect.height - padding),
+  );
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+}
+
+function showTopologyNodePopover(nodeId, clientX, clientY) {
+  const topology = state.topology || {};
+  const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
+  const interfaces = Array.isArray(topology.interfaces) ? topology.interfaces : [];
+  const node = nodes.find((item) => item.id === nodeId);
+  if (!node) {
+    hideTopologyNodePopover();
+    return;
+  }
+  const nodeInterfaces = interfaces.filter((item) => item.nodeId === nodeId).slice(0, 8);
+  const popover = getTopologyNodePopover();
+  popover.innerHTML = renderTopologyNodePopover(node, nodeInterfaces);
+  popover.hidden = false;
+  positionTopologyNodePopover(popover, clientX, clientY);
+  popover.querySelector(".topology-node-popover__close")?.addEventListener("click", hideTopologyNodePopover, { once: true });
+}
+
 function renderTopologyMap() {
   if (!elements.topologyMapCanvas) {
     return;
   }
+  hideTopologyNodePopover();
   const effectiveRequestSignature = getTopologyRenderRequestSignature();
   if (
     effectiveRequestSignature
@@ -8241,50 +8471,64 @@ function renderTopologyMap() {
     return;
   }
 
-  const nodesById = getTopologyNodeMap(nodes);
-  const linksByNode = new Map();
-  links.forEach((link) => {
-    linksByNode.set(link.source, [...(linksByNode.get(link.source) || []), link]);
-    linksByNode.set(link.target, [...(linksByNode.get(link.target) || []), link]);
-  });
-  const interfacesByNode = new Map();
-  interfaces.forEach((item) => {
-    interfacesByNode.set(item.nodeId, [...(interfacesByNode.get(item.nodeId) || []), item]);
-  });
-
-  const roleOrder = ["network", "host", "compute", "workload", "iot"];
-  const detailNodeLimitPerGroup = 90;
-  const groupedNodes = roleOrder.map((role) => ({
-    role,
-    nodes: nodes
-      .filter((node) => node.role === role)
-      .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" })),
-  }))
-    .map((group) => ({
-      ...group,
-      total: group.nodes.length,
-      nodes: group.nodes.slice(0, detailNodeLimitPerGroup),
-    }))
-    .filter((group) => group.total);
-
-  const linkRows = links.slice(0, topologyMode === "advanced" ? 80 : 24).map((link) => {
-    const source = nodesById.get(link.source);
-    const target = nodesById.get(link.target);
-    return `
-      <li class="topology-link-row topology-link-row--${escapeHtml(link.confidence || "low")}">
-        <span>${escapeHtml(source?.label || link.source)}</span>
-        <span>${escapeHtml(formatTopologyLabel("topology_link", link.kind))}</span>
-        <span>${escapeHtml(target?.label || link.target)}</span>
-        <code>${escapeHtml([
-          formatTopologyLabel("topology_confidence", link.confidence),
-          link.graphSource ? formatTopologyLabel("topology_graph_source", link.graphSource) : "",
-        ].filter(Boolean).join(" · "))}</code>
-      </li>
-    `;
-  }).join("");
   const graphMap = renderTopologyGraph(nodes, links);
-  const computeMap = renderTopologyComputeMap(nodes, links);
-  const detailPanels = topologyMode === "advanced" ? `
+  const renderAdvancedDetails = topologyMode === "advanced" && nodes.length <= 80 && links.length <= 140;
+  const nodesById = renderAdvancedDetails ? getTopologyNodeMap(nodes) : new Map();
+  const linksByNode = new Map();
+  const interfacesByNode = new Map();
+  let groupedNodes = [];
+  let linkRows = "";
+  if (renderAdvancedDetails) {
+    links.forEach((link) => {
+      if (!linksByNode.has(link.source)) {
+        linksByNode.set(link.source, []);
+      }
+      if (!linksByNode.has(link.target)) {
+        linksByNode.set(link.target, []);
+      }
+      linksByNode.get(link.source).push(link);
+      linksByNode.get(link.target).push(link);
+    });
+    interfaces.forEach((item) => {
+      if (!interfacesByNode.has(item.nodeId)) {
+        interfacesByNode.set(item.nodeId, []);
+      }
+      interfacesByNode.get(item.nodeId).push(item);
+    });
+
+    const roleOrder = ["network", "host", "compute", "workload", "iot"];
+    const detailNodeLimitPerGroup = 90;
+    groupedNodes = roleOrder.map((role) => ({
+      role,
+      nodes: nodes
+        .filter((node) => node.role === role)
+        .sort((left, right) => String(left.label || "").localeCompare(String(right.label || ""), getLanguage(), { sensitivity: "base" })),
+    }))
+      .map((group) => ({
+        ...group,
+        total: group.nodes.length,
+        nodes: group.nodes.slice(0, detailNodeLimitPerGroup),
+      }))
+      .filter((group) => group.total);
+
+    linkRows = links.slice(0, 80).map((link) => {
+      const source = nodesById.get(link.source);
+      const target = nodesById.get(link.target);
+      return `
+        <li class="topology-link-row topology-link-row--${escapeHtml(link.confidence || "low")}">
+          <span>${escapeHtml(source?.label || link.source)}</span>
+          <span>${escapeHtml(formatTopologyLabel("topology_link", link.kind))}</span>
+          <span>${escapeHtml(target?.label || link.target)}</span>
+          <code>${escapeHtml([
+            formatTopologyLabel("topology_confidence", link.confidence),
+            link.graphSource ? formatTopologyLabel("topology_graph_source", link.graphSource) : "",
+          ].filter(Boolean).join(" · "))}</code>
+        </li>
+      `;
+    }).join("");
+  }
+  const computeMap = renderAdvancedDetails ? renderTopologyComputeMap(nodes, links) : "";
+  const detailPanels = renderAdvancedDetails ? `
     ${computeMap}
     <div class="topology-columns">
       ${groupedNodes.map((group) => `
@@ -8326,6 +8570,31 @@ function renderTopologyMap() {
   const graphScroll = elements.topologyMapCanvas.querySelector(".topology-graph-scroll");
   const graphPanel = elements.topologyMapCanvas.querySelector(".topology-graph-panel");
   centerTopologyGraphIfNeeded();
+  graphScroll?.addEventListener("click", (event) => {
+    const nodeElement = event.target.closest(".topology-graph-node");
+    if (!nodeElement) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    showTopologyNodePopover(nodeElement.dataset.topologyNodeId || "", event.clientX, event.clientY);
+  });
+  graphScroll?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    const nodeElement = event.target.closest(".topology-graph-node");
+    if (!nodeElement) {
+      return;
+    }
+    event.preventDefault();
+    const rect = nodeElement.getBoundingClientRect();
+    showTopologyNodePopover(
+      nodeElement.dataset.topologyNodeId || "",
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+    );
+  });
   graphScroll?.addEventListener("wheel", (event) => {
     if (!event.ctrlKey && !event.metaKey) {
       if (!document.fullscreenElement) {
@@ -8348,6 +8617,10 @@ function renderTopologyMap() {
     if (event.button !== 0) {
       return;
     }
+    if (event.target.closest(".topology-graph-node")) {
+      return;
+    }
+    hideTopologyNodePopover();
     topologyPanState = {
       startX: event.clientX,
       startY: event.clientY,

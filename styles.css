@@ -4038,6 +4038,101 @@ body[data-modal-blur="on"] .modal-backdrop {
   fill: #ffb648;
 }
 
+.topology-graph-node {
+  cursor: pointer;
+}
+
+.topology-graph-node:focus-visible rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.topology-node-popover {
+  position: fixed;
+  z-index: 1200;
+  width: min(340px, calc(100vw - 24px));
+  max-height: min(70vh, 520px);
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 96%, #020617);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.34);
+  user-select: text;
+}
+
+.topology-node-popover[hidden] {
+  display: none;
+}
+
+.topology-node-popover__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.topology-node-popover__header div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.topology-node-popover__header strong,
+.topology-node-popover__header span {
+  overflow-wrap: anywhere;
+}
+
+.topology-node-popover__header span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.topology-node-popover__close {
+  min-width: 32px;
+  padding-inline: 8px;
+}
+
+.topology-node-popover__primary {
+  display: block;
+  border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+.topology-node-popover__details {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.topology-node-popover__details div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.topology-node-popover__details dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topology-node-popover__details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+}
+
 .topology-flow-section {
   display: grid;
   gap: 10px;
