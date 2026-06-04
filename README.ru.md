@@ -40,6 +40,22 @@ python3 server.py
 
 После первого входа пароль нужно сменить.
 
+## Docker
+
+Контейнер слушает порт `4173` и хранит SQLite data в `/app/data`.
+
+```bash
+docker compose up -d
+```
+
+Compose создаёт volume `atlas-data` и публикует `4173:4173`.
+
+Image и host port задаются через переменные окружения:
+
+```bash
+ATLAS_IMAGE=registry.example.net/bohdan/atlas:latest ATLAS_HTTP_PORT=4180 docker compose up -d
+```
+
 ## Типовой сценарий
 
 1. Добавьте подсети.

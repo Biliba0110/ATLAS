@@ -1,0 +1,78 @@
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Python and tests
+        run: |
+          python -m compileall server.py agent/atlas_agent.py
+          python -m unittest discover -s tests
+
+      - name: Validate compose
+        run: docker compose config
+
+      - name: Resolve image names
+        id: images
+        env:
+          DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+          DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE }}
+        run: |
+          REGISTRY="${DOCKER_REGISTRY:-registry.homie.pp.ua}"
+          IMAGE="${DOCKER_IMAGE:-$REGISTRY/bohdan/atlas:latest}"
+          IMAGE_REPO="${IMAGE%:*}"
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "image_repo=$IMAGE_REPO" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Docker login
+        env:
+          DOCKER_REGISTRY: ${{ steps.images.outputs.registry }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            printf '%s\n' "$DOCKER_PASSWORD" | docker login "$DOCKER_REGISTRY" -u "$DOCKER_USERNAME" --password-stdin
+          else
+            echo "Docker registry credentials are not set; trying without login"
+          fi
+
+      - name: Build and push image
+        env:
+          IMAGE: ${{ steps.images.outputs.image }}
+          IMAGE_REPO: ${{ steps.images.outputs.image_repo }}
+          SHORT_SHA: ${{ steps.images.outputs.short_sha }}
+        run: |
+          LATEST_IMAGE="$IMAGE_REPO:latest"
+          SHA_IMAGE="$IMAGE_REPO:$SHORT_SHA"
+
+          docker build \
+            -t "$IMAGE" \
+            -t "$LATEST_IMAGE" \
+            -t "$SHA_IMAGE" \
+            .
+
+          docker push "$IMAGE"
+          if [ "$IMAGE" != "$LATEST_IMAGE" ]; then
+            docker push "$LATEST_IMAGE"
+          fi
+          docker push "$SHA_IMAGE"

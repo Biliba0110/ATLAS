@@ -40,6 +40,22 @@ On a clean database ATLAS creates a bootstrap account:
 
 Change that password after the first sign-in.
 
+## Docker
+
+The container listens on port `4173` and stores SQLite data in `/app/data`.
+
+```bash
+docker compose up -d
+```
+
+Compose creates the `atlas-data` volume and maps `4173:4173`.
+
+Image and host port can be set through environment variables:
+
+```bash
+ATLAS_IMAGE=registry.example.net/bohdan/atlas:latest ATLAS_HTTP_PORT=4180 docker compose up -d
+```
+
 ## Typical Workflow
 
 1. Add subnets.

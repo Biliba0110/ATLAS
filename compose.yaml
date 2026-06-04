@@ -1,0 +1,36 @@
+services:
+  atlas:
+    build: .
+    image: ${ATLAS_IMAGE:-registry.homie.pp.ua/bohdan/atlas:latest}
+    restart: unless-stopped
+    environment:
+      ATLAS_HOST: 0.0.0.0
+      ATLAS_PORT: 4173
+      ATLAS_DB_PATH: /app/data/atlas.db
+      ATLAS_SCAN_INTERVAL: ${ATLAS_SCAN_INTERVAL:-90}
+      ATLAS_SCAN_TIMEOUT_MS: ${ATLAS_SCAN_TIMEOUT_MS:-1000}
+      ATLAS_SCAN_CONCURRENCY: ${ATLAS_SCAN_CONCURRENCY:-32}
+      ATLAS_HISTORY_LIMIT: ${ATLAS_HISTORY_LIMIT:-200}
+      ATLAS_SESSION_TTL_SECONDS: ${ATLAS_SESSION_TTL_SECONDS:-1209600}
+      ATLAS_DISCOVERY_MAX_BODY_BYTES: ${ATLAS_DISCOVERY_MAX_BODY_BYTES:-524288}
+      ATLAS_DISCOVERY_MAX_ITEMS: ${ATLAS_DISCOVERY_MAX_ITEMS:-500}
+      ATLAS_DISCOVERY_MAX_RAW_BYTES: ${ATLAS_DISCOVERY_MAX_RAW_BYTES:-16384}
+      ATLAS_DISCOVERY_MAX_PACKETS_PER_RUN: ${ATLAS_DISCOVERY_MAX_PACKETS_PER_RUN:-128}
+      ATLAS_DISCOVERY_RETRY_AFTER_SECONDS: ${ATLAS_DISCOVERY_RETRY_AFTER_SECONDS:-30}
+    ports:
+      - "${ATLAS_HTTP_PORT:-4173}:4173"
+    volumes:
+      - atlas-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:4173/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  atlas-data:
